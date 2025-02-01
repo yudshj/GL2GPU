@@ -1,0 +1,4 @@
+.DS_Store
+@eaDir
+.idea
+api/output/*.json

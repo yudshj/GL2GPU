@@ -1,0 +1,102 @@
+
+body {
+    font-family: Arial, sans-serif;
+    margin: 20px;
+}
+
+.input-group {
+    margin-bottom: 10px;
+}
+
+.input-group label {
+    display: inline-block;
+    width: 100px;
+}
+
+.urls {
+    margin-top: 20px;
+}
+
+.urls a {
+    display: block;
+    margin-bottom: 5px;
+}
+
+.remove-btn {
+    margin-left: 10px;
+    color: red;
+    cursor: pointer;
+}
+
+#countdown {
+    width: 100%;
+    height: 100%;
+    font-size: 10in;
+    color: red;
+    position: fixed;
+    top: 0;
+    left: 0;
+    background-color: rgba(255, 255, 255, 0.7);
+    display: none;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+}
+
+iframe {
+    width: 100%;
+    height: 100%;
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+}
+
+/* 模态对话框样式 */
+.modal {
+    display: none;
+    position: fixed;
+    z-index: 1;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+    background-color: rgb(0, 0, 0);
+    background-color: rgba(0, 0, 0, 0.4);
+    justify-content: center;
+    align-items: center;
+}
+
+.modal-content {
+    background-color: #fefefe;
+    margin: auto;
+    padding: 20px;
+    border: 1px solid #888;
+    width: 80%;
+    max-width: 400px;
+    text-align: center;
+}
+
+.modal-content input {
+    width: 80%;
+    padding: 10px;
+    margin: 10px 0;
+}
+
+/* Run 按钮样式 */
+#run_button {
+    font-size: 24px;
+    color: red;
+    font-weight: bold;
+    padding: 10px 20px;
+    cursor: pointer;
+}
+
+#gen_button {
+    font-size: 24px;
+    color: green;
+    font-weight: bold;
+    padding: 10px 20px;
+    cursor: pointer;
+}

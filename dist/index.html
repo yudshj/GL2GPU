@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <title>三、二、一：GL2GPU！</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <h1>三、二、一：GL2GPU！</h1>
+    <div class="input-group">
+        <label for="id">ID:</label>
+        <input type="text" id="id" name="id" value="test">
+    </div>
+    <button onclick="runUrls()" id="run_button">Run!</button>
+    <button onclick="generateUrls()" id="gen_button">生成</button>
+    <h2 style="margin-top: 20px;">Details:</h2>
+    <div id="configurations"></div>
+    <button onclick="addConfiguration()">添加配置</button>
+    <button onclick="generateUrls()">生成</button>
+    <div class="urls" id="urls"></div>
+    <div id="countdown"></div>
+
+    <!-- 模态对话框 -->
+    <div id="idModal" class="modal">
+        <div class="modal-content">
+            <p>请输入ID<br>格式为：人_机_OS_浏览器<br>（例如 zhangsan_laptop_windows_chrome）:</p>
+            <input type="text" id="modalIdInput">
+            <button onclick="confirmId()">确定</button>
+        </div>
+    </div>
+
+    <script>
+        let configCount = 0;
+        let urls = [];
+        let currentUrlIndex = 0;
+        let openedWindow = null;
+        let status = null;  // in 'waiting', 'ok', 'done'
+        const search = window.location.search;
+        const urlParams = new URLSearchParams(search);
+        const scale = urlParams.has('scale') ? parseFloat(urlParams.get('scale')) : 1;
+        const browser = urlParams.has('browser') ? urlParams.get('browser') : 'chrome';
+
+        const apis = [
+            'webgpu',
+            'webgl'
+        ];
+        const benchmarks = 
+            // (browser === 'firefox' ? ['motionmark'] : 
+            [
+            'motionmark',
+            'jsgamesbench',
+            'aquarium',
+        ];
+        // );
+        const scales = [
+            500000,
+            100000,
+            200000,
+            300000,
+            400000,
+            // 500000,
+            600000,
+            700000,
+            800000,
+            900000,
+            1000000
+        ];
+
+        const defaultConfigs = [];
+
+        // 添加变化的 webgpu 配置
+        for (const numObjects of scales) {
+            for (const api of apis) {
+                for (const benchmark of benchmarks) {
+                    defaultConfigs.push({
+                        api: api,
+                        benchmark: benchmark,
+                        numObjects: scale * numObjects,
+                        maxFrames: 100,
+                        turbo: -1
+                    });
+                }
+            }
+        }
+
+        console.log(defaultConfigs);
+
+        function addConfiguration() {
+            const defaultConfig = defaultConfigs[configCount % defaultConfigs.length];
+            configCount++;
+            const configurationsDiv = document.getElementById('configurations');
+            const configDiv = document.createElement('div');
+            configDiv.classList.add('input-group');
+            configDiv.id = `config${configCount}`;
+
+            configDiv.innerHTML = `
+                <label for="numObjects${configCount}">numObjects${configCount}:</label>
+                <input type="text" id="numObjects${configCount}" name="numObjects${configCount}" value="${defaultConfig.numObjects}">
+                <label for="maxFrames${configCount}">maxFrames${configCount}:</label>
+                <input type="text" id="maxFrames${configCount}" name="maxFrames${configCount}" value="${defaultConfig.maxFrames}">
+                <label for="turbo${configCount}">turbo${configCount}:</label>
+                <input type="text" id="turbo${configCount}" name="turbo${configCount}" value="${defaultConfig.turbo}">
+                <label for="api${configCount}">API:</label>
+                <select id="api${configCount}" name="api${configCount}">
+                    <option value="webgl" ${defaultConfig.api === 'webgl' ? 'selected' : ''}>WebGL</option>
+                    <option value="webgpu" ${defaultConfig.api === 'webgpu' ? 'selected' : ''}>WebGPU</option>
+                </select>
+                <label for="benchmark${configCount}">Benchmark:</label>
+                <select id="benchmark${configCount}" name="benchmark${configCount}">
+                    <option value="motionmark" ${defaultConfig.benchmark === 'motionmark' ? 'selected' : ''}>MotionMark</option>
+                    <option value="aquarium" ${defaultConfig.benchmark === 'aquarium' ? 'selected' : ''}>Aquarium</option>
+                    <option value="jsgamesbench" ${defaultConfig.benchmark === 'jsgamesbench' ? 'selected' : ''}>JSGamesBench</option>
+                </select>
+                <span class="remove-btn" onclick="removeConfiguration(${configCount})">删除</span>
+            `;
+
+            configurationsDiv.appendChild(configDiv);
+        }
+
+        function removeConfiguration(configId) {
+            const configDiv = document.getElementById(`config${configId}`);
+            configDiv.remove();
+        }
+
+        function generateUrls() {
+            const id = document.getElementById('id').value;
+            const configurationsDiv = document.getElementById('configurations');
+            const configDivs = configurationsDiv.getElementsByClassName('input-group');
+
+            const urlsDiv = document.getElementById('urls');
+            urlsDiv.innerHTML = '';
+            urls = [];
+
+            for (let i = 0; i < configDivs.length; i++) {
+                const configId = configDivs[i].id.replace('config', '');
+                const numObjects = document.getElementById(`numObjects${configId}`).value;
+                const maxFrames = document.getElementById(`maxFrames${configId}`).value;
+                const turbo = document.getElementById(`turbo${configId}`).value;
+                const api = document.getElementById(`api${configId}`).value;
+                const benchmark = document.getElementById(`benchmark${configId}`).value;
+                const _url = new URL(window.location.href);
+                const _host = _url.origin;
+                const url = `${_host}/${api}/${benchmark}/?numObjects=${numObjects}&maxFrames=${maxFrames}&turbo=${turbo}&id=${id}`;
+                urls.push(url);
+                const a = document.createElement('a');
+                a.href = url;
+                a.target = '_blank';
+                a.textContent = url;
+                urlsDiv.appendChild(a);
+            }
+        }
+
+        async function runUrls() {
+            currentUrlIndex = 0;
+            await countdown(5);
+            if (urls.length > 0) {
+                await runNextUrl();
+            }
+        }
+
+        async function runNextUrl() {
+            if (currentUrlIndex < urls.length) {
+                status = 'waiting';
+                const url = urls[currentUrlIndex];
+                openedWindow = window.open(url, '_blank');
+                const interval = setInterval(() => {
+                    if (status === 'ok') {
+                        openedWindow.close();
+                        clearInterval(interval);
+                        currentUrlIndex++;
+                        countdown(3).then(() => runNextUrl());
+                    }
+                }, 1000);
+            } else {
+                status = 'done';
+                alert('所有URL已运行完毕');
+            }
+
+
+        }
+
+        function countdown(seconds) {
+            return new Promise(resolve => {
+                const countdownDiv = document.getElementById('countdown');
+                let counter = seconds;
+                countdownDiv.textContent = counter;
+                countdownDiv.style.display = 'flex';
+                const interval = setInterval(() => {
+                    countdownDiv.textContent = counter--;
+                    if (counter < 0) {
+
+                        clearInterval(interval);
+                        // countdownDiv.style.display = 'none';
+                        resolve();
+                    } else {
+                    }
+                }, 1000);
+            });
+        }
+
+        window.addEventListener('message', function (event) {
+            if (!event.data.startsWith('<GL2GPU>')) {
+                return;
+            }
+            const data = JSON.parse(event.data.substring(8));
+            console.log('Received message:', data);  // Log the received message to the console
+
+            // Check if the status in the received data is 'ok'
+            if (data.status === 'ok') {
+                // Update the document title with the average frame time in milliseconds
+                document.title = currentUrlIndex + ' : ' + data.avg_ft + ' ms';
+                status = 'ok';
+            }
+        });
+
+        // 检查URL中是否有id参数
+        function checkUrlForId() {
+            const urlParams = new URLSearchParams(window.location.search);
+            if (!urlParams.has('id')) {
+                showModal();
+            } else {
+                document.getElementById('id').value = urlParams.get('id');
+            }
+        }
+
+        // 显示模态对话框
+        function showModal() {
+            const modal = document.getElementById('idModal');
+            modal.style.display = 'flex';
+        }
+
+        // 确认ID并隐藏模态对话框
+        function confirmId() {
+            const idInput = document.getElementById('modalIdInput').value;
+            document.getElementById('id').value = idInput;
+            const modal = document.getElementById('idModal');
+            modal.style.display = 'none';
+            generateUrls();
+        }
+
+        // 初始化时添加9个配置
+        window.onload = function () {
+            checkUrlForId();
+            for (let i = 0; i < defaultConfigs.length; i++) {
+                addConfiguration();
+            }
+            generateUrls();
+        };
+    </script>
+</body>
+</html>

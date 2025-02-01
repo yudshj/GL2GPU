@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <title>三、二、一：GL2GPU！</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <h1>三、二、一：GL2GPU！</h1>
+    <div class="input-group">
+        <label for="id">ID:</label>
+        <input type="text" id="id" name="id" value="test">
+    </div>
+    <button onclick="runUrls()" id="run_button">Run!</button>
+    <h2 style="margin-top: 20px;">Details:</h2>
+    <div id="configurations"></div>
+    <button onclick="addConfiguration()">添加配置</button>
+    <button onclick="generateUrls()">生成</button>
+    <div class="urls" id="urls"></div>
+    <div id="countdown"></div>
+    <iframe id="runnerFrame"></iframe>
+
+    <!-- 模态对话框 -->
+    <div id="idModal" class="modal">
+        <div class="modal-content">
+            <p>请输入ID<br>格式为：人_机_OS_浏览器<br>（例如 zhangsan_laptop_windows_chrome）:</p>
+            <input type="text" id="modalIdInput">
+            <button onclick="confirmId()">确定</button>
+        </div>
+    </div>
+
+    <script>
+        let configCount = 0;
+        let urls = [];
+        let currentUrlIndex = 0;
+
+        const defaultConfigs = [
+            { api: 'webgpu', benchmark: 'aquarium', numObjects: 500000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'motionmark', numObjects: 500000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'meta', numObjects: 500000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'motionmark', numObjects: 500000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'aquarium', numObjects: 500000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'meta', numObjects: 500000, maxFrames: 100, turbo: -1 },
+
+            { api: 'webgpu', benchmark: 'motionmark', numObjects: 100000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'aquarium', numObjects: 100000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'meta', numObjects: 100000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'motionmark', numObjects: 200000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'aquarium', numObjects: 200000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'meta', numObjects: 200000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'motionmark', numObjects: 300000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'aquarium', numObjects: 300000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'meta', numObjects: 300000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'motionmark', numObjects: 400000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'aquarium', numObjects: 400000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'meta', numObjects: 400000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'motionmark', numObjects: 600000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'aquarium', numObjects: 600000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'meta', numObjects: 600000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'motionmark', numObjects: 700000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'aquarium', numObjects: 700000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'meta', numObjects: 700000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'motionmark', numObjects: 800000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'aquarium', numObjects: 800000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'meta', numObjects: 800000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'motionmark', numObjects: 900000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'aquarium', numObjects: 900000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'meta', numObjects: 900000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'motionmark', numObjects: 1000000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'aquarium', numObjects: 1000000, maxFrames: 100, turbo: -1 },
+            { api: 'webgpu', benchmark: 'meta', numObjects: 1000000, maxFrames: 100, turbo: -1 },
+
+
+
+            
+            { api: 'webgl', benchmark: 'motionmark', numObjects: 100000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'aquarium', numObjects: 100000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'meta', numObjects: 100000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'motionmark', numObjects: 200000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'aquarium', numObjects: 200000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'meta', numObjects: 200000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'motionmark', numObjects: 300000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'aquarium', numObjects: 300000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'meta', numObjects: 300000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'motionmark', numObjects: 400000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'aquarium', numObjects: 400000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'meta', numObjects: 400000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'motionmark', numObjects: 600000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'aquarium', numObjects: 600000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'meta', numObjects: 600000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'motionmark', numObjects: 700000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'aquarium', numObjects: 700000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'meta', numObjects: 700000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'motionmark', numObjects: 800000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'aquarium', numObjects: 800000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'meta', numObjects: 800000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'motionmark', numObjects: 900000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'aquarium', numObjects: 900000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'meta', numObjects: 900000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'motionmark', numObjects: 1000000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'aquarium', numObjects: 1000000, maxFrames: 100, turbo: -1 },
+            { api: 'webgl', benchmark: 'meta', numObjects: 1000000, maxFrames: 100, turbo: -1 },
+
+
+        ];
+
+        function addConfiguration() {
+            const defaultConfig = defaultConfigs[configCount % defaultConfigs.length];
+            configCount++;
+            const configurationsDiv = document.getElementById('configurations');
+            const configDiv = document.createElement('div');
+            configDiv.classList.add('input-group');
+            configDiv.id = `config${configCount}`;
+
+            configDiv.innerHTML = `
+                <label for="numObjects${configCount}">numObjects${configCount}:</label>
+                <input type="text" id="numObjects${configCount}" name="numObjects${configCount}" value="${defaultConfig.numObjects}">
+                <label for="maxFrames${configCount}">maxFrames${configCount}:</label>
+                <input type="text" id="maxFrames${configCount}" name="maxFrames${configCount}" value="${defaultConfig.maxFrames}">
+                <label for="turbo${configCount}">turbo${configCount}:</label>
+                <input type="text" id="turbo${configCount}" name="turbo${configCount}" value="${defaultConfig.turbo}">
+                <label for="api${configCount}">API:</label>
+                <select id="api${configCount}" name="api${configCount}">
+                    <option value="webgl" ${defaultConfig.api === 'webgl' ? 'selected' : ''}>WebGL</option>
+                    <option value="webgpu" ${defaultConfig.api === 'webgpu' ? 'selected' : ''}>WebGPU</option>
+                </select>
+                <label for="benchmark${configCount}">Benchmark:</label>
+                <select id="benchmark${configCount}" name="benchmark${configCount}">
+                    <option value="motionmark" ${defaultConfig.benchmark === 'motionmark' ? 'selected' : ''}>MotionMark</option>
+                    <option value="aquarium" ${defaultConfig.benchmark === 'aquarium' ? 'selected' : ''}>Aquarium</option>
+                    <option value="meta" ${defaultConfig.benchmark === 'meta' ? 'selected' : ''}>Meta</option>
+                </select>
+                <span class="remove-btn" onclick="removeConfiguration(${configCount})">删除</span>
+            `;
+
+            configurationsDiv.appendChild(configDiv);
+        }
+
+        function removeConfiguration(configId) {
+            const configDiv = document.getElementById(`config${configId}`);
+            configDiv.remove();
+        }
+
+        function generateUrls() {
+            const id = document.getElementById('id').value;
+            const configurationsDiv = document.getElementById('configurations');
+            const configDivs = configurationsDiv.getElementsByClassName('input-group');
+
+            const urlsDiv = document.getElementById('urls');
+            urlsDiv.innerHTML = '';
+            urls = [];
+
+            for (let i = 0; i < configDivs.length; i++) {
+                const configId = configDivs[i].id.replace('config', '');
+                const numObjects = document.getElementById(`numObjects${configId}`).value;
+                const maxFrames = document.getElementById(`maxFrames${configId}`).value;
+                const turbo = document.getElementById(`turbo${configId}`).value;
+                const api = document.getElementById(`api${configId}`).value;
+                const benchmark = document.getElementById(`benchmark${configId}`).value;
+                const _url = new URL(window.location.href);
+                const _host = _url.origin;
+                const url = `${_host}/${api}/${benchmark}/?numObjects=${numObjects}&maxFrames=${maxFrames}&turbo=${turbo}&id=${id}`;
+                urls.push(url);
+                const a = document.createElement('a');
+                a.href = url;
+                a.target = '_blank';
+                a.textContent = url;
+                urlsDiv.appendChild(a);
+            }
+        }
+
+        async function runUrls() {
+            await countdown(3);
+            const frame = document.getElementById('runnerFrame');
+            frame.name = 'runnerFrame' + Date.now();
+            currentUrlIndex = 0;
+            if (urls.length > 0) {
+                await runNextUrl(frame);
+            }
+        }
+
+        async function runNextUrl(frame) {
+            if (currentUrlIndex < urls.length) {
+                frame.src = urls[currentUrlIndex];
+                frame.style.display = 'block';
+                currentUrlIndex++;
+                document.title = `Running on ${currentUrlIndex}: ${frame.src}`;
+            } else {
+                frame.style.display = 'none';
+                alert('所有URL已运行完毕');
+            }
+        }
+
+        function countdown(seconds) {
+            return new Promise(resolve => {
+                const countdownDiv = document.getElementById('countdown');
+                let counter = seconds;
+                countdownDiv.textContent = counter;
+                countdownDiv.style.display = 'flex';
+                const interval = setInterval(() => {
+                    counter--;
+                    if (counter <= 0) {
+                        clearInterval(interval);
+                        countdownDiv.style.display = 'none';
+                        resolve();
+                    } else {
+                        countdownDiv.textContent = counter;
+                    }
+                }, 1000);
+            });
+        }
+
+        window.addEventListener('message', async function (event) {
+            console.log('Received message:', event.data);
+            if (event.data === 'GL2GPU Done') {
+                const frame = document.getElementById('runnerFrame');
+                frame.style.display = 'none';
+                frame.src = '';
+                await countdown(3);
+                await runNextUrl(frame);
+            }
+        });
+
+        // 检查URL中是否有id参数
+        function checkUrlForId() {
+            const urlParams = new URLSearchParams(window.location.search);
+            if (!urlParams.has('id')) {
+                showModal();
+            } else {
+                document.getElementById('id').value = urlParams.get('id');
+            }
+        }
+
+        // 显示模态对话框
+        function showModal() {
+            const modal = document.getElementById('idModal');
+            modal.style.display = 'flex';
+        }
+
+        // 确认ID并隐藏模态对话框
+        function confirmId() {
+            const idInput = document.getElementById('modalIdInput').value;
+            document.getElementById('id').value = idInput;
+            const modal = document.getElementById('idModal');
+            modal.style.display = 'none';
+            generateUrls();
+        }
+
+        // 初始化时添加9个配置
+        window.onload = function () {
+            checkUrlForId();
+            for (let i = 0; i < defaultConfigs.length; i++) {
+                addConfiguration();
+            }
+            generateUrls();
+        };
+    </script>
+</body>
+
+</html>

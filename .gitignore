@@ -17,9 +17,11 @@ output
 /playwright-report/
 /playwright/.cache/
 traces
-/dist
 /examples/resources/
 extension/webpack/
 package-lock.json
 yarn.lock
 *.zip
+.DS_Store
+dist/api/output*
+@eaDir
