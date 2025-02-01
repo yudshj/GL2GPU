@@ -1,0 +1,25 @@
+<body>
+    <canvas id="canvas" style="display: none;"></canvas>
+    <pre id="output"></pre>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const code = document.getElementById('output');
+        const gl = canvas.getContext('webgl2');
+        const argv = new Map(window.location.search.substr(1).split('&').map((pair) => pair.split('=')));
+        const url = argv.get('url');
+        const type = {
+            vertex: WebGL2RenderingContext.VERTEX_SHADER,
+            fragment: WebGL2RenderingContext.FRAGMENT_SHADER,
+        }[argv.get('type')];
+        console.log('fetching', url);
+        fetch(url).then((response) => response.text()).then((shaderSource) => {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, shaderSource);
+            gl.compileShader(shader);
+            const shaderDebugExtension = gl.getExtension('WEBGL_debug_shaders');
+            const translatedShader = shaderDebugExtension.getTranslatedShaderSource(shader);
+            console.log(translatedShader);
+            code.innerText = translatedShader;
+        })
+    </script>
+</body>

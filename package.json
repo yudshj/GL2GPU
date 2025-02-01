@@ -1,0 +1,27 @@
+{
+  "name": "webgl-to-webgpu",
+  "version": "1.0.0",
+  "main": "index.js",
+  "author": "Yudong Han <maghsk2017@gmail.com>",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.3.0",
+    "@typescript/lib-dom": "npm:@types/web@^0.0.99",
+    "@webgpu/types": "^0.1.32",
+    "terser-webpack-plugin": "^5.3.9",
+    "ts-loader": "^9.4.3",
+    "ts-shader-loader": "^2.0.2",
+    "tsc-watch": "^6.0.4",
+    "webpack": "^5.93.0",
+    "webpack-cli": "^5.1.4"
+  },
+  "scripts": {
+    "setup": "yarn install; yarn global add typescript ts-node"
+  },
+  "dependencies": {
+    "@types/chrome": "^0.0.239",
+    "fast-hash-code": "^2.1.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.3"
+  }
+}

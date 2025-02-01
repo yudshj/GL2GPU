@@ -1,0 +1,1 @@
+https://developer.chrome.com/docs/extensions/reference/action/#injecting-a-content-script-on-click

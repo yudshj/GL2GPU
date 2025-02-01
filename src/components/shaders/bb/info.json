@@ -1,0 +1,62 @@
+[
+    {
+        "glsl_path": "1.glsl",
+        "wgsl_path": "1.wgsl",
+        "attributes": [
+            {
+                "name": "position",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "color",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            }
+        ],
+        "uniforms": [
+            {
+                "name": "scale",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "time",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "offsetX",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "offsetY",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "scalar",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "scalarOffset",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            }
+        ],
+        "samplers": [],
+        "glsl": "attribute vec4 position;\nattribute vec4 color;\n\nuniform float scale;\nuniform float time;\nuniform float offsetX;\nuniform float offsetY;\nuniform float scalar;\nuniform float scalarOffset;\n\nvarying vec4 v_color;\n\nvoid main() {\n\n    float fade = mod(scalarOffset + time * scalar / 10.0, 1.0);\n\n    if (fade < 0.5) {\n        fade = fade * 2.0;\n    } else {\n        fade = (1.0 - fade) * 2.0;\n    }\n\n    float xpos = position.x * scale;\n    float ypos = position.y * scale;\n\n    float angle = 3.14159 * 2.0 * fade;\n    float xrot = xpos * cos(angle) - ypos * sin(angle);\n    float yrot = xpos * sin(angle) + ypos * cos(angle);\n\n    xpos = xrot + offsetX;\n    ypos = yrot + offsetY;\n\n    v_color = vec4(fade, 1.0 - fade, 0.0, 1.0) + color;\n    gl_Position = vec4(xpos, ypos, 0.0, 1.0);\n}",
+        "wgsl": "struct VertexInput {\n    @location(0) position: vec4<f32>,\n    @location(1) color: vec4<f32>,\n};\n\nstruct VertexOutput {\n    @builtin(position) position: vec4<f32>,\n    @location(0) color: vec4<f32>,\n};\n\n@vertex\nfn main(input: VertexInput) -> VertexOutput {\n    var fade: f32 = fract(_hyd_uniforms_.scalarOffset + _hyd_uniforms_.time * _hyd_uniforms_.scalar / 10.0);\n\n    if (fade < 0.5) {\n        fade = fade * 2.0;\n    } else {\n        fade = (1.0 - fade) * 2.0;\n    }\n\n    var xpos: f32 = input.position.x * _hyd_uniforms_.scale;\n    var ypos: f32 = input.position.y * _hyd_uniforms_.scale;\n\n    var angle: f32 = 3.14159 * 2.0 * fade;\n    var xrot: f32 = xpos * cos(angle) - ypos * sin(angle);\n    var yrot: f32 = xpos * sin(angle) + ypos * cos(angle);\n\n    xpos = xrot + _hyd_uniforms_.offsetX;\n    ypos = yrot + _hyd_uniforms_.offsetY;\n\n    var v_color: vec4<f32> = vec4<f32>(fade, 1.0 - fade, 0.0, 1.0) + input.color;\n    \n    return VertexOutput(vec4<f32>(xpos, ypos, 0.0, 1.0), v_color);\n}\n"
+    },
+    {
+        "glsl_path": "2.glsl",
+        "wgsl_path": "2.wgsl",
+        "attributes": [],
+        "uniforms": [],
+        "samplers": [],
+        "glsl": "#ifdef GL_ES\nprecision mediump float;\n#endif\n\nvarying vec4 v_color;\n\nvoid main() {\n    gl_FragColor = v_color;\n}",
+        "wgsl": "@fragment\nfn main(@location(0) v_color: vec4<f32>) -> @location(0) vec4<f32> {\n    return v_color;\n}"
+    }
+]

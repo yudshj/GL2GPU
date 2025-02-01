@@ -1,0 +1,238 @@
+5.glsl
+uniform sampler2D rampSampler;
+uniform sampler2D colorSampler;
+
+9.glsl
+uniform mat4 viewProjection;
+uniform vec3 lightWorldPos;
+uniform mat4 world;
+uniform mat4 viewInverse;
+uniform mat4 worldInverseTranspose;
+
+3.glsl
+uniform vec4 colorMult;
+uniform sampler2D colorMap;
+
+4.glsl
+uniform mat4 viewProjection;
+uniform mat4 world;
+uniform vec3 worldVelocity;
+uniform vec3 worldAcceleration;
+uniform float timeRange;
+uniform float time;
+uniform float timeOffset;
+uniform float frameDuration;
+uniform float numFrames;
+
+23.glsl
+uniform vec4 lightColor;
+uniform sampler2D diffuse;
+uniform vec4 specular;
+uniform sampler2D normalMap;  // #normalMap
+uniform sampler2D reflectionMap;
+uniform samplerCube skybox;
+uniform float shininess;
+uniform float specularFactor;
+
+7.glsl
+uniform vec4 lightColor;
+uniform vec4 ambient;
+uniform sampler2D diffuse;
+uniform vec4 specular;
+uniform float shininess;
+uniform float specularFactor;
+uniform float fogPower;
+uniform float fogMult;
+uniform float fogOffset;
+uniform vec4 fogColor;
+
+8.glsl
+uniform vec4 lightColor;
+uniform vec4 ambient;
+uniform sampler2D diffuse;
+uniform vec4 specular;
+uniform sampler2D normalMap;
+uniform samplerCube skybox; // #reflecton
+uniform float shininess;
+uniform float specularFactor;
+uniform float fogPower;
+uniform float fogMult;
+uniform float fogOffset;
+uniform vec4 fogColor;
+
+6.glsl
+uniform mat4 viewProjection;
+uniform mat4 world;
+uniform mat4 viewInverse;
+uniform vec3 worldVelocity;
+uniform vec3 worldAcceleration;
+uniform float timeRange;
+uniform float time;
+uniform float timeOffset;
+uniform float frameDuration;
+uniform float numFrames;
+
+22.glsl
+uniform vec4 lightColor;
+uniform sampler2D diffuse;
+uniform vec4 specular;
+uniform sampler2D normalMap;  // #normalMap
+uniform sampler2D reflectionMap;
+uniform samplerCube skybox;
+uniform float shininess;
+uniform float specularFactor;
+uniform float refractionFudge;
+uniform float eta;
+uniform float tankColorFudge;
+uniform float fogPower;
+uniform float fogMult;
+uniform float fogOffset;
+uniform vec4 fogColor;
+
+21.glsl
+uniform vec4 lightColor;
+uniform vec4 ambient;
+uniform sampler2D diffuse;
+uniform vec4 specular;
+uniform sampler2D normalMap;  // #normalMap
+uniform float shininess;
+uniform float specularFactor;
+uniform float fogPower;
+uniform float fogMult;
+uniform float fogOffset;
+uniform vec4 fogColor;
+
+19.glsl
+uniform vec4 lightColor;
+uniform vec4 ambient;
+uniform sampler2D diffuse;
+uniform vec4 specular;
+uniform sampler2D normalMap;
+uniform sampler2D reflectionMap; // #reflection
+uniform samplerCube skybox; // #reflecton
+uniform float shininess;
+uniform float specularFactor;
+uniform float fogPower;
+uniform float fogMult;
+uniform float fogOffset;
+uniform vec4 fogColor;
+
+20.glsl
+uniform vec4 lightColor;
+uniform vec4 ambient;
+uniform sampler2D diffuse;
+uniform vec4 specular;
+uniform sampler2D normalMap;  // #normalMap
+uniform float shininess;
+uniform float specularFactor;
+uniform float fogPower;
+uniform float fogMult;
+uniform float fogOffset;
+uniform vec4 fogColor;
+
+2.glsl
+uniform vec3 lightWorldPos;
+uniform mat4 viewInverse;
+uniform mat4 viewProjection;
+uniform vec3 worldPosition;
+uniform vec3 nextPosition;
+uniform float scale;
+uniform float time;
+uniform float fishLength;
+uniform float fishWaveLength;
+uniform float fishBendAmount;
+
+16.glsl
+uniform vec4 lightColor;
+uniform vec4 ambient;
+uniform sampler2D diffuse;
+uniform vec4 specular;
+uniform float shininess;
+uniform float specularFactor;
+uniform float fogPower;
+uniform float fogMult;
+uniform float fogOffset;
+uniform vec4 fogColor;
+
+18.glsl
+uniform vec4 lightColor;
+uniform sampler2D diffuse;
+uniform vec4 specular;
+uniform sampler2D reflectionMap;
+uniform samplerCube skybox;
+uniform float shininess;
+uniform float specularFactor;
+
+15.glsl
+uniform vec4 lightColor;
+uniform vec4 ambient;
+uniform sampler2D diffuse;
+uniform vec4 specular;
+uniform float shininess;
+uniform float specularFactor;
+uniform float fogPower;
+uniform float fogMult;
+uniform float fogOffset;
+uniform vec4 fogColor;
+
+17.glsl
+uniform vec4 lightColor;
+uniform vec4 ambient;
+uniform sampler2D diffuse;
+uniform vec4 specular;
+uniform float shininess;
+uniform float specularFactor;
+
+14.glsl
+uniform vec4 lightColor;
+uniform sampler2D diffuse;
+uniform vec4 specular;
+uniform sampler2D reflectionMap;
+uniform samplerCube skybox;
+uniform float shininess;
+uniform float specularFactor;
+uniform float refractionFudge;
+uniform float eta;
+uniform float tankColorFudge;
+uniform float fogPower;
+uniform float fogMult;
+uniform float fogOffset;
+uniform vec4 fogColor;
+
+12.glsl
+uniform mat4 world;
+uniform mat4 viewProjection;
+uniform vec3 lightWorldPos;
+uniform mat4 viewInverse;
+uniform mat4 worldInverseTranspose;
+uniform float time;
+
+13.glsl
+uniform vec4 lightColor;
+uniform vec4 ambient;
+uniform sampler2D diffuse;
+uniform vec4 specular;
+uniform float shininess;
+uniform float specularFactor;
+uniform float fogPower;
+uniform float fogMult;
+uniform float fogOffset;
+uniform vec4 fogColor;
+
+1.glsl
+uniform mat4 world;
+uniform mat4 viewProjection;
+
+10.glsl
+uniform mat4 viewProjection;
+uniform vec3 lightWorldPos;
+uniform mat4 world;
+uniform mat4 viewInverse;
+uniform mat4 worldInverseTranspose;
+
+11.glsl
+uniform mat4 viewProjection;
+uniform vec3 lightWorldPos;
+uniform mat4 world;
+uniform mat4 viewInverse;
+uniform mat4 worldInverseTranspose;

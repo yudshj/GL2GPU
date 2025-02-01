@@ -1,0 +1,9 @@
+# Set the default behavior, in case people don't have core.autocrlf set.
+* text=auto
+
+*.glsl text eol=lf
+*.wgsl text eol=lf
+*.vs text eol=lf
+*.fs text eol=lf
+*.vert text eol=lf
+*.frag text eol=lf

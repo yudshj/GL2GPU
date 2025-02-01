@@ -1,0 +1,1330 @@
+[
+    {
+        "attributes": [
+            {
+                "name": "position",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "texCoord",
+                "glsl_type": "vec2",
+                "wgsl_type": "vec2<f32>"
+            }
+        ],
+        "uniforms": [
+            {
+                "name": "world",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "viewProjection",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            }
+        ],
+        "samplers": [],
+        "debug_info": "{\"glsl\": \"attribute vec4 position;\\nattribute vec2 texCoord;\\nvarying vec2 v_texCoord;\\nuniform mat4 world;\\nuniform mat4 viewProjection;\\nvoid main() {\\n  v_texCoord = texCoord;\\n  gl_Position = (viewProjection * world * position);\\n}\", \"wgsl\": \"// struct Uniforms {\\n//     world : mat4x4<f32>,\\n//     viewProjection : mat4x4<f32>,\\n//     colorMult : vec4<f32>,\\n// };\\n// @group(0) @binding(0) var<uniform> _hyd_uniforms_ : Uniforms;\\n\\nstruct VertexOutput {\\n    @builtin(position) gl_Position: vec4<f32>,\\n    @location(0) v_texCoord: vec2<f32>,\\n}\\n\\n@vertex\\nfn main(\\n    @location(0) position : vec4<f32>,\\n    @location(1) texCoord : vec2<f32>,\\n) -> VertexOutput {\\n    var v_texCoord = texCoord;\\n    v_texCoord.y = 1.0 - v_texCoord.y;\\n    var gl_Position = _hyd_uniforms_.viewProjection * _hyd_uniforms_.world * position;\\n    return VertexOutput(\\n        gl_Position,\\n        v_texCoord\\n    );\\n}\\n\", \"glsl_path\": \"1.glsl\", \"wgsl_path\": \"1.wgsl\"}"
+    },
+    {
+        "attributes": [
+            {
+                "name": "position",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "normal",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "texCoord",
+                "glsl_type": "vec2",
+                "wgsl_type": "vec2<f32>"
+            },
+            {
+                "name": "tangent",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "binormal",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            }
+        ],
+        "uniforms": [
+            {
+                "name": "viewProjection",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "lightWorldPos",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "world",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "viewInverse",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "worldInverseTranspose",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            }
+        ],
+        "samplers": [],
+        "debug_info": "{\"glsl\": \"uniform mat4 viewProjection;\\nuniform vec3 lightWorldPos;\\nuniform mat4 world;\\nuniform mat4 viewInverse;\\nuniform mat4 worldInverseTranspose;\\nattribute vec4 position;\\nattribute vec3 normal;\\nattribute vec2 texCoord;\\nattribute vec3 tangent;  // #normalMap\\nattribute vec3 binormal;  // #normalMap\\nvarying vec4 v_position;\\nvarying vec2 v_texCoord;\\nvarying vec3 v_tangent;  // #normalMap\\nvarying vec3 v_binormal;  // #normalMap\\nvarying vec3 v_normal;\\nvarying vec3 v_surfaceToLight;\\nvarying vec3 v_surfaceToView;\\nvoid main() {\\n  v_texCoord = texCoord;\\n  v_position = (viewProjection * world * position);\\n  v_normal = (worldInverseTranspose * vec4(normal, 0)).xyz;\\n  v_surfaceToLight = lightWorldPos - (world * position).xyz;\\n  v_surfaceToView = (viewInverse[3] - (world * position)).xyz;\\n  v_binormal = (worldInverseTranspose * vec4(binormal, 0)).xyz;  // #normalMap\\n  v_tangent = (worldInverseTranspose * vec4(tangent, 0)).xyz;  // #normalMap\\n  gl_Position = v_position;\\n}\", \"wgsl\": \"struct VertexOutput {\\n    @builtin(position) Position : vec4<f32>,\\n    @location(0) v_position : vec4<f32>,\\n    @location(1) v_texCoord : vec2<f32>,\\n    @location(2) v_tangent : vec3<f32>,\\n    @location(3) v_binormal : vec3<f32>,\\n    @location(4) v_normal : vec3<f32>,\\n    @location(5) v_surfaceToLight : vec3<f32>,\\n    @location(6) v_surfaceToView : vec3<f32>,\\n};\\n\\nstruct Uniforms {\\n    viewProjection : mat4x4<f32>,\\n    lightWorldPos : vec3<f32>,\\n    world : mat4x4<f32>,\\n    viewInverse : mat4x4<f32>,\\n    worldInverseTranspose : mat4x4<f32>,\\n};\\n\\nstruct VertexInput {\\n    @location(0) position : vec4<f32>,\\n    @location(1) normal : vec3<f32>,\\n    @location(2) texCoord : vec2<f32>,\\n    @location(3) tangent : vec3<f32>,\\n    @location(4) binormal : vec3<f32>,\\n};\\n\\n@vertex\\nfn main(input : VertexInput) -> VertexOutput {\\n    var output : VertexOutput;\\n\\n    output.v_texCoord = input.texCoord;\\n    output.v_texCoord.y = 1.0 - output.v_texCoord.y;\\n    output.v_position = _hyd_uniforms_.viewProjection * _hyd_uniforms_.world * input.position;\\n    output.v_normal = (_hyd_uniforms_.worldInverseTranspose * vec4<f32>(input.normal, 0.0)).xyz;\\n    output.v_surfaceToLight = _hyd_uniforms_.lightWorldPos - (_hyd_uniforms_.world * input.position).xyz;\\n    output.v_surfaceToView = (_hyd_uniforms_.viewInverse[3] - (_hyd_uniforms_.world * input.position)).xyz;\\n    output.v_binormal = (_hyd_uniforms_.worldInverseTranspose * vec4<f32>(input.binormal, 0.0)).xyz;\\n    output.v_tangent = (_hyd_uniforms_.worldInverseTranspose * vec4<f32>(input.tangent, 0.0)).xyz;\\n\\n    output.Position = output.v_position;\\n    return output;\\n}\\n\", \"glsl_path\": \"10.glsl\", \"wgsl_path\": \"10.wgsl\"}"
+    },
+    {
+        "attributes": [
+            {
+                "name": "position",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "normal",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "texCoord",
+                "glsl_type": "vec2",
+                "wgsl_type": "vec2<f32>"
+            }
+        ],
+        "uniforms": [
+            {
+                "name": "viewProjection",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "lightWorldPos",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "world",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "viewInverse",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "worldInverseTranspose",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            }
+        ],
+        "samplers": [],
+        "debug_info": "{\"glsl\": \"uniform mat4 viewProjection;\\nuniform vec3 lightWorldPos;\\nuniform mat4 world;\\nuniform mat4 viewInverse;\\nuniform mat4 worldInverseTranspose;\\nattribute vec4 position;\\nattribute vec3 normal;\\nattribute vec2 texCoord;\\nvarying vec4 v_position;\\nvarying vec2 v_texCoord;\\nvarying vec3 v_normal;\\nvarying vec3 v_surfaceToLight;\\nvarying vec3 v_surfaceToView;\\nvoid main() {\\n  v_texCoord = texCoord;\\n  v_position = (viewProjection * world * position);\\n  v_normal = (worldInverseTranspose * vec4(normal, 0)).xyz;\\n  v_surfaceToLight = lightWorldPos - (world * position).xyz;\\n  v_surfaceToView = (viewInverse[3] - (world * position)).xyz;\\n  gl_Position = v_position;\\n}\", \"wgsl\": \"struct VertexInput {\\n    @location(0) position : vec4<f32>,\\n    @location(1) normal : vec3<f32>,\\n    @location(2) texCoord : vec2<f32>,\\n};\\n\\nstruct VertexOutput {\\n    @builtin(position) Position : vec4<f32>,\\n    @location(0) v_texCoord : vec2<f32>,\\n    @location(1) v_position : vec4<f32>,\\n    @location(2) v_normal : vec3<f32>,\\n    @location(3) v_surfaceToLight : vec3<f32>,\\n    @location(4) v_surfaceToView : vec3<f32>,\\n};\\n\\n@vertex\\nfn main(input : VertexInput) -> VertexOutput {\\n    var output : VertexOutput;\\n\\n    output.v_texCoord = input.texCoord;\\n    output.v_texCoord.y = 1.0 - output.v_texCoord.y;\\n    output.v_position = _hyd_uniforms_.viewProjection * _hyd_uniforms_.world * input.position;\\n    output.v_normal = (_hyd_uniforms_.worldInverseTranspose * vec4<f32>(input.normal, 0.0)).xyz;\\n    output.v_surfaceToLight = _hyd_uniforms_.lightWorldPos - (_hyd_uniforms_.world * input.position).xyz;\\n    output.v_surfaceToView = (_hyd_uniforms_.viewInverse[3] - (_hyd_uniforms_.world * input.position)).xyz;\\n    output.Position = output.v_position;\\n\\n    return output;\\n}\\n\", \"glsl_path\": \"11.glsl\", \"wgsl_path\": \"11.wgsl\"}"
+    },
+    {
+        "attributes": [
+            {
+                "name": "position",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "normal",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "texCoord",
+                "glsl_type": "vec2",
+                "wgsl_type": "vec2<f32>"
+            }
+        ],
+        "uniforms": [
+            {
+                "name": "world",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "viewProjection",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "lightWorldPos",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "viewInverse",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "worldInverseTranspose",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "time",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            }
+        ],
+        "samplers": [],
+        "debug_info": "{\"glsl\": \"uniform mat4 world;\\nuniform mat4 viewProjection;\\nuniform vec3 lightWorldPos;\\nuniform mat4 viewInverse;\\nuniform mat4 worldInverseTranspose;\\nuniform float time;\\nattribute vec4 position;\\nattribute vec3 normal;\\nattribute vec2 texCoord;\\nvarying vec4 v_position;\\nvarying vec2 v_texCoord;\\nvarying vec3 v_normal;\\nvarying vec3 v_surfaceToLight;\\nvarying vec3 v_surfaceToView;\\nvoid main() {\\n  vec3 toCamera = normalize(viewInverse[3].xyz - world[3].xyz);\\n  vec3 yAxis = vec3(0, 1, 0);\\n  vec3 xAxis = cross(yAxis, toCamera);\\n  vec3 zAxis = cross(xAxis, yAxis);\\n\\n  mat4 newWorld = mat4(\\n      vec4(xAxis, 0),\\n      vec4(yAxis, 0),\\n      vec4(xAxis, 0),\\n      world[3]);\\n\\n  v_texCoord = texCoord;\\n  v_position = position + vec4(\\n      sin(time * 0.5) * pow(position.y * 0.07, 2.0) * 1.0,\\n      -4,  // TODO(gman): remove this hack\\n      0,\\n      0);\\n  v_position = (viewProjection * newWorld) * v_position;\\n  v_normal = (newWorld * vec4(normal, 0)).xyz;\\n  v_surfaceToLight = lightWorldPos - (world * position).xyz;\\n  v_surfaceToView = (viewInverse[3] - (world * position)).xyz;\\n  gl_Position = v_position;\\n}\", \"wgsl\": \"struct VertexInput {\\n    @location(0) position : vec4<f32>,\\n    @location(1) normal : vec3<f32>,\\n    @location(2) texCoord : vec2<f32>,\\n};\\n\\nstruct VertexOutput {\\n    @builtin(position) Position : vec4<f32>,\\n    @location(0) v_texCoord : vec2<f32>,\\n    @location(1) v_position : vec4<f32>,\\n    @location(2) v_normal : vec3<f32>,\\n    @location(3) v_surfaceToLight : vec3<f32>,\\n    @location(4) v_surfaceToView : vec3<f32>,\\n};\\n\\n@vertex\\nfn main(input : VertexInput) -> VertexOutput {\\n    var output : VertexOutput;\\n\\n    var toCamera : vec3<f32> = normalize(_hyd_uniforms_.viewInverse[3].xyz - _hyd_uniforms_.world[3].xyz);\\n    var yAxis : vec3<f32> = vec3<f32>(0.0, 1.0, 0.0);\\n    var xAxis : vec3<f32> = cross(yAxis, toCamera);\\n    var zAxis : vec3<f32> = cross(xAxis, yAxis);\\n\\n    var newWorld : mat4x4<f32> = mat4x4<f32>(\\n        vec4(xAxis, 0.0),\\n        vec4(yAxis, 0.0),\\n        vec4(zAxis, 0.0),\\n        _hyd_uniforms_.world[3]);\\n\\n    output.v_texCoord = input.texCoord;\\n    output.v_texCoord.y = 1.0 - output.v_texCoord.y;\\n    output.v_position = input.position + vec4<f32>(\\n        sin(_hyd_uniforms_.time * 0.5) * pow(input.position.y * 0.07, 2.0) * 1.0,\\n        -4.0,  // TODO(gman): remove this hack\\n        0.0,\\n        0.0);\\n    output.v_position = _hyd_uniforms_.viewProjection * newWorld * output.v_position;\\n    output.v_normal = (newWorld * vec4<f32>(input.normal, 0.0)).xyz;\\n    output.v_surfaceToLight = _hyd_uniforms_.lightWorldPos - (_hyd_uniforms_.world * input.position).xyz;\\n    output.v_surfaceToView = (_hyd_uniforms_.viewInverse[3] - (_hyd_uniforms_.world * input.position)).xyz;\\n    output.Position = output.v_position;\\n\\n    return output;\\n}\\n\", \"glsl_path\": \"12.glsl\", \"wgsl_path\": \"12.wgsl\"}"
+    },
+    {
+        "attributes": [],
+        "uniforms": [
+            {
+                "name": "lightColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "ambient",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "specular",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "shininess",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "specularFactor",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogPower",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogMult",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogOffset",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            }
+        ],
+        "samplers": [
+            {
+                "name": "diffuse",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            }
+        ],
+        "debug_info": "{\"glsl\": \"#ifdef GL_FRAGMENT_PRECISION_HIGH\\n  precision highp float;\\n#else\\n  precision mediump float;\\n#endif\\n\\nuniform vec4 lightColor;\\nvarying vec4 v_position;\\nvarying vec2 v_texCoord;\\n\\n\\nvarying vec3 v_normal;\\nvarying vec3 v_surfaceToLight;\\nvarying vec3 v_surfaceToView;\\n\\nuniform vec4 ambient;\\nuniform sampler2D diffuse;\\nuniform vec4 specular;\\n\\nuniform float shininess;\\nuniform float specularFactor;\\nuniform float fogPower;\\nuniform float fogMult;\\nuniform float fogOffset;\\nuniform vec4 fogColor;\\n\\n\\nvec4 lit(float l ,float h, float m) {\\n  return vec4(1.0,\\n              max(l, 0.0),\\n              (l > 0.0) ? pow(max(0.0, h), m) : 0.0,\\n              1.0);\\n}\\nvoid main() {\\n  vec4 diffuseColor = texture2D(diffuse, v_texCoord);\\n\\n\\n\\n\\n  vec4 normalSpec = vec4(0,0,0,0);  // #noNormalMap\\n\\n\\n\\n\\n  vec3 normal = normalize(v_normal);   // #noNormalMap\\n  vec3 surfaceToLight = normalize(v_surfaceToLight);\\n  vec3 surfaceToView = normalize(v_surfaceToView);\\n  vec3 halfVector = normalize(surfaceToLight + surfaceToView);\\n  vec4 litR = lit(dot(normal, surfaceToLight),\\n                    dot(normal, halfVector), shininess);\\n  vec4 outColor = vec4(\\n     (lightColor * (diffuseColor * litR.y + diffuseColor * ambient +\\n                    specular * litR.z * specularFactor * normalSpec.a)).rgb,\\n      diffuseColor.a);\\n  outColor = mix(outColor, vec4(fogColor.rgb, diffuseColor.a),\\n   clamp(pow((v_position.z / v_position.w), fogPower) * fogMult - fogOffset,0.0,1.0));\\n\\n  gl_FragColor = outColor;\\n}\", \"wgsl\": \"struct FragmentInput {\\n    @location(0) v_position : vec4<f32>,\\n    @location(1) v_texCoord : vec2<f32>,\\n    @location(2) v_tangent : vec3<f32>,\\n    @location(3) v_binormal : vec3<f32>,\\n    @location(4) v_normal : vec3<f32>,\\n    @location(5) v_surfaceToLight : vec3<f32>,\\n    @location(6) v_surfaceToView : vec3<f32>,\\n};\\n\\nfn lit(l: f32, h: f32, m: f32) -> vec4<f32> {\\n    // return vec4<f32>(1.0, max(l, 0.0), (l > 0.0) ? pow(max(0.0, h), m) : 0.0, 1.0);\\n    if l > 0.0 {\\n        return vec4<f32>(1.0, l, pow(max(0.0, h), m), 1.0);\\n    } else {\\n        return vec4<f32>(1.0, 0.0, 0.0, 1.0);\\n    }\\n}\\n\\n@fragment\\nfn main(input: FragmentInput) -> @location(0) vec4<f32> {\\n    var diffuseColor : vec4<f32> = textureSample(diffuseT, diffuseS, input.v_texCoord);\\n\\n    var normalSpec : vec4<f32> = vec4<f32>(0.0, 0.0, 0.0, 0.0); // #noNormalMap\\n\\n    var normal : vec3<f32> = normalize(input.v_normal); // #noNormalMap\\n    var surfaceToLight : vec3<f32> = normalize(input.v_surfaceToLight);\\n    var surfaceToView : vec3<f32> = normalize(input.v_surfaceToView);\\n    var halfVector : vec3<f32> = normalize(surfaceToLight + surfaceToView);\\n    var litR : vec4<f32> = lit(dot(normal, surfaceToLight),\\n                               dot(normal, halfVector), _hyd_uniforms_.shininess);\\n    var outColor : vec4<f32> = vec4<f32>(\\n        (_hyd_uniforms_.lightColor * (diffuseColor * litR.y + diffuseColor * _hyd_uniforms_.ambient +\\n                       _hyd_uniforms_.specular * litR.z * _hyd_uniforms_.specularFactor * normalSpec.a)).rgb,\\n        diffuseColor.a);\\n    outColor = mix(outColor, vec4<f32>(_hyd_uniforms_.fogColor.rgb, diffuseColor.a),\\n                   clamp(pow((input.v_position.z / input.v_position.w), _hyd_uniforms_.fogPower) * _hyd_uniforms_.fogMult - _hyd_uniforms_.fogOffset, 0.0, 1.0));\\n\\n    return outColor;\\n}\\n\", \"glsl_path\": \"13.glsl\", \"wgsl_path\": \"13.wgsl\"}"
+    },
+    {
+        "attributes": [],
+        "uniforms": [
+            {
+                "name": "lightColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "specular",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "shininess",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "specularFactor",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "refractionFudge",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "eta",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "tankColorFudge",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogPower",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogMult",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogOffset",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            }
+        ],
+        "samplers": [
+            {
+                "name": "diffuse",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            },
+            {
+                "name": "reflectionMap",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            },
+            {
+                "name": "skybox",
+                "glsl_type": "samplerCube",
+                "wgsl_type": "texture_cube<f32>"
+            }
+        ],
+        "debug_info": "{\"glsl\": \"#ifdef GL_FRAGMENT_PRECISION_HIGH\\n  precision highp float;\\n#else\\n  precision mediump float;\\n#endif\\n\\nuniform vec4 lightColor;\\nvarying vec4 v_position;\\nvarying vec2 v_texCoord;\\n\\n\\nvarying vec3 v_normal;\\nvarying vec3 v_surfaceToLight;\\nvarying vec3 v_surfaceToView;\\n\\nuniform sampler2D diffuse;\\nuniform vec4 specular;\\n\\nuniform sampler2D reflectionMap;\\nuniform samplerCube skybox;\\nuniform float shininess;\\nuniform float specularFactor;\\nuniform float refractionFudge;\\nuniform float eta;\\nuniform float tankColorFudge;\\nuniform float fogPower;\\nuniform float fogMult;\\nuniform float fogOffset;\\nuniform vec4 fogColor;\\n\\n\\nvec4 lit(float l ,float h, float m) {\\n  return vec4(1.0,\\n              max(l, 0.0),\\n              (l > 0.0) ? pow(max(0.0, h), m) : 0.0,\\n              1.0);\\n}\\nvoid main() {\\n  vec4 diffuseColor = texture2D(diffuse, v_texCoord) +\\n      vec4(tankColorFudge, tankColorFudge, tankColorFudge, 1);\\n\\n\\n\\n\\n  vec4 normalSpec = vec4(0,0,0,0);  // #noNormalMap\\n  vec4 refraction = texture2D(reflectionMap, v_texCoord.xy);\\n\\n\\n\\n\\n  vec3 normal = normalize(v_normal);   // #noNormalMap\\n\\n  vec3 surfaceToLight = normalize(v_surfaceToLight);\\n  vec3 surfaceToView = normalize(v_surfaceToView);\\n\\n  vec3 refractionVec = refract(surfaceToView, normal, eta);\\n\\n  vec4 skyColor = textureCube(skybox, refractionVec);\\n\\n//  vec4 bumpSkyColor = textureCube(skybox, refractionVec);\\n//  vec4 nonBumpSkyColor = textureCube(\\n//      skybox,\\n//      refract(surfaceToView, normalize(v_normal), eta));\\n//  vec4 skyColor = mix(nonBumpSkyColor, bumpSkyColor, normalSpec.a);\\n  vec4 outColor = vec4(\\n      mix(skyColor * diffuseColor, diffuseColor, refraction.r).rgb,\\n      diffuseColor.a);\\n  outColor = mix(outColor, vec4(fogColor.rgb, diffuseColor.a),\\n   clamp(pow((v_position.z / v_position.w), fogPower) * fogMult - fogOffset,0.0,1.0));\\n\\n  gl_FragColor = outColor;\\n}\", \"wgsl\": \"struct VertexInput {\\n    @location(0) v_position : vec4<f32>,\\n    @location(1) v_texCoord : vec2<f32>,\\n    @location(2) v_tangent : vec3<f32>,  // #normalMap\\n    @location(3) v_binormal : vec3<f32>,  // #normalMap\\n    @location(4) v_normal : vec3<f32>,\\n    @location(5) v_surfaceToLight : vec3<f32>,\\n    @location(6) v_surfaceToView : vec3<f32>,\\n};\\n\\n@fragment\\nfn main(input : VertexInput) -> @location(0) vec4<f32> {\\n    var diffuseColor : vec4<f32> = textureSample(diffuseT, diffuseS, input.v_texCoord) +\\n                                  vec4<f32>(_hyd_uniforms_.tankColorFudge, _hyd_uniforms_.tankColorFudge, _hyd_uniforms_.tankColorFudge, 1.0);\\n\\n    var normalSpec : vec4<f32> = vec4<f32>(0.0, 0.0, 0.0, 0.0);\\n    var refraction : vec4<f32> = textureSample(reflectionMapT, reflectionMapS, input.v_texCoord);\\n\\n    var normal : vec3<f32> = normalize(input.v_normal);\\n    var surfaceToLight : vec3<f32> = normalize(input.v_surfaceToLight);\\n    var surfaceToView : vec3<f32> = normalize(input.v_surfaceToView);\\n\\n    var refractionVec : vec3<f32> = refract(surfaceToView, normal, _hyd_uniforms_.eta);\\n\\n    var skyColor : vec4<f32> = textureSample(skyboxT, skyboxS, refractionVec);\\n\\n    var outColor : vec4<f32> = vec4<f32>(\\n        mix(skyColor * diffuseColor, diffuseColor, refraction.r).rgb,\\n        diffuseColor.a\\n    );\\n\\n    var fogFactor : f32 = pow((input.v_position.z / input.v_position.w), _hyd_uniforms_.fogPower) * _hyd_uniforms_.fogMult - _hyd_uniforms_.fogOffset;\\n    fogFactor = clamp(fogFactor, 0.0, 1.0);\\n    outColor = mix(outColor, _hyd_uniforms_.fogColor, fogFactor);\\n\\n    return outColor;\\n}\\n\", \"glsl_path\": \"14.glsl\", \"wgsl_path\": \"14.wgsl\"}"
+    },
+    {
+        "attributes": [],
+        "uniforms": [
+            {
+                "name": "lightColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "ambient",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "specular",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "shininess",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "specularFactor",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogPower",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogMult",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogOffset",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            }
+        ],
+        "samplers": [
+            {
+                "name": "diffuse",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            }
+        ],
+        "debug_info": "{\"glsl\": \"#ifdef GL_FRAGMENT_PRECISION_HIGH\\n  precision highp float;\\n#else\\n  precision mediump float;\\n#endif\\n\\nuniform vec4 lightColor;\\nvarying vec4 v_position;\\nvarying vec2 v_texCoord;\\nvarying vec3 v_normal;\\nvarying vec3 v_surfaceToLight;\\nvarying vec3 v_surfaceToView;\\n\\nuniform vec4 ambient;\\nuniform sampler2D diffuse;\\nuniform vec4 specular;\\nuniform float shininess;\\nuniform float specularFactor;\\nuniform float fogPower;\\nuniform float fogMult;\\nuniform float fogOffset;\\nuniform vec4 fogColor;\\n\\n\\nvec4 lit(float l ,float h, float m) {\\n  return vec4(1.0,\\n              max(l, 0.0),\\n              (l > 0.0) ? pow(max(0.0, h), m) : 0.0,\\n              1.0);\\n}\\nvoid main() {\\n  vec4 diffuseColor = texture2D(diffuse, v_texCoord);\\n  vec3 normal = normalize(v_normal);\\n  vec3 surfaceToLight = normalize(v_surfaceToLight);\\n  vec3 surfaceToView = normalize(v_surfaceToView);\\n  vec3 halfVector = normalize(surfaceToLight + surfaceToView);\\n  vec4 litR = lit(dot(normal, surfaceToLight),\\n                    dot(normal, halfVector), shininess);\\n  vec4 outColor = vec4((\\n  lightColor * (diffuseColor * litR.y + diffuseColor * ambient +\\n                specular * litR.z * specularFactor)).rgb,\\n      diffuseColor.a);\\n  outColor = mix(outColor, vec4(fogColor.rgb, diffuseColor.a),\\n   clamp(pow((v_position.z / v_position.w), fogPower) * fogMult - fogOffset,0.0,1.0));\\n\\n  gl_FragColor = outColor;\\n}\", \"wgsl\": \"struct FragmentInput {\\n    @location(0) v_texCoord : vec2<f32>,\\n    @location(1) v_position : vec4<f32>,\\n    @location(2) v_normal : vec3<f32>,\\n    @location(3) v_surfaceToLight : vec3<f32>,\\n    @location(4) v_surfaceToView : vec3<f32>,\\n};\\n\\nfn lit(l: f32, h: f32, m: f32) -> vec4<f32> {\\n    // return vec4<f32>(1.0, max(l, 0.0), (l > 0.0) ? pow(max(0.0, h), m) : 0.0, 1.0);\\n    if l > 0.0 {\\n        return vec4<f32>(1.0, l, pow(max(0.0, h), m), 1.0);\\n    } else {\\n        return vec4<f32>(1.0, 0.0, 0.0, 1.0);\\n    }\\n}\\n\\n@fragment\\nfn main(input : FragmentInput) -> @location(0) vec4<f32> {\\n    var diffuseColor : vec4<f32> = textureSample(diffuseT, diffuseS, input.v_texCoord);\\n    var normal : vec3<f32> = normalize(input.v_normal);\\n    var surfaceToLight : vec3<f32> = normalize(input.v_surfaceToLight);\\n    var surfaceToView : vec3<f32> = normalize(input.v_surfaceToView);\\n    var halfVector : vec3<f32> = normalize(surfaceToLight + surfaceToView);\\n    var litR : vec4<f32> = lit(dot(normal, surfaceToLight), dot(normal, halfVector), _hyd_uniforms_.shininess);\\n\\n    var outputColor: vec4<f32> = vec4<f32>(\\n        (_hyd_uniforms_.lightColor * (diffuseColor * litR.y + diffuseColor * _hyd_uniforms_.ambient +\\n                                _hyd_uniforms_.specular * litR.z * _hyd_uniforms_.specularFactor)).rgb,\\n        diffuseColor.a\\n    );\\n\\n    outputColor = mix(\\n        outputColor,\\n        vec4<f32>(_hyd_uniforms_.fogColor.rgb, diffuseColor.a),\\n        clamp(\\n            pow((input.v_position.z / input.v_position.w), _hyd_uniforms_.fogPower) * _hyd_uniforms_.fogMult - _hyd_uniforms_.fogOffset,\\n            0.0,\\n            1.0)\\n    );\\n    // return vec4<f32>(1.0, 0.0, 1.0, 1.0); // TODO: remove this\\n    return outputColor;\\n}\\n\", \"glsl_path\": \"15.glsl\", \"wgsl_path\": \"15.wgsl\"}"
+    },
+    {
+        "attributes": [],
+        "uniforms": [
+            {
+                "name": "lightColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "ambient",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "specular",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "shininess",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "specularFactor",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogPower",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogMult",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogOffset",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            }
+        ],
+        "samplers": [
+            {
+                "name": "diffuse",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            }
+        ],
+        "debug_info": "{\"glsl\": \"#ifdef GL_FRAGMENT_PRECISION_HIGH\\n  precision highp float;\\n#else\\n  precision mediump float;\\n#endif\\n\\nuniform vec4 lightColor;\\nvarying vec4 v_position;\\nvarying vec2 v_texCoord;\\nvarying vec3 v_normal;\\nvarying vec3 v_surfaceToLight;\\nvarying vec3 v_surfaceToView;\\n\\nuniform vec4 ambient;\\nuniform sampler2D diffuse;\\nuniform vec4 specular;\\nuniform float shininess;\\nuniform float specularFactor;\\nuniform float fogPower;\\nuniform float fogMult;\\nuniform float fogOffset;\\nuniform vec4 fogColor;\\n\\n\\nvec4 lit(float l ,float h, float m) {\\n  return vec4(1.0,\\n              max(l, 0.0),\\n              (l > 0.0) ? pow(max(0.0, h), m) : 0.0,\\n              1.0);\\n}\\nvoid main() {\\n  vec4 diffuseColor = texture2D(diffuse, v_texCoord);\\n  if (diffuseColor.a < 0.3) {\\n    discard;\\n  }\\n  vec3 normal = normalize(v_normal);\\n  vec3 surfaceToLight = normalize(v_surfaceToLight);\\n  vec3 surfaceToView = normalize(v_surfaceToView);\\n  vec3 halfVector = normalize(surfaceToLight + surfaceToView);\\n  vec4 litR = lit(dot(normal, surfaceToLight),\\n                    dot(normal, halfVector), shininess);\\n  vec4 outColor = vec4((\\n  lightColor * (diffuseColor * litR.y + diffuseColor * ambient +\\n                specular * litR.z * specularFactor)).rgb,\\n      diffuseColor.a);\\n  outColor = mix(outColor, vec4(fogColor.rgb, diffuseColor.a),\\n   clamp(pow((v_position.z / v_position.w), fogPower) * fogMult - fogOffset,0.0,1.0));\\n\\n  gl_FragColor = outColor;\\n}\", \"wgsl\": \"struct VertexOutput {\\n    @location(0) color : vec4<f32>,\\n};\\n\\nfn lit(l: f32, h: f32, m: f32) -> vec4<f32> {\\n    // return vec4<f32>(1.0, max(l, 0.0), (l > 0.0) ? pow(max(0.0, h), m) : 0.0, 1.0);\\n    if l > 0.0 {\\n        return vec4<f32>(1.0, l, pow(max(0.0, h), m), 1.0);\\n    } else {\\n        return vec4<f32>(1.0, 0.0, 0.0, 1.0);\\n    }\\n}\\n\\nstruct VertexInput {\\n    @location(0) v_texCoord : vec2<f32>,\\n    @location(1) v_position : vec4<f32>,\\n    @location(2) v_normal : vec3<f32>,\\n    @location(3) v_surfaceToLight : vec3<f32>,\\n    @location(4) v_surfaceToView : vec3<f32>,\\n};\\n\\n@fragment\\nfn main(input : VertexInput) -> VertexOutput {\\n    var output : VertexOutput;\\n\\n    var diffuseColor : vec4<f32> = textureSample(diffuseT, diffuseS, input.v_texCoord);\\n    if (diffuseColor.a < 0.3) {\\n        discard;\\n    }\\n    var normal : vec3<f32> = normalize(input.v_normal);\\n    var surfaceToLight : vec3<f32> = normalize(input.v_surfaceToLight);\\n    var surfaceToView : vec3<f32> = normalize(input.v_surfaceToView);\\n    var halfVector : vec3<f32> = normalize(surfaceToLight + surfaceToView);\\n    var litR : vec4<f32> = lit(dot(normal, surfaceToLight), dot(normal, halfVector), _hyd_uniforms_.shininess);\\n\\n    output.color = vec4<f32>(\\n        (_hyd_uniforms_.lightColor * (diffuseColor * litR.y + diffuseColor * _hyd_uniforms_.ambient +\\n                                _hyd_uniforms_.specular * litR.z * _hyd_uniforms_.specularFactor)).rgb,\\n        diffuseColor.a\\n    );\\n\\n    var fogFactor : f32 = pow((input.v_position.z / input.v_position.w), _hyd_uniforms_.fogPower) * _hyd_uniforms_.fogMult - _hyd_uniforms_.fogOffset;\\n    output.color = mix(output.color, vec4<f32>(_hyd_uniforms_.fogColor.rgb, diffuseColor.a), clamp(fogFactor, 0.0, 1.0));\\n\\n    return output;\\n}\\n\", \"glsl_path\": \"16.glsl\", \"wgsl_path\": \"16.wgsl\"}"
+    },
+    {
+        "attributes": [],
+        "uniforms": [
+            {
+                "name": "lightColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "ambient",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "specular",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "shininess",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "specularFactor",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            }
+        ],
+        "samplers": [
+            {
+                "name": "diffuse",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            }
+        ],
+        "debug_info": "{\"glsl\": \"#ifdef GL_FRAGMENT_PRECISION_HIGH\\n  precision highp float;\\n#else\\n  precision mediump float;\\n#endif\\n\\nuniform vec4 lightColor;\\nvarying vec4 v_position;\\nvarying vec2 v_texCoord;\\nvarying vec3 v_normal;\\nvarying vec3 v_surfaceToLight;\\nvarying vec3 v_surfaceToView;\\n\\nuniform vec4 ambient;\\nuniform sampler2D diffuse;\\nuniform vec4 specular;\\nuniform float shininess;\\nuniform float specularFactor;\\n// #fogUniforms\\n\\nvec4 lit(float l ,float h, float m) {\\n  return vec4(1.0,\\n              max(l, 0.0),\\n              (l > 0.0) ? pow(max(0.0, h), m) : 0.0,\\n              1.0);\\n}\\nvoid main() {\\n  vec4 diffuseColor = texture2D(diffuse, v_texCoord);\\n  vec3 normal = normalize(v_normal);\\n  vec3 surfaceToLight = normalize(v_surfaceToLight);\\n  vec3 surfaceToView = normalize(v_surfaceToView);\\n  vec3 halfVector = normalize(surfaceToLight + surfaceToView);\\n  vec4 litR = lit(dot(normal, surfaceToLight),\\n                    dot(normal, halfVector), shininess);\\n  vec4 outColor = vec4((\\n  lightColor * (diffuseColor * litR.y + diffuseColor * ambient +\\n                specular * litR.z * specularFactor)).rgb,\\n      diffuseColor.a);\\n  // #fogCode\\n  gl_FragColor = outColor;\\n}\", \"wgsl\": \"struct FragmentInput {\\n    @location(0) v_texCoord : vec2<f32>,\\n    @location(1) v_position : vec4<f32>,\\n    @location(2) v_normal : vec3<f32>,\\n    @location(3) v_surfaceToLight : vec3<f32>,\\n    @location(4) v_surfaceToView : vec3<f32>,\\n};\\n\\nfn lit(l: f32, h: f32, m: f32) -> vec4<f32> {\\n    // return vec4<f32>(1.0, max(l, 0.0), (l > 0.0) ? pow(max(0.0, h), m) : 0.0, 1.0);\\n    if l > 0.0 {\\n        return vec4<f32>(1.0, l, pow(max(0.0, h), m), 1.0);\\n    } else {\\n        return vec4<f32>(1.0, 0.0, 0.0, 1.0);\\n    }\\n}\\n\\n@fragment\\nfn main(input : FragmentInput) -> @location(0) vec4<f32> {\\n    var diffuseColor : vec4<f32> = textureSample(diffuseT, diffuseS, input.v_texCoord);\\n    var normal : vec3<f32> = normalize(input.v_normal);\\n    var surfaceToLight : vec3<f32> = normalize(input.v_surfaceToLight);\\n    var surfaceToView : vec3<f32> = normalize(input.v_surfaceToView);\\n    var halfVector : vec3<f32> = normalize(surfaceToLight + surfaceToView);\\n    var litR : vec4<f32> = lit(dot(normal, surfaceToLight), dot(normal, halfVector), _hyd_uniforms_.shininess);\\n\\n    return vec4<f32>(\\n        (_hyd_uniforms_.lightColor * (diffuseColor * litR.y + diffuseColor * _hyd_uniforms_.ambient +\\n                                _hyd_uniforms_.specular * litR.z * _hyd_uniforms_.specularFactor)).rgb,\\n        diffuseColor.a\\n    );\\n}\\n\", \"glsl_path\": \"17.glsl\", \"wgsl_path\": \"17.wgsl\"}"
+    },
+    {
+        "attributes": [],
+        "uniforms": [
+            {
+                "name": "lightColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "specular",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "shininess",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "specularFactor",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            }
+        ],
+        "samplers": [
+            {
+                "name": "diffuse",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            },
+            {
+                "name": "reflectionMap",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            },
+            {
+                "name": "skybox",
+                "glsl_type": "samplerCube",
+                "wgsl_type": "texture_cube<f32>"
+            }
+        ],
+        "debug_info": "{\"glsl\": \"#ifdef GL_FRAGMENT_PRECISION_HIGH\\n  precision highp float;\\n#else\\n  precision mediump float;\\n#endif\\n\\nuniform vec4 lightColor;\\nvarying vec4 v_position;\\nvarying vec2 v_texCoord;\\n\\n\\nvarying vec3 v_normal;\\nvarying vec3 v_surfaceToLight;\\nvarying vec3 v_surfaceToView;\\n\\nuniform sampler2D diffuse;\\nuniform vec4 specular;\\n\\nuniform sampler2D reflectionMap;\\nuniform samplerCube skybox;\\nuniform float shininess;\\nuniform float specularFactor;\\n\\nvec4 lit(float l ,float h, float m) {\\n  return vec4(1.0,\\n              max(l, 0.0),\\n              (l > 0.0) ? pow(max(0.0, h), m) : 0.0,\\n              1.0);\\n}\\nvoid main() {\\n  vec4 diffuseColor = texture2D(diffuse, v_texCoord);\\n\\n\\n\\n\\n  vec4 normalSpec = vec4(0,0,0,0);  // #noNormalMap\\n  vec4 reflection = texture2D(reflectionMap, v_texCoord.xy);\\n\\n//  tangentNormal = normalize(tangentNormal + vec3(0,0,refractionFudge));\\n\\n\\n  vec3 normal = normalize(v_normal);   // #noNormalMap\\n\\n  vec3 surfaceToLight = normalize(v_surfaceToLight);\\n  vec3 surfaceToView = normalize(v_surfaceToView);\\n\\n  vec4 skyColor = textureCube(skybox, -reflect(surfaceToView, normal));\\n  float fudgeAmount = 1.1;\\n  vec3 fudge = skyColor.rgb * vec3(fudgeAmount, fudgeAmount, fudgeAmount);\\n  float bright = min(1.0, fudge.r * fudge.g * fudge.b);\\n  vec4 reflectColor =\\n      mix(vec4(skyColor.rgb, bright),\\n          diffuseColor,\\n          (1.0 - reflection.r));\\n  float r = abs(dot(surfaceToView, normal));\\n  gl_FragColor = vec4(mix(\\n      skyColor,\\n      reflectColor,\\n      ((r + 0.3) * (reflection.r))).rgb, 1.0 - r);\\n}\", \"wgsl\": \"struct VertexOutput {\\n    @location(0) color : vec4<f32>,\\n};\\n\\nstruct VertexInput {\\n    @location(0) v_position : vec4<f32>,\\n    @location(1) v_texCoord : vec2<f32>,\\n    @location(2) v_tangent : vec3<f32>,  // #normalMap\\n    @location(3) v_binormal : vec3<f32>,  // #normalMap\\n    @location(4) v_normal : vec3<f32>,\\n    @location(5) v_surfaceToLight : vec3<f32>,\\n    @location(6) v_surfaceToView : vec3<f32>,\\n};\\n\\nfn lit(l: f32, h: f32, m: f32) -> vec4<f32> {\\n    // return vec4<f32>(1.0, max(l, 0.0), (l > 0.0) ? pow(max(0.0, h), m) : 0.0, 1.0);\\n    if l > 0.0 {\\n        return vec4<f32>(1.0, l, pow(max(0.0, h), m), 1.0);\\n    } else {\\n        return vec4<f32>(1.0, 0.0, 0.0, 1.0);\\n    }\\n}\\n\\n@fragment\\nfn main(input : VertexInput) -> VertexOutput {\\n    var output : VertexOutput;\\n\\n    var diffuseColor : vec4<f32> = textureSample(diffuseT, diffuseS, input.v_texCoord);\\n    var normalSpec : vec4<f32> = vec4<f32>(0.0, 0.0, 0.0, 0.0);\\n    var reflection : vec4<f32> = textureSample(reflectionMapT, reflectionMapS, input.v_texCoord.xy);\\n\\n    var normal : vec3<f32> = normalize(input.v_normal);\\n    var surfaceToLight : vec3<f32> = normalize(input.v_surfaceToLight);\\n    var surfaceToView : vec3<f32> = normalize(input.v_surfaceToView);\\n\\n    var skyColor : vec4<f32> = textureSample(skyboxT, skyboxS, -reflect(surfaceToView, normal));\\n    var fudgeAmount : f32 = 1.1;\\n    var fudge : vec3<f32> = skyColor.rgb * vec3<f32>(fudgeAmount, fudgeAmount, fudgeAmount);\\n    var bright : f32 = min(1.0, fudge.r * fudge.g * fudge.b);\\n    var reflectColor : vec4<f32> = mix(vec4<f32>(skyColor.rgb, bright), diffuseColor, (1.0 - reflection.r));\\n    var r : f32 = abs(dot(surfaceToView, normal));\\n\\n    output.color = vec4<f32>(\\n        mix(skyColor, reflectColor, ((r + 0.3) * (reflection.r))).rgb,\\n        1.0 - r\\n    );\\n\\n    return output;\\n}\\n\", \"glsl_path\": \"18.glsl\", \"wgsl_path\": \"18.wgsl\"}"
+    },
+    {
+        "attributes": [],
+        "uniforms": [
+            {
+                "name": "lightColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "ambient",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "specular",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "shininess",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "specularFactor",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogPower",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogMult",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogOffset",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            }
+        ],
+        "samplers": [
+            {
+                "name": "diffuse",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            },
+            {
+                "name": "normalMap",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            },
+            {
+                "name": "reflectionMap",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            },
+            {
+                "name": "skybox",
+                "glsl_type": "samplerCube",
+                "wgsl_type": "texture_cube<f32>"
+            }
+        ],
+        "debug_info": "{\"glsl\": \"#ifdef GL_FRAGMENT_PRECISION_HIGH\\n  precision highp float;\\n#else\\n  precision mediump float;\\n#endif\\n\\nuniform vec4 lightColor;\\nvarying vec4 v_position;\\nvarying vec2 v_texCoord;\\nvarying vec3 v_tangent;  // #normalMap\\nvarying vec3 v_binormal;  // #normalMap\\nvarying vec3 v_normal;\\nvarying vec3 v_surfaceToLight;\\nvarying vec3 v_surfaceToView;\\n\\nuniform vec4 ambient;\\nuniform sampler2D diffuse;\\nuniform vec4 specular;\\nuniform sampler2D normalMap;\\nuniform sampler2D reflectionMap; // #reflection\\nuniform samplerCube skybox; // #reflecton\\nuniform float shininess;\\nuniform float specularFactor;\\nuniform float fogPower;\\nuniform float fogMult;\\nuniform float fogOffset;\\nuniform vec4 fogColor;\\n\\n\\nvec4 lit(float l ,float h, float m) {\\n  return vec4(1.0,\\n              max(l, 0.0),\\n              (l > 0.0) ? pow(max(0.0, h), m) : 0.0,\\n              1.0);\\n}\\nvoid main() {\\n  vec4 diffuseColor = texture2D(diffuse, v_texCoord);\\n  mat3 tangentToWorld = mat3(v_tangent,  // #normalMap\\n                             v_binormal,  // #normalMap\\n                             v_normal);  // #normalMap\\n  vec4 normalSpec = texture2D(normalMap, v_texCoord.xy);  // #normalMap\\n\\n  vec4 reflection = texture2D(reflectionMap, v_texCoord.xy); // #reflection\\n\\n  vec3 tangentNormal = normalSpec.xyz - vec3(0.5, 0.5, 0.5);  // #normalMap\\n  vec3 normal = (tangentToWorld * tangentNormal);  // #normalMap\\n  normal = normalize(normal);  // #normalMap\\n\\n  vec3 surfaceToLight = normalize(v_surfaceToLight);\\n  vec3 surfaceToView = normalize(v_surfaceToView);\\n  vec4 skyColor = textureCube(skybox, -reflect(surfaceToView, normal));  // #reflection\\n\\n\\n  vec3 halfVector = normalize(surfaceToLight + surfaceToView);\\n  vec4 litR = lit(dot(normal, surfaceToLight),\\n                    dot(normal, halfVector), shininess);\\n  vec4 outColor = vec4(mix(\\n      skyColor,\\n      lightColor * (diffuseColor * litR.y + diffuseColor * ambient +\\n                    specular * litR.z * specularFactor * normalSpec.a),\\n      1.0 - reflection.r).rgb,\\n      diffuseColor.a);\\n  outColor = mix(outColor, vec4(fogColor.rgb, diffuseColor.a),\\n   clamp(pow((v_position.z / v_position.w), fogPower) * fogMult - fogOffset,0.0,1.0));\\n\\n  gl_FragColor = outColor;\\n}\", \"wgsl\": \"struct FragmentInput {\\n    @location(0) v_position : vec4<f32>,\\n    @location(1) v_texCoord : vec2<f32>,\\n    @location(2) v_tangent : vec3<f32>,\\n    @location(3) v_binormal : vec3<f32>,\\n    @location(4) v_normal : vec3<f32>,\\n    @location(5) v_surfaceToLight : vec3<f32>,\\n    @location(6) v_surfaceToView : vec3<f32>,\\n};\\n\\nfn lit(l: f32, h: f32, m: f32) -> vec4<f32> {\\n    // return vec4<f32>(1.0, max(l, 0.0), (l > 0.0) ? pow(max(0.0, h), m) : 0.0, 1.0);\\n    if l > 0.0 {\\n        return vec4<f32>(1.0, l, pow(max(0.0, h), m), 1.0);\\n    } else {\\n        return vec4<f32>(1.0, 0.0, 0.0, 1.0);\\n    }\\n}\\n\\n@fragment\\nfn main(input: FragmentInput) -> @location(0) vec4<f32> {\\n    var diffuseColor : vec4<f32> = textureSample(diffuseT, diffuseS, input.v_texCoord);\\n\\n    var tangentToWorld : mat3x3<f32> = mat3x3<f32>(\\n        input.v_tangent,\\n        input.v_binormal,\\n        input.v_normal\\n    );\\n    var normalSpec : vec4<f32> = textureSample(normalMapT, normalMapS, input.v_texCoord);\\n\\n    var reflection : vec4<f32> = textureSample(reflectionMapT, reflectionMapS, input.v_texCoord);\\n\\n    var tangentNormal : vec3<f32> = normalSpec.xyz - vec3<f32>(0.5, 0.5, 0.5);\\n    var normal : vec3<f32> = normalize(tangentToWorld * tangentNormal);\\n\\n    var surfaceToLight : vec3<f32> = normalize(input.v_surfaceToLight);\\n    var surfaceToView : vec3<f32> = normalize(input.v_surfaceToView);\\n    var skyColor : vec4<f32> = textureSample(skyboxT, skyboxS, -reflect(surfaceToView, normal));\\n\\n    var halfVector : vec3<f32> = normalize(surfaceToLight + surfaceToView);\\n    var litR : vec4<f32> = lit(dot(normal, surfaceToLight), dot(normal, halfVector), _hyd_uniforms_.shininess);\\n\\n    var reflectionFactor : f32 = 1.0 - reflection.r;\\n    var outColor : vec4<f32> = vec4<f32>(mix(\\n        skyColor,\\n        _hyd_uniforms_.lightColor * (diffuseColor * litR.y + diffuseColor * _hyd_uniforms_.ambient +\\n                                _hyd_uniforms_.specular * litR.z * normalSpec.a * _hyd_uniforms_.specularFactor),\\n                                reflectionFactor).rgb,\\n        diffuseColor.a\\n    );\\n    outColor = mix(outColor, vec4<f32>(_hyd_uniforms_.fogColor.rgb, diffuseColor.a),\\n                   clamp(pow((input.v_position.z / input.v_position.w), _hyd_uniforms_.fogPower) * _hyd_uniforms_.fogMult - _hyd_uniforms_.fogOffset, 0.0, 1.0));\\n\\n    // return vec4<f32>(1.0, 0.0, 0.0, 1.0); // TODO: remove this\\n    return outColor;\\n}\\n\", \"glsl_path\": \"19.glsl\", \"wgsl_path\": \"19.wgsl\"}"
+    },
+    {
+        "attributes": [
+            {
+                "name": "position",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "normal",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "texCoord",
+                "glsl_type": "vec2",
+                "wgsl_type": "vec2<f32>"
+            },
+            {
+                "name": "tangent",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "binormal",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            }
+        ],
+        "uniforms": [
+            {
+                "name": "lightWorldPos",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "viewInverse",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "viewProjection",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "worldPosition",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "nextPosition",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "scale",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "time",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fishLength",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fishWaveLength",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fishBendAmount",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            }
+        ],
+        "samplers": [],
+        "debug_info": "{\"glsl\": \"uniform vec3 lightWorldPos;\\nuniform mat4 viewInverse;\\nuniform mat4 viewProjection;\\nuniform vec3 worldPosition;\\nuniform vec3 nextPosition;\\nuniform float scale;\\nuniform float time;\\nuniform float fishLength;\\nuniform float fishWaveLength;\\nuniform float fishBendAmount;\\nattribute vec4 position;\\nattribute vec3 normal;\\nattribute vec2 texCoord;\\nattribute vec3 tangent;  // #normalMap\\nattribute vec3 binormal;  // #normalMap\\nvarying vec4 v_position;\\nvarying vec2 v_texCoord;\\nvarying vec3 v_tangent;  // #normalMap\\nvarying vec3 v_binormal;  // #normalMap\\nvarying vec3 v_normal;\\nvarying vec3 v_surfaceToLight;\\nvarying vec3 v_surfaceToView;\\nvoid main() {\\n  vec3 vz = normalize(worldPosition - nextPosition);\\n  vec3 vx = normalize(cross(vec3(0,1,0), vz));\\n  vec3 vy = cross(vz, vx);\\n  mat4 orientMat = mat4(\\n    vec4(vx, 0),\\n    vec4(vy, 0),\\n    vec4(vz, 0),\\n    vec4(worldPosition, 1));\\n  mat4 scaleMat = mat4(\\n    vec4(scale, 0, 0, 0),\\n    vec4(0, scale, 0, 0),\\n    vec4(0, 0, scale, 0),\\n    vec4(0, 0, 0, 1));\\n  mat4 world = orientMat * scaleMat;\\n  mat4 worldInverseTranspose = world;\\n\\n  v_texCoord = texCoord;\\n  // NOTE:If you change this you need to change the laser code to match!\\n  float mult = position.z > 0.0 ?\\n      (position.z / fishLength) :\\n      (-position.z / fishLength * 2.0);\\n  float s = sin(time + mult * fishWaveLength);\\n  float a = sign(s);\\n  float offset = pow(mult, 2.0) * s * fishBendAmount;\\n  v_position = (\\n      viewProjection * world *\\n      (position +\\n       vec4(offset, 0, 0, 0)));\\n  v_normal = (worldInverseTranspose * vec4(normal, 0)).xyz;\\n  v_surfaceToLight = lightWorldPos - (world * position).xyz;\\n  v_surfaceToView = (viewInverse[3] - (world * position)).xyz;\\n  v_binormal = (worldInverseTranspose * vec4(binormal, 0)).xyz;  // #normalMap\\n  v_tangent = (worldInverseTranspose * vec4(tangent, 0)).xyz;  // #normalMap\\n  gl_Position = v_position;\\n}\", \"wgsl\": \"// TODO: this shader is buggy, it doesn't work with the fish model\\n\\nstruct VertexOutput {\\n    @builtin(position) gl_Position : vec4<f32>,\\n    @location(0) v_position : vec4<f32>,\\n    @location(1) v_texCoord : vec2<f32>,\\n    @location(2) v_tangent : vec3<f32>,\\n    @location(3) v_binormal : vec3<f32>,\\n    @location(4) v_normal : vec3<f32>,\\n    @location(5) v_surfaceToLight : vec3<f32>,\\n    @location(6) v_surfaceToView : vec3<f32>,\\n}\\n\\n@vertex\\nfn main(\\n    @location(0) position : vec4<f32>,\\n    @location(1) normal : vec3<f32>,\\n    @location(2) texCoord : vec2<f32>,\\n    @location(3) tangent : vec3<f32>,\\n    @location(4) binormal : vec3<f32>,\\n) -> VertexOutput {\\n    var output: VertexOutput;\\n    let vz : vec3<f32> = normalize(_hyd_uniforms_.worldPosition - _hyd_uniforms_.nextPosition);\\n    let vx : vec3<f32> = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), vz));\\n    let vy : vec3<f32> = cross(vz, vx);\\n    let orientMat : mat4x4<f32> = mat4x4<f32>(\\n        vec4<f32>(vx, 0.0),\\n        vec4<f32>(vy, 0.0),\\n        vec4<f32>(vz, 0.0),\\n        vec4<f32>(_hyd_uniforms_.worldPosition, 1.0));\\n    let scaleMat : mat4x4<f32> = mat4x4<f32>(\\n        vec4<f32>(_hyd_uniforms_.scale, 0.0, 0.0, 0.0),\\n        vec4<f32>(0.0, _hyd_uniforms_.scale, 0.0, 0.0),\\n        vec4<f32>(0.0, 0.0, _hyd_uniforms_.scale, 0.0),\\n        vec4<f32>(0.0, 0.0, 0.0, 1.0));\\n    let world : mat4x4<f32> = orientMat * scaleMat;\\n    let worldInverseTranspose : mat4x4<f32> = world;\\n\\n    output.v_texCoord = vec2<f32>(texCoord.x, 1.0 - texCoord.y); // Flip Y-axis\\n\\n    // NOTE: If you change this you need to change the laser code to match!\\n    var mult: f32 = position.z / _hyd_uniforms_.fishLength;\\n    // if (position.z < 0.0) {\\n    //     mult *= -2.0;\\n    // }\\n    let s : f32 = sin(_hyd_uniforms_.time + mult * _hyd_uniforms_.fishWaveLength);\\n    let a : f32 = sign(s);\\n    let offset : f32 = pow(mult, 2.0) * s * _hyd_uniforms_.fishBendAmount;\\n\\n    output.v_position = _hyd_uniforms_.viewProjection * world * (position + vec4<f32>(offset, 0.0, 0.0, 0.0));\\n    output.v_normal = (worldInverseTranspose * vec4<f32>(normal, 0.0)).xyz;\\n    output.v_surfaceToLight = _hyd_uniforms_.lightWorldPos - (world * position).xyz;\\n    output.v_surfaceToView = (_hyd_uniforms_.viewInverse[3] - (world * position)).xyz;\\n    output.v_binormal = (worldInverseTranspose * vec4<f32>(binormal, 0.0)).xyz;\\n    output.v_tangent = (worldInverseTranspose * vec4<f32>(tangent, 0.0)).xyz;\\n    output.gl_Position = output.v_position;\\n    // output.gl_Position = output.v_position * vec4<f32>(1.0, 1.0, 0.5, 1.0) + vec4<f32>(0.0, 0.0, 0.5, 0.0);\\n\\n    return output;\\n}\\n\", \"glsl_path\": \"2.glsl\", \"wgsl_path\": \"2.wgsl\"}"
+    },
+    {
+        "attributes": [],
+        "uniforms": [
+            {
+                "name": "lightColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "ambient",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "specular",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "shininess",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "specularFactor",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogPower",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogMult",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogOffset",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            }
+        ],
+        "samplers": [
+            {
+                "name": "diffuse",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            },
+            {
+                "name": "normalMap",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            }
+        ],
+        "debug_info": "{\"glsl\": \"#ifdef GL_FRAGMENT_PRECISION_HIGH\\n  precision highp float;\\n#else\\n  precision mediump float;\\n#endif\\n\\nuniform vec4 lightColor;\\nvarying vec4 v_position;\\nvarying vec2 v_texCoord;\\nvarying vec3 v_tangent;  // #normalMap\\nvarying vec3 v_binormal;  // #normalMap\\nvarying vec3 v_normal;\\nvarying vec3 v_surfaceToLight;\\nvarying vec3 v_surfaceToView;\\n\\nuniform vec4 ambient;\\nuniform sampler2D diffuse;\\nuniform vec4 specular;\\nuniform sampler2D normalMap;  // #normalMap\\nuniform float shininess;\\nuniform float specularFactor;\\nuniform float fogPower;\\nuniform float fogMult;\\nuniform float fogOffset;\\nuniform vec4 fogColor;\\n\\n\\nvec4 lit(float l ,float h, float m) {\\n  return vec4(1.0,\\n              max(l, 0.0),\\n              (l > 0.0) ? pow(max(0.0, h), m) : 0.0,\\n              1.0);\\n}\\nvoid main() {\\n  vec4 diffuseColor = texture2D(diffuse, v_texCoord);\\n  mat3 tangentToWorld = mat3(v_tangent,  // #normalMap\\n                             v_binormal,  // #normalMap\\n                             v_normal);  // #normalMap\\n  vec4 normalSpec = texture2D(normalMap, v_texCoord.xy);  // #normalMap\\n\\n  vec3 tangentNormal = normalSpec.xyz - vec3(0.5, 0.5, 0.5);  // #normalMap\\n  tangentNormal = normalize(tangentNormal + vec3(0, 0, 2));  // #normalMap\\n  vec3 normal = (tangentToWorld * tangentNormal);  // #normalMap\\n  normal = normalize(normal);  // #normalMap\\n\\n  vec3 surfaceToLight = normalize(v_surfaceToLight);\\n  vec3 surfaceToView = normalize(v_surfaceToView);\\n  vec3 halfVector = normalize(surfaceToLight + surfaceToView);\\n  vec4 litR = lit(dot(normal, surfaceToLight),\\n                    dot(normal, halfVector), shininess);\\n  vec4 outColor = vec4(\\n    (lightColor * (diffuseColor * litR.y + diffuseColor * ambient +\\n                  specular * litR.z * specularFactor * normalSpec.a)).rgb,\\n      diffuseColor.a);\\n  outColor = mix(outColor, vec4(fogColor.rgb, diffuseColor.a),\\n   clamp(pow((v_position.z / v_position.w), fogPower) * fogMult - fogOffset,0.0,1.0));\\n\\n  gl_FragColor = outColor;\\n}\", \"wgsl\": \"struct FragmentInput {\\n    @location(0) v_position : vec4<f32>,\\n    @location(1) v_texCoord : vec2<f32>,\\n    @location(2) v_tangent : vec3<f32>,\\n    @location(3) v_binormal : vec3<f32>,\\n    @location(4) v_normal : vec3<f32>,\\n    @location(5) v_surfaceToLight : vec3<f32>,\\n    @location(6) v_surfaceToView : vec3<f32>,\\n};\\n\\nfn lit(l: f32, h: f32, m: f32) -> vec4<f32> {\\n    // return vec4<f32>(1.0, max(l, 0.0), (l > 0.0) ? pow(max(0.0, h), m) : 0.0, 1.0);\\n    if l > 0.0 {\\n        return vec4<f32>(1.0, l, pow(max(0.0, h), m), 1.0);\\n    } else {\\n        return vec4<f32>(1.0, 0.0, 0.0, 1.0);\\n    }\\n}\\n\\n@fragment\\nfn main(input: FragmentInput) -> @location(0) vec4<f32> {\\n    var diffuseColor : vec4<f32> = textureSample(diffuseT, diffuseS, input.v_texCoord);\\n\\n    var tangentToWorld : mat3x3<f32> = mat3x3<f32>(\\n        input.v_tangent,\\n        input.v_binormal,\\n        input.v_normal\\n    );\\n    var normalSpec : vec4<f32> = textureSample(normalMapT, normalMapS, input.v_texCoord);\\n\\n    var tangentNormal : vec3<f32> = normalSpec.xyz - vec3<f32>(0.5, 0.5, 0.5);\\n    tangentNormal = normalize(tangentNormal + vec3<f32>(0.0, 0.0, 2.0));\\n    var normal : vec3<f32> = normalize(tangentToWorld * tangentNormal);\\n\\n    var surfaceToLight : vec3<f32> = normalize(input.v_surfaceToLight);\\n    var surfaceToView : vec3<f32> = normalize(input.v_surfaceToView);\\n    var halfVector : vec3<f32> = normalize(surfaceToLight + surfaceToView);\\n    var litR : vec4<f32> = lit(dot(normal, surfaceToLight), dot(normal, halfVector), _hyd_uniforms_.shininess);\\n\\n    var outColor : vec4<f32> = vec4<f32>(\\n        (_hyd_uniforms_.lightColor * (diffuseColor * litR.y + diffuseColor * _hyd_uniforms_.ambient + _hyd_uniforms_.specular * litR.z * _hyd_uniforms_.specularFactor * normalSpec.a)).rgb,\\n        diffuseColor.a\\n    );\\n    outColor = mix(outColor, vec4<f32>(_hyd_uniforms_.fogColor.rgb, diffuseColor.a),\\n                   clamp(pow((input.v_position.z / input.v_position.w), _hyd_uniforms_.fogPower) * _hyd_uniforms_.fogMult - _hyd_uniforms_.fogOffset, 0.0, 1.0));\\n\\n    // return vec4<f32>(1.0, 1.0, 0.0, 1.0); // TODO: remove this\\n    return outColor;\\n}\\n\", \"glsl_path\": \"20.glsl\", \"wgsl_path\": \"20.wgsl\"}"
+    },
+    {
+        "attributes": [],
+        "uniforms": [
+            {
+                "name": "lightColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "ambient",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "specular",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "shininess",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "specularFactor",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogPower",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogMult",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogOffset",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            }
+        ],
+        "samplers": [
+            {
+                "name": "diffuse",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            },
+            {
+                "name": "normalMap",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            }
+        ],
+        "debug_info": "{\"glsl\": \"#ifdef GL_FRAGMENT_PRECISION_HIGH\\n  precision highp float;\\n#else\\n  precision mediump float;\\n#endif\\n\\nuniform vec4 lightColor;\\nvarying vec4 v_position;\\nvarying vec2 v_texCoord;\\nvarying vec3 v_tangent;  // #normalMap\\nvarying vec3 v_binormal;  // #normalMap\\nvarying vec3 v_normal;\\nvarying vec3 v_surfaceToLight;\\nvarying vec3 v_surfaceToView;\\n\\nuniform vec4 ambient;\\nuniform sampler2D diffuse;\\nuniform vec4 specular;\\nuniform sampler2D normalMap;  // #normalMap\\nuniform float shininess;\\nuniform float specularFactor;\\nuniform float fogPower;\\nuniform float fogMult;\\nuniform float fogOffset;\\nuniform vec4 fogColor;\\n\\n\\nvec4 lit(float l ,float h, float m) {\\n  return vec4(1.0,\\n              max(l, 0.0),\\n              (l > 0.0) ? pow(max(0.0, h), m) : 0.0,\\n              1.0);\\n}\\nvoid main() {\\n  vec4 diffuseColor = texture2D(diffuse, v_texCoord);\\n  mat3 tangentToWorld = mat3(v_tangent,  // #normalMap\\n                             v_binormal,  // #normalMap\\n                             v_normal);  // #normalMap\\n  vec4 normalSpec = texture2D(normalMap, v_texCoord.xy);  // #normalMap\\n\\n  vec3 tangentNormal = normalSpec.xyz -  // #normalMap\\n                                 vec3(0.5, 0.5, 0.5);  // #normalMap\\n  vec3 normal = (tangentToWorld * tangentNormal);  // #normalMap\\n  normal = normalize(normal);  // #normalMap\\n\\n  vec3 surfaceToLight = normalize(v_surfaceToLight);\\n  vec3 surfaceToView = normalize(v_surfaceToView);\\n  vec3 halfVector = normalize(surfaceToLight + surfaceToView);\\n  vec4 litR = lit(dot(normal, surfaceToLight),\\n                    dot(normal, halfVector), shininess);\\n  vec4 outColor = vec4(\\n     (lightColor * (diffuseColor * litR.y + diffuseColor * ambient +\\n                    specular * litR.z * specularFactor * normalSpec.a)).rgb,\\n      diffuseColor.a);\\n  outColor = mix(outColor, vec4(fogColor.rgb, diffuseColor.a),\\n   clamp(pow((v_position.z / v_position.w), fogPower) * fogMult - fogOffset,0.0,1.0));\\n\\n  gl_FragColor = outColor;\\n}\", \"wgsl\": \"struct FragmentInput {\\n    @location(0) v_position : vec4<f32>,\\n    @location(1) v_texCoord : vec2<f32>,\\n    @location(2) v_tangent : vec3<f32>,\\n    @location(3) v_binormal : vec3<f32>,\\n    @location(4) v_normal : vec3<f32>,\\n    @location(5) v_surfaceToLight : vec3<f32>,\\n    @location(6) v_surfaceToView : vec3<f32>,\\n};\\n\\nfn lit(l: f32, h: f32, m: f32) -> vec4<f32> {\\n    // return vec4<f32>(1.0, max(l, 0.0), (l > 0.0) ? pow(max(0.0, h), m) : 0.0, 1.0);\\n    if l > 0.0 {\\n        return vec4<f32>(1.0, l, pow(max(0.0, h), m), 1.0);\\n    } else {\\n        return vec4<f32>(1.0, 0.0, 0.0, 1.0);\\n    }\\n}\\n\\n@fragment\\nfn main(input: FragmentInput) -> @location(0) vec4<f32> {\\n    var diffuseColor : vec4<f32> = textureSample(diffuseT, diffuseS, input.v_texCoord);\\n\\n    var tangentToWorld : mat3x3<f32> = mat3x3<f32>(\\n        input.v_tangent,\\n        input.v_binormal,\\n        input.v_normal\\n    );\\n    var normalSpec : vec4<f32> = textureSample(normalMapT, normalMapS, input.v_texCoord);\\n\\n    var tangentNormal : vec3<f32> = normalSpec.xyz - vec3<f32>(0.5, 0.5, 0.5);\\n    var normal : vec3<f32> = normalize(tangentToWorld * tangentNormal);\\n\\n    var surfaceToLight : vec3<f32> = normalize(input.v_surfaceToLight);\\n    var surfaceToView : vec3<f32> = normalize(input.v_surfaceToView);\\n    var halfVector : vec3<f32> = normalize(surfaceToLight + surfaceToView);\\n    var litR : vec4<f32> = lit(dot(normal, surfaceToLight), dot(normal, halfVector), _hyd_uniforms_.shininess);\\n\\n    var outColor : vec4<f32> = vec4<f32>(\\n        (_hyd_uniforms_.lightColor * (diffuseColor * litR.y + diffuseColor * _hyd_uniforms_.ambient + _hyd_uniforms_.specular * litR.z * _hyd_uniforms_.specularFactor * normalSpec.a)).rgb,\\n        diffuseColor.a\\n    );\\n    outColor = mix(outColor, vec4<f32>(_hyd_uniforms_.fogColor.rgb, diffuseColor.a),\\n                   clamp(pow((input.v_position.z / input.v_position.w), _hyd_uniforms_.fogPower) * _hyd_uniforms_.fogMult - _hyd_uniforms_.fogOffset, 0.0, 1.0));\\n\\n    return outColor;\\n}\\n\", \"glsl_path\": \"21.glsl\", \"wgsl_path\": \"21.wgsl\"}"
+    },
+    {
+        "attributes": [],
+        "uniforms": [
+            {
+                "name": "lightColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "specular",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "shininess",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "specularFactor",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "refractionFudge",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "eta",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "tankColorFudge",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogPower",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogMult",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogOffset",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            }
+        ],
+        "samplers": [
+            {
+                "name": "diffuse",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            },
+            {
+                "name": "normalMap",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            },
+            {
+                "name": "reflectionMap",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            },
+            {
+                "name": "skybox",
+                "glsl_type": "samplerCube",
+                "wgsl_type": "texture_cube<f32>"
+            }
+        ],
+        "debug_info": "{\"glsl\": \"#ifdef GL_FRAGMENT_PRECISION_HIGH\\n  precision highp float;\\n#else\\n  precision mediump float;\\n#endif\\n\\nuniform vec4 lightColor;\\nvarying vec4 v_position;\\nvarying vec2 v_texCoord;\\nvarying vec3 v_tangent;  // #normalMap\\nvarying vec3 v_binormal;  // #normalMap\\nvarying vec3 v_normal;\\nvarying vec3 v_surfaceToLight;\\nvarying vec3 v_surfaceToView;\\n\\nuniform sampler2D diffuse;\\nuniform vec4 specular;\\nuniform sampler2D normalMap;  // #normalMap\\nuniform sampler2D reflectionMap;\\nuniform samplerCube skybox;\\nuniform float shininess;\\nuniform float specularFactor;\\nuniform float refractionFudge;\\nuniform float eta;\\nuniform float tankColorFudge;\\nuniform float fogPower;\\nuniform float fogMult;\\nuniform float fogOffset;\\nuniform vec4 fogColor;\\n\\n\\nvec4 lit(float l ,float h, float m) {\\n  return vec4(1.0,\\n              max(l, 0.0),\\n              (l > 0.0) ? pow(max(0.0, h), m) : 0.0,\\n              1.0);\\n}\\nvoid main() {\\n  vec4 diffuseColor = texture2D(diffuse, v_texCoord) +\\n      vec4(tankColorFudge, tankColorFudge, tankColorFudge, 1);\\n  mat3 tangentToWorld = mat3(v_tangent,  // #normalMap\\n                             v_binormal,  // #normalMap\\n                             v_normal);  // #normalMap\\n  vec4 normalSpec = texture2D(normalMap, v_texCoord.xy);  // #normalMap\\n\\n  vec4 refraction = texture2D(reflectionMap, v_texCoord.xy);\\n  vec3 tangentNormal = normalSpec.xyz - vec3(0.5, 0.5, 0.5);  // #normalMap\\n  tangentNormal = normalize(tangentNormal + vec3(0,0,refractionFudge));  // #normalMap\\n  vec3 normal = (tangentToWorld * tangentNormal);  // #normalMap\\n  normal = normalize(normal);  // #normalMap\\n\\n\\n  vec3 surfaceToLight = normalize(v_surfaceToLight);\\n  vec3 surfaceToView = normalize(v_surfaceToView);\\n\\n  vec3 refractionVec = refract(surfaceToView, normal, eta);\\n\\n  vec4 skyColor = textureCube(skybox, refractionVec);\\n\\n//  vec4 bumpSkyColor = textureCube(skybox, refractionVec);\\n//  vec4 nonBumpSkyColor = textureCube(\\n//      skybox,\\n//      refract(surfaceToView, normalize(v_normal), eta));\\n//  vec4 skyColor = mix(nonBumpSkyColor, bumpSkyColor, normalSpec.a);\\n  vec4 outColor = vec4(\\n      mix(skyColor * diffuseColor, diffuseColor, refraction.r).rgb,\\n      diffuseColor.a);\\n  outColor = mix(outColor, vec4(fogColor.rgb, diffuseColor.a),\\n   clamp(pow((v_position.z / v_position.w), fogPower) * fogMult - fogOffset,0.0,1.0));\\n\\n  gl_FragColor = outColor;\\n}\", \"wgsl\": \"struct FragmentInput {\\n    @location(0) v_position : vec4<f32>,\\n    @location(1) v_texCoord : vec2<f32>,\\n    @location(2) v_tangent : vec3<f32>,\\n    @location(3) v_binormal : vec3<f32>,\\n    @location(4) v_normal : vec3<f32>,\\n    @location(5) v_surfaceToLight : vec3<f32>,\\n    @location(6) v_surfaceToView : vec3<f32>,\\n};\\n\\nfn lit(l: f32, h: f32, m: f32) -> vec4<f32> {\\n    // return vec4<f32>(1.0, max(l, 0.0), (l > 0.0) ? pow(max(0.0, h), m) : 0.0, 1.0);\\n    if l > 0.0 {\\n        return vec4<f32>(1.0, l, pow(max(0.0, h), m), 1.0);\\n    } else {\\n        return vec4<f32>(1.0, 0.0, 0.0, 1.0);\\n    }\\n}\\n\\n@fragment\\nfn main(input: FragmentInput) -> @location(0) vec4<f32> {\\n    var diffuseColor : vec4<f32> = textureSample(diffuseT, diffuseS, input.v_texCoord);\\n\\n    var tangentToWorld : mat3x3<f32> = mat3x3<f32>(\\n        input.v_tangent,\\n        input.v_binormal,\\n        input.v_normal\\n    );\\n    var normalSpec : vec4<f32> = textureSample(normalMapT, normalMapS, input.v_texCoord);\\n\\n    var refraction : vec4<f32> = textureSample(reflectionMapT, reflectionMapS, input.v_texCoord);\\n    var tangentNormal : vec3<f32> = normalSpec.xyz - vec3<f32>(0.5, 0.5, 0.5);\\n    tangentNormal = normalize(tangentNormal + vec3<f32>(0.0, 0.0, _hyd_uniforms_.refractionFudge));\\n    var normal : vec3<f32> = normalize(tangentToWorld * tangentNormal);\\n\\n    var surfaceToLight : vec3<f32> = normalize(input.v_surfaceToLight);\\n    var surfaceToView : vec3<f32> = normalize(input.v_surfaceToView);\\n\\n    var refractionVec : vec3<f32> = refract(surfaceToView, normal, _hyd_uniforms_.eta);\\n\\n    var skyColor : vec4<f32> = textureSample(skyboxT, skyboxS, refractionVec);\\n\\n    var outColor : vec4<f32> = vec4<f32>(\\n        mix(skyColor * diffuseColor, diffuseColor, refraction.r).rgb,\\n        diffuseColor.a\\n    );\\n    outColor = mix(outColor, vec4<f32>(_hyd_uniforms_.fogColor.rgb, diffuseColor.a),\\n                   clamp(pow((input.v_position.z / input.v_position.w), _hyd_uniforms_.fogPower) * _hyd_uniforms_.fogMult - _hyd_uniforms_.fogOffset, 0.0, 1.0));\\n\\n    return outColor;\\n}\\n\", \"glsl_path\": \"22.glsl\", \"wgsl_path\": \"22.wgsl\"}"
+    },
+    {
+        "attributes": [],
+        "uniforms": [
+            {
+                "name": "lightColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "specular",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "shininess",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "specularFactor",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            }
+        ],
+        "samplers": [
+            {
+                "name": "diffuse",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            },
+            {
+                "name": "normalMap",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            },
+            {
+                "name": "reflectionMap",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            },
+            {
+                "name": "skybox",
+                "glsl_type": "samplerCube",
+                "wgsl_type": "texture_cube<f32>"
+            }
+        ],
+        "debug_info": "{\"glsl\": \"#ifdef GL_FRAGMENT_PRECISION_HIGH\\n  precision highp float;\\n#else\\n  precision mediump float;\\n#endif\\n\\nuniform vec4 lightColor;\\nvarying vec4 v_position;\\nvarying vec2 v_texCoord;\\nvarying vec3 v_tangent;  // #normalMap\\nvarying vec3 v_binormal;  // #normalMap\\nvarying vec3 v_normal;\\nvarying vec3 v_surfaceToLight;\\nvarying vec3 v_surfaceToView;\\n\\nuniform sampler2D diffuse;\\nuniform vec4 specular;\\nuniform sampler2D normalMap;  // #normalMap\\nuniform sampler2D reflectionMap;\\nuniform samplerCube skybox;\\nuniform float shininess;\\nuniform float specularFactor;\\n\\nvec4 lit(float l ,float h, float m) {\\n  return vec4(1.0,\\n              max(l, 0.0),\\n              (l > 0.0) ? pow(max(0.0, h), m) : 0.0,\\n              1.0);\\n}\\nvoid main() {\\n  vec4 diffuseColor = texture2D(diffuse, v_texCoord);\\n  mat3 tangentToWorld = mat3(v_tangent,  // #normalMap\\n                             v_binormal,  // #normalMap\\n                             v_normal);  // #normalMap\\n  vec4 normalSpec = texture2D(normalMap, v_texCoord.xy);  // #normalMap\\n\\n  vec4 reflection = texture2D(reflectionMap, v_texCoord.xy);\\n  vec3 tangentNormal = normalSpec.xyz - vec3(0.5, 0.5, 0.5);  // #normalMap\\n//  tangentNormal = normalize(tangentNormal + vec3(0,0,refractionFudge));\\n  vec3 normal = (tangentToWorld * tangentNormal);  // #normalMap\\n  normal = normalize(normal);  // #normalMap\\n\\n\\n  vec3 surfaceToLight = normalize(v_surfaceToLight);\\n  vec3 surfaceToView = normalize(v_surfaceToView);\\n\\n  vec4 skyColor = textureCube(skybox, -reflect(surfaceToView, normal));\\n  float fudgeAmount = 1.1;\\n  vec3 fudge = skyColor.rgb * vec3(fudgeAmount, fudgeAmount, fudgeAmount);\\n  float bright = min(1.0, fudge.r * fudge.g * fudge.b);\\n  vec4 reflectColor =\\n      mix(vec4(skyColor.rgb, bright),\\n          diffuseColor,\\n          (1.0 - reflection.r));\\n  float r = abs(dot(surfaceToView, normal));\\n  gl_FragColor = vec4(mix(\\n      skyColor,\\n      reflectColor,\\n      ((r + 0.3) * (reflection.r))).rgb, 1.0 - r);\\n}\", \"wgsl\": \"struct FragmentInput {\\n    @location(0) v_position : vec4<f32>,\\n    @location(1) v_texCoord : vec2<f32>,\\n    @location(2) v_tangent : vec3<f32>,\\n    @location(3) v_binormal : vec3<f32>,\\n    @location(4) v_normal : vec3<f32>,\\n    @location(5) v_surfaceToLight : vec3<f32>,\\n    @location(6) v_surfaceToView : vec3<f32>,\\n};\\n\\nfn lit(l: f32, h: f32, m: f32) -> vec4<f32> {\\n    // return vec4<f32>(1.0, max(l, 0.0), (l > 0.0) ? pow(max(0.0, h), m) : 0.0, 1.0);\\n    if l > 0.0 {\\n        return vec4<f32>(1.0, l, pow(max(0.0, h), m), 1.0);\\n    } else {\\n        return vec4<f32>(1.0, 0.0, 0.0, 1.0);\\n    }\\n}\\n\\n@fragment\\nfn main(input: FragmentInput) -> @location(0) vec4<f32> {\\n    var diffuseColor : vec4<f32> = textureSample(diffuseT, diffuseS, input.v_texCoord);\\n    var tangentToWorld : mat3x3<f32> = mat3x3<f32>(\\n        input.v_tangent,\\n        input.v_binormal,\\n        input.v_normal\\n    );\\n    var normalSpec : vec4<f32> = textureSample(normalMapT, normalMapS, input.v_texCoord);\\n\\n    var reflection : vec4<f32> = textureSample(reflectionMapT, reflectionMapS, input.v_texCoord.xy);\\n    var tangentNormal : vec3<f32> = normalSpec.xyz - vec3<f32>(0.5, 0.5, 0.5);\\n    var normal : vec3<f32> = normalize(tangentToWorld * tangentNormal);\\n\\n    var surfaceToView : vec3<f32> = normalize(input.v_surfaceToView);\\n\\n    var skyColor : vec4<f32> = textureSample(skyboxT, skyboxS, -reflect(surfaceToView, normal));\\n\\n    var fudgeAmount : f32 = 1.1;\\n    var fudge : vec3<f32> = skyColor.rgb * vec3<f32>(fudgeAmount, fudgeAmount, fudgeAmount);\\n    var bright : f32 = min(1.0, fudge.r * fudge.g * fudge.b);\\n    var reflectColor : vec4<f32> = mix(\\n        vec4<f32>(skyColor.rgb, bright),\\n        diffuseColor,\\n        (1.0 - reflection.r)\\n    );\\n\\n    var r : f32 = abs(dot(surfaceToView, normal));\\n    var fragColor : vec4<f32> = vec4<f32>(\\n        mix(skyColor.rgb, reflectColor.rgb, ((r + 0.3) * reflection.r)).rgb,\\n        1.0 - r\\n    );\\n\\n    return fragColor;\\n}\\n\", \"glsl_path\": \"23.glsl\", \"wgsl_path\": \"23.wgsl\"}"
+    },
+    {
+        "attributes": [],
+        "uniforms": [
+            {
+                "name": "colorMult",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            }
+        ],
+        "samplers": [
+            {
+                "name": "colorMap",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            }
+        ],
+        "debug_info": "{\"glsl\": \"precision mediump float;\\n\\nvarying vec2 v_texCoord;\\nuniform vec4 colorMult;\\nuniform sampler2D colorMap;\\nvoid main() {\\n  gl_FragColor = texture2D(colorMap, v_texCoord) * colorMult;\\n}\", \"wgsl\": \"// struct UniformBuffer {\\n//     world : mat4x4<f32>,\\n//     viewProjection : mat4x4<f32>,\\n//     colorMult : vec4<f32>,\\n// };\\n\\n// @binding(0) @group(0) var<uniform> _hyd_uniforms_ : UniformBuffer;\\n\\n// @binding(1) @group(0) var colorMapSamplerS : sampler;\\n// @binding(2) @group(0) var colorMapSamplerT : texture_2d<f32>;\\n\\n@fragment\\nfn main(\\n    @location(0) v_texCoord : vec2<f32>\\n) -> @location(0) vec4<f32> {\\n    let texColor : vec4<f32> = textureSample(colorMapT, colorMapS, v_texCoord);\\n    return texColor * _hyd_uniforms_.colorMult;\\n}\\n\", \"glsl_path\": \"3.glsl\", \"wgsl_path\": \"3.wgsl\"}"
+    },
+    {
+        "attributes": [
+            {
+                "name": "uvLifeTimeFrameStart",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "positionStartTime",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "velocityStartSize",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "accelerationEndSize",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "spinStartSpinSpeed",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "orientation",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "colorMult",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            }
+        ],
+        "uniforms": [
+            {
+                "name": "viewProjection",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "world",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "worldVelocity",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "worldAcceleration",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "timeRange",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "time",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "timeOffset",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "frameDuration",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "numFrames",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            }
+        ],
+        "samplers": [],
+        "debug_info": "{\"glsl\": \"uniform mat4 viewProjection;\\nuniform mat4 world;\\nuniform vec3 worldVelocity;\\nuniform vec3 worldAcceleration;\\nuniform float timeRange;\\nuniform float time;\\nuniform float timeOffset;\\nuniform float frameDuration;\\nuniform float numFrames;\\n\\n// Incoming vertex attributes\\nattribute vec4 uvLifeTimeFrameStart; // uv, lifeTime, frameStart\\nattribute vec4 positionStartTime;    // position.xyz, startTime\\nattribute vec4 velocityStartSize;    // velocity.xyz, startSize\\nattribute vec4 accelerationEndSize;  // acceleration.xyz, endSize\\nattribute vec4 spinStartSpinSpeed;   // spinStart.x, spinSpeed.y\\nattribute vec4 orientation;          // orientation quaternion\\nattribute vec4 colorMult;            // multiplies color and ramp textures\\n\\n// Outgoing variables to fragment shader\\nvarying vec2 outputTexcoord;\\nvarying float outputPercentLife;\\nvarying vec4 outputColorMult;\\n\\nvoid main() {\\n  vec2 uv = uvLifeTimeFrameStart.xy;\\n  float lifeTime = uvLifeTimeFrameStart.z;\\n  float frameStart = uvLifeTimeFrameStart.w;\\n  vec3 position = positionStartTime.xyz;\\n  float startTime = positionStartTime.w;\\n  vec3 velocity = (world * vec4(velocityStartSize.xyz,\\n                                0.)).xyz + worldVelocity;\\n  float startSize = velocityStartSize.w;\\n  vec3 acceleration = (world * vec4(accelerationEndSize.xyz,\\n                                    0)).xyz + worldAcceleration;\\n  float endSize = accelerationEndSize.w;\\n  float spinStart = spinStartSpinSpeed.x;\\n  float spinSpeed = spinStartSpinSpeed.y;\\n\\n  float localTime = mod((time - timeOffset - startTime), timeRange);\\n  float percentLife = localTime / lifeTime;\\n\\n  float frame = mod(floor(localTime / frameDuration + frameStart),\\n                    numFrames);\\n  float uOffset = frame / numFrames;\\n  float u = uOffset + (uv.x + 0.5) * (1. / numFrames);\\n\\n  outputTexcoord = vec2(u, uv.y + 0.5);\\n  outputColorMult = colorMult;\\n\\n  float size = mix(startSize, endSize, percentLife);\\n  size = (percentLife < 0. || percentLife > 1.) ? 0. : size;\\n  float s = sin(spinStart + spinSpeed * localTime);\\n  float c = cos(spinStart + spinSpeed * localTime);\\n\\n  vec4 rotatedPoint = vec4((uv.x * c + uv.y * s) * size, 0., \\n                           (uv.x * s - uv.y * c) * size, 1.);\\n  vec3 center = velocity * localTime +\\n                acceleration * localTime * localTime + \\n                position;\\n\\n  vec4 q2 = orientation + orientation;\\n  vec4 qx = orientation.xxxw * q2.xyzx;\\n  vec4 qy = orientation.xyyw * q2.xyzy;\\n  vec4 qz = orientation.xxzw * q2.xxzz;\\n\\n  mat4 localMatrix = mat4(\\n      (1.0 - qy.y) - qz.z, \\n      qx.y + qz.w, \\n      qx.z - qy.w,\\n      0,\\n\\n      qx.y - qz.w, \\n      (1.0 - qx.x) - qz.z, \\n      qy.z + qx.w,\\n      0,\\n\\n      qx.z + qy.w, \\n      qy.z - qx.w, \\n      (1.0 - qx.x) - qy.y,\\n      0,\\n\\n      center.x, center.y, center.z, 1);\\n  rotatedPoint = localMatrix * rotatedPoint;\\n  outputPercentLife = percentLife;\\n  gl_Position = viewProjection * world * rotatedPoint;\\n}\", \"wgsl\": \"// TODO: this shader is buggy, it doesn't work with the fish model\\n\\nstruct VertexInput {\\n    @location(0) uvLifeTimeFrameStart : vec4<f32>,\\n    @location(1) positionStartTime : vec4<f32>,\\n    @location(2) velocityStartSize : vec4<f32>,\\n    @location(3) accelerationEndSize : vec4<f32>,\\n    @location(4) spinStartSpinSpeed : vec4<f32>,\\n    @location(5) orientation : vec4<f32>,\\n    @location(6) colorMult : vec4<f32>,\\n};\\n\\nstruct VertexOutput {\\n    @builtin(position) Position : vec4<f32>,\\n    @location(0) Texcoord : vec2<f32>,\\n    @location(1) PercentLife : f32,\\n    @location(2) ColorMult : vec4<f32>,\\n}\\n\\n@vertex\\nfn main(vertexInput : VertexInput) -> VertexOutput {\\n    var output : VertexOutput;\\n    \\n    var uv : vec2<f32> = vertexInput.uvLifeTimeFrameStart.xy;\\n    var lifeTime : f32 = vertexInput.uvLifeTimeFrameStart.z;\\n    var frameStart : f32 = vertexInput.uvLifeTimeFrameStart.w;\\n    var position : vec3<f32> = vertexInput.positionStartTime.xyz;\\n    var startTime : f32 = vertexInput.positionStartTime.w;\\n    var velocity : vec3<f32> = (_hyd_uniforms_.world * vec4<f32>(vertexInput.velocityStartSize.xyz, 0.0)).xyz + _hyd_uniforms_.worldVelocity;\\n    var startSize : f32 = vertexInput.velocityStartSize.w;\\n    var acceleration : vec3<f32> = (_hyd_uniforms_.world * vec4<f32>(vertexInput.accelerationEndSize.xyz, 0.0)).xyz + _hyd_uniforms_.worldAcceleration;\\n    var endSize : f32 = vertexInput.accelerationEndSize.w;\\n    var spinStart : f32 = vertexInput.spinStartSpinSpeed.x;\\n    var spinSpeed : f32 = vertexInput.spinStartSpinSpeed.y;\\n\\n    var localTime : f32 = (_hyd_uniforms_.time - _hyd_uniforms_.timeOffset - startTime) % _hyd_uniforms_.timeRange;\\n    var percentLife : f32 = localTime / lifeTime;\\n\\n    var frame : f32 = (floor(localTime / _hyd_uniforms_.frameDuration + frameStart) % _hyd_uniforms_.numFrames);\\n    var uOffset : f32 = frame / _hyd_uniforms_.numFrames;\\n    var u : f32 = uOffset + (uv.x + 0.5) * (1.0 / _hyd_uniforms_.numFrames);\\n\\n    output.Texcoord = vec2<f32>(u, uv.y + 0.5);\\n    output.ColorMult = vertexInput.colorMult;\\n\\n    var size : f32 = mix(startSize, endSize, percentLife);\\n    // if (percentLife < 0.0 || percentLife > 1.0) {\\n    //     size = 0.0;\\n    // }\\n    var s : f32 = sin(spinStart + spinSpeed * localTime);\\n    var c : f32 = cos(spinStart + spinSpeed * localTime);\\n\\n    var rotatedPoint : vec4<f32> = vec4<f32>((uv.x * c + uv.y * s) * size, 0.0, (uv.x * s - uv.y * c) * size, 1.0);\\n    var center : vec3<f32> = velocity * localTime + acceleration * localTime * localTime + position;\\n\\n    var q2 : vec4<f32> = vertexInput.orientation + vertexInput.orientation;\\n    var qx : vec4<f32> = vertexInput.orientation.xxxw * q2.xyzx;\\n    var qy : vec4<f32> = vertexInput.orientation.xyyw * q2.xyzy;\\n    var qz : vec4<f32> = vertexInput.orientation.xxzw * q2.xxzz;\\n\\n    var localMatrix : mat4x4<f32> = mat4x4<f32>(\\n        (1.0 - qy.y) - qz.z,\\n        qx.y + qz.w,\\n        qx.z - qy.w,\\n        0.0,\\n\\n        qx.y - qz.w,\\n        (1.0 - qx.x) - qz.z,\\n        qy.z + qx.w,\\n        0.0,\\n\\n        qx.z + qy.w,\\n        qy.z - qx.w,\\n        (1.0 - qx.x) - qy.y,\\n        0.0,\\n\\n        center.x, center.y, center.z, 1.0\\n    );\\n    rotatedPoint = localMatrix * rotatedPoint;\\n    output.PercentLife = percentLife;\\n    output.Texcoord.y = 1.0 - output.Texcoord.y; // Flip Y-axis\\n    output.Position = _hyd_uniforms_.viewProjection * _hyd_uniforms_.world * rotatedPoint;\\n\\n    return output;\\n}\", \"glsl_path\": \"4.glsl\", \"wgsl_path\": \"4.wgsl\"}"
+    },
+    {
+        "attributes": [],
+        "uniforms": [],
+        "samplers": [
+            {
+                "name": "rampSampler",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            },
+            {
+                "name": "colorSampler",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            }
+        ],
+        "debug_info": "{\"glsl\": \"precision mediump float;\\nuniform sampler2D rampSampler;\\nuniform sampler2D colorSampler;\\n\\n// Incoming variables from vertex shader\\nvarying vec2 outputTexcoord;\\nvarying float outputPercentLife;\\nvarying vec4 outputColorMult;\\n\\nvoid main() {\\n  vec4 colorMult = texture2D(rampSampler, \\n                             vec2(outputPercentLife, 0.5)) *\\n                   outputColorMult;\\n  gl_FragColor = texture2D(colorSampler, outputTexcoord) * colorMult;\\n}\", \"wgsl\": \"struct FragmentInput {\\n    @location(0) Texcoord : vec2<f32>,\\n    @location(1) PercentLife : f32,\\n    @location(2) ColorMult : vec4<f32>,\\n};\\n\\n@fragment\\nfn main(input : FragmentInput) -> @location(0) vec4<f32> {\\n    // return vec4<f32>(1.0, 0.0, 0.0, 1.0);\\n    let colorMult : vec4<f32> = textureSample(rampSamplerT, rampSamplerS, vec2<f32>(input.PercentLife, 0.5)) * input.ColorMult;\\n    let colorSample : vec4<f32> = textureSample(colorSamplerT, colorSamplerS, input.Texcoord);\\n\\n    return colorSample * colorMult;\\n}\", \"glsl_path\": \"5.glsl\", \"wgsl_path\": \"5.wgsl\"}"
+    },
+    {
+        "attributes": [
+            {
+                "name": "uvLifeTimeFrameStart",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "positionStartTime",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "velocityStartSize",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "accelerationEndSize",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "spinStartSpinSpeed",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "colorMult",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            }
+        ],
+        "uniforms": [
+            {
+                "name": "viewProjection",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "world",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "viewInverse",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "worldVelocity",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "worldAcceleration",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "timeRange",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "time",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "timeOffset",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "frameDuration",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "numFrames",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            }
+        ],
+        "samplers": [],
+        "debug_info": "{\"glsl\": \"uniform mat4 viewProjection;\\nuniform mat4 world;\\nuniform mat4 viewInverse;\\nuniform vec3 worldVelocity;\\nuniform vec3 worldAcceleration;\\nuniform float timeRange;\\nuniform float time;\\nuniform float timeOffset;\\nuniform float frameDuration;\\nuniform float numFrames;\\n\\n// Incoming vertex attributes\\nattribute vec4 uvLifeTimeFrameStart; // uv, lifeTime, frameStart\\nattribute vec4 positionStartTime;    // position.xyz, startTime\\nattribute vec4 velocityStartSize;    // velocity.xyz, startSize\\nattribute vec4 accelerationEndSize;  // acceleration.xyz, endSize\\nattribute vec4 spinStartSpinSpeed;   // spinStart.x, spinSpeed.y\\nattribute vec4 colorMult;            // multiplies color and ramp textures\\n\\n// Outgoing variables to fragment shader\\nvarying vec2 outputTexcoord;\\nvarying float outputPercentLife;\\nvarying vec4 outputColorMult;\\n\\nvoid main() {\\n  vec2 uv = uvLifeTimeFrameStart.xy;\\n  float lifeTime = uvLifeTimeFrameStart.z;\\n  float frameStart = uvLifeTimeFrameStart.w;\\n  vec3 position = positionStartTime.xyz;\\n  float startTime = positionStartTime.w;\\n  vec3 velocity = (world * vec4(velocityStartSize.xyz,\\n                                0.)).xyz + worldVelocity;\\n  float startSize = velocityStartSize.w;\\n  vec3 acceleration = (world * vec4(accelerationEndSize.xyz,\\n                                    0)).xyz + worldAcceleration;\\n  float endSize = accelerationEndSize.w;\\n  float spinStart = spinStartSpinSpeed.x;\\n  float spinSpeed = spinStartSpinSpeed.y;\\n\\n  float localTime = mod((time - timeOffset - startTime), timeRange);\\n  float percentLife = localTime / lifeTime;\\n\\n  float frame = mod(floor(localTime / frameDuration + frameStart),\\n                    numFrames);\\n  float uOffset = frame / numFrames;\\n  float u = uOffset + (uv.x + 0.5) * (1. / numFrames);\\n\\n  outputTexcoord = vec2(u, uv.y + 0.5);\\n  outputColorMult = colorMult;\\n\\n  vec3 basisX = viewInverse[0].xyz;\\n  vec3 basisZ = viewInverse[1].xyz;\\n\\n  float size = mix(startSize, endSize, percentLife);\\n  size = (percentLife < 0. || percentLife > 1.) ? 0. : size;\\n  float s = sin(spinStart + spinSpeed * localTime);\\n  float c = cos(spinStart + spinSpeed * localTime);\\n\\n  vec2 rotatedPoint = vec2(uv.x * c + uv.y * s, \\n                           -uv.x * s + uv.y * c);\\n  vec3 localPosition = vec3(basisX * rotatedPoint.x +\\n                            basisZ * rotatedPoint.y) * size +\\n                       velocity * localTime +\\n                       acceleration * localTime * localTime + \\n                       position;\\n\\n  outputPercentLife = percentLife;\\n  gl_Position = viewProjection * vec4(localPosition + world[3].xyz, 1.);\\n}\", \"wgsl\": \"// TODO: this shader is buggy, it doesn't work with the fish model\\n\\nstruct VertexInput {\\n  @location(0) uvLifeTimeFrameStart : vec4<f32>,\\n  @location(1) positionStartTime : vec4<f32>,\\n  @location(2) velocityStartSize : vec4<f32>,\\n  @location(3) accelerationEndSize : vec4<f32>,\\n  @location(4) spinStartSpinSpeed : vec4<f32>,\\n  @location(5) colorMult : vec4<f32>,\\n};\\n\\nstruct VertexOutput {\\n  @builtin(position) Position : vec4<f32>,\\n  @location(0) Texcoord : vec2<f32>,\\n  @location(1) PercentLife : f32,\\n  @location(2) ColorMult : vec4<f32>,\\n};\\n\\n@vertex\\nfn main(input : VertexInput) -> VertexOutput {\\n  var output : VertexOutput;\\n\\n  var uv : vec2<f32> = input.uvLifeTimeFrameStart.xy;\\n  var lifeTime : f32 = input.uvLifeTimeFrameStart.z;\\n  var frameStart : f32 = input.uvLifeTimeFrameStart.w;\\n  var position : vec3<f32> = input.positionStartTime.xyz;\\n  var startTime : f32 = input.positionStartTime.w;\\n  var velocity : vec3<f32> = (_hyd_uniforms_.world * vec4<f32>(input.velocityStartSize.xyz, 0.0)).xyz + _hyd_uniforms_.worldVelocity;\\n  var startSize : f32 = input.velocityStartSize.w;\\n  var acceleration : vec3<f32> = (_hyd_uniforms_.world * vec4<f32>(input.accelerationEndSize.xyz, 0.0)).xyz + _hyd_uniforms_.worldAcceleration;\\n  var endSize : f32 = input.accelerationEndSize.w;\\n  var spinStart : f32 = input.spinStartSpinSpeed.x;\\n  var spinSpeed : f32 = input.spinStartSpinSpeed.y;\\n\\n  var localTime : f32 = (_hyd_uniforms_.time - _hyd_uniforms_.timeOffset - startTime) % _hyd_uniforms_.timeRange;\\n  var percentLife : f32 = localTime / lifeTime;\\n\\n  var frame : f32 = floor(localTime / _hyd_uniforms_.frameDuration + frameStart) % _hyd_uniforms_.numFrames;\\n  var uOffset : f32 = frame / _hyd_uniforms_.numFrames;\\n  var u : f32 = uOffset + (uv.x + 0.5) * (1.0 / _hyd_uniforms_.numFrames);\\n\\n  output.Texcoord = vec2<f32>(u, uv.y + 0.5);\\n  output.ColorMult = input.colorMult;\\n\\n  var basisX : vec3<f32> = _hyd_uniforms_.viewInverse[0].xyz;\\n  var basisZ : vec3<f32> = _hyd_uniforms_.viewInverse[1].xyz;\\n\\n  var size : f32 = mix(startSize, endSize, percentLife);\\n  // if (percentLife < 0.0 || percentLife > 1.0) {\\n  //     size = 0.0;\\n  // }\\n  var s : f32 = sin(spinStart + spinSpeed * localTime);\\n  var c : f32 = cos(spinStart + spinSpeed * localTime);\\n\\n  var rotatedPoint : vec2<f32> = vec2<f32>(uv.x * c + uv.y * s, -uv.x * s + uv.y * c);\\n  var localPosition : vec3<f32> = vec3<f32>(basisX * rotatedPoint.x + basisZ * rotatedPoint.y) * size + velocity * localTime + acceleration * localTime * localTime + position;\\n\\n  output.PercentLife = percentLife;\\n  output.Texcoord.y = 1.0 - output.Texcoord.y; // Flip Y-axis\\n  output.Position = _hyd_uniforms_.viewProjection * vec4<f32>(localPosition + _hyd_uniforms_.world[3].xyz, 1.0);\\n\\n  return output;\\n}\\n\", \"glsl_path\": \"6.glsl\", \"wgsl_path\": \"6.wgsl\"}"
+    },
+    {
+        "attributes": [],
+        "uniforms": [
+            {
+                "name": "lightColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "ambient",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "specular",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "shininess",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "specularFactor",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogPower",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogMult",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogOffset",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            }
+        ],
+        "samplers": [
+            {
+                "name": "diffuse",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            }
+        ],
+        "debug_info": "{\"glsl\": \"#ifdef GL_FRAGMENT_PRECISION_HIGH\\n  precision highp float;\\n#else\\n  precision mediump float;\\n#endif\\n\\nuniform vec4 lightColor;\\nvarying vec4 v_position;\\nvarying vec2 v_texCoord;\\n\\n\\nvarying vec3 v_normal;\\nvarying vec3 v_surfaceToLight;\\nvarying vec3 v_surfaceToView;\\n\\nuniform vec4 ambient;\\nuniform sampler2D diffuse;\\nuniform vec4 specular;\\n\\nuniform float shininess;\\nuniform float specularFactor;\\nuniform float fogPower;\\nuniform float fogMult;\\nuniform float fogOffset;\\nuniform vec4 fogColor;\\n\\n\\nvec4 lit(float l ,float h, float m) {\\n  return vec4(1.0,\\n              max(l, 0.0),\\n              (l > 0.0) ? pow(max(0.0, h), m) : 0.0,\\n              1.0);\\n}\\nvoid main() {\\n  vec4 diffuseColor = texture2D(diffuse, v_texCoord);\\n\\n\\n\\n\\n  vec4 normalSpec = vec4(0,0,0,0);  // #noNormalMap\\n\\n\\n\\n\\n  vec3 normal = normalize(v_normal);   // #noNormalMap\\n  vec3 surfaceToLight = normalize(v_surfaceToLight);\\n  vec3 surfaceToView = normalize(v_surfaceToView);\\n  vec3 halfVector = normalize(surfaceToLight + surfaceToView);\\n  vec4 litR = lit(dot(normal, surfaceToLight),\\n                    dot(normal, halfVector), shininess);\\n  vec4 outColor = vec4(\\n    (lightColor * (diffuseColor * litR.y + diffuseColor * ambient +\\n                  specular * litR.z * specularFactor * normalSpec.a)).rgb,\\n      diffuseColor.a);\\n  outColor = mix(outColor, vec4(fogColor.rgb, diffuseColor.a),\\n   clamp(pow((v_position.z / v_position.w), fogPower) * fogMult - fogOffset,0.0,1.0));\\n\\n  gl_FragColor = outColor;\\n}\", \"wgsl\": \"struct FragmentInput {\\n    @location(0) v_position : vec4<f32>,\\n    @location(1) v_texCoord : vec2<f32>,\\n    @location(2) v_tangent : vec3<f32>,\\n    @location(3) v_binormal : vec3<f32>,\\n    @location(4) v_normal : vec3<f32>,\\n    @location(5) v_surfaceToLight : vec3<f32>,\\n    @location(6) v_surfaceToView : vec3<f32>,\\n};\\n\\nfn lit(l: f32, h: f32, m: f32) -> vec4<f32> {\\n    // return vec4<f32>(1.0, max(l, 0.0), (l > 0.0) ? pow(max(0.0, h), m) : 0.0, 1.0);\\n    if l > 0.0 {\\n        return vec4<f32>(1.0, l, pow(max(0.0, h), m), 1.0);\\n    } else {\\n        return vec4<f32>(1.0, 0.0, 0.0, 1.0);\\n    }\\n}\\n\\n@fragment\\nfn main(input: FragmentInput) -> @location(0) vec4<f32> {\\n    var diffuseColor : vec4<f32> = textureSample(diffuseT, diffuseS, input.v_texCoord);\\n\\n    var normalSpec : vec4<f32> = vec4<f32>(0.0, 0.0, 0.0, 0.0); // #noNormalMap\\n\\n    var normal : vec3<f32> = normalize(input.v_normal); // #noNormalMap\\n    var surfaceToLight : vec3<f32> = normalize(input.v_surfaceToLight);\\n    var surfaceToView : vec3<f32> = normalize(input.v_surfaceToView);\\n    var halfVector : vec3<f32> = normalize(surfaceToLight + surfaceToView);\\n    var litR : vec4<f32> = lit(dot(normal, surfaceToLight),\\n                               dot(normal, halfVector), _hyd_uniforms_.shininess);\\n    var outColor : vec4<f32> = vec4<f32>(\\n        (_hyd_uniforms_.lightColor * (diffuseColor * litR.y + diffuseColor * _hyd_uniforms_.ambient +\\n                           _hyd_uniforms_.specular * litR.z * _hyd_uniforms_.specularFactor * normalSpec.a)).rgb,\\n        diffuseColor.a);\\n    outColor = mix(outColor, vec4<f32>(_hyd_uniforms_.fogColor.rgb, diffuseColor.a),\\n                   clamp(pow((input.v_position.z / input.v_position.w), _hyd_uniforms_.fogPower) * _hyd_uniforms_.fogMult - _hyd_uniforms_.fogOffset, 0.0, 1.0));\\n\\n    // return vec4<f32>(0.0, 1.0, 1.0, 1.0); // TODO: remove this\\n    return outColor;\\n}\\n\", \"glsl_path\": \"7.glsl\", \"wgsl_path\": \"7.wgsl\"}"
+    },
+    {
+        "attributes": [],
+        "uniforms": [
+            {
+                "name": "lightColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "ambient",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "specular",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "shininess",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "specularFactor",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogPower",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogMult",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogOffset",
+                "glsl_type": "float",
+                "wgsl_type": "f32"
+            },
+            {
+                "name": "fogColor",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            }
+        ],
+        "samplers": [
+            {
+                "name": "diffuse",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            },
+            {
+                "name": "normalMap",
+                "glsl_type": "sampler2D",
+                "wgsl_type": "texture_2d<f32>"
+            },
+            {
+                "name": "skybox",
+                "glsl_type": "samplerCube",
+                "wgsl_type": "texture_cube<f32>"
+            }
+        ],
+        "debug_info": "{\"glsl\": \"#ifdef GL_FRAGMENT_PRECISION_HIGH\\n  precision highp float;\\n#else\\n  precision mediump float;\\n#endif\\n\\nuniform vec4 lightColor;\\nvarying vec4 v_position;\\nvarying vec2 v_texCoord;\\n\\n\\nvarying vec3 v_normal;\\nvarying vec3 v_surfaceToLight;\\nvarying vec3 v_surfaceToView;\\n\\nuniform vec4 ambient;\\nuniform sampler2D diffuse;\\nuniform vec4 specular;\\nuniform sampler2D normalMap;\\n\\nuniform samplerCube skybox; // #reflecton\\nuniform float shininess;\\nuniform float specularFactor;\\nuniform float fogPower;\\nuniform float fogMult;\\nuniform float fogOffset;\\nuniform vec4 fogColor;\\n\\n\\nvec4 lit(float l ,float h, float m) {\\n  return vec4(1.0,\\n              max(l, 0.0),\\n              (l > 0.0) ? pow(max(0.0, h), m) : 0.0,\\n              1.0);\\n}\\nvoid main() {\\n  vec4 diffuseColor = texture2D(diffuse, v_texCoord);\\n\\n\\n\\n\\n  vec4 normalSpec = vec4(0,0,0,0);  // #noNormalMap\\n\\n  vec4 reflection = vec4(0,0,0,0);  // #noReflection\\n\\n\\n\\n  vec3 normal = normalize(v_normal); // #noNormalMap\\n  vec3 surfaceToLight = normalize(v_surfaceToLight);\\n  vec3 surfaceToView = normalize(v_surfaceToView);\\n\\n  vec4 skyColor = vec4(0.5,0.5,1,1);  // #noReflection\\n\\n  vec3 halfVector = normalize(surfaceToLight + surfaceToView);\\n  vec4 litR = lit(dot(normal, surfaceToLight),\\n                    dot(normal, halfVector), shininess);\\n  vec4 outColor = vec4(mix(\\n      skyColor,\\n      lightColor * (diffuseColor * litR.y + diffuseColor * ambient +\\n                    specular * litR.z * specularFactor * normalSpec.a),\\n      1.0 - reflection.r).rgb,\\n      diffuseColor.a);\\n  outColor = mix(outColor, vec4(fogColor.rgb, diffuseColor.a),\\n   clamp(pow((v_position.z / v_position.w), fogPower) * fogMult - fogOffset,0.0,1.0));\\n\\n  gl_FragColor = outColor;\\n}\", \"wgsl\": \"struct FragmentInput {\\n    @location(0) v_position : vec4<f32>,\\n    @location(1) v_texCoord : vec2<f32>,\\n    @location(2) v_tangent : vec3<f32>,\\n    @location(3) v_binormal : vec3<f32>,\\n    @location(4) v_normal : vec3<f32>,\\n    @location(5) v_surfaceToLight : vec3<f32>,\\n    @location(6) v_surfaceToView : vec3<f32>,\\n};\\n\\nfn lit(l: f32, h: f32, m: f32) -> vec4<f32> {\\n    // return vec4<f32>(1.0, max(l, 0.0), (l > 0.0) ? pow(max(0.0, h), m) : 0.0, 1.0);\\n    if l > 0.0 {\\n        return vec4<f32>(1.0, l, pow(max(0.0, h), m), 1.0);\\n    } else {\\n        return vec4<f32>(1.0, 0.0, 0.0, 1.0);\\n    }\\n}\\n\\n@fragment\\nfn main(input: FragmentInput) -> @location(0) vec4<f32> {\\n    var diffuseColor : vec4<f32> = textureSample(diffuseT, diffuseS, input.v_texCoord);\\n\\n    var normalSpec : vec4<f32> = vec4<f32>(0.0, 0.0, 0.0, 0.0); // #noNormalMap\\n\\n    var reflection : vec4<f32> = vec4<f32>(0.0, 0.0, 0.0, 0.0); // #noReflection\\n\\n    var normal : vec3<f32> = normalize(input.v_normal); // #noNormalMap\\n    var surfaceToLight : vec3<f32> = normalize(input.v_surfaceToLight);\\n    var surfaceToView : vec3<f32> = normalize(input.v_surfaceToView);\\n\\n    var skyColor : vec4<f32> = vec4<f32>(0.5, 0.5, 1.0, 1.0); // #noReflection\\n\\n    var halfVector : vec3<f32> = normalize(surfaceToLight + surfaceToView);\\n    var litR : vec4<f32> = lit(dot(normal, surfaceToLight),\\n                               dot(normal, halfVector), _hyd_uniforms_.shininess);\\n    var outColor : vec4<f32> = vec4<f32>(\\n        mix(skyColor,\\n            _hyd_uniforms_.lightColor * (diffuseColor * litR.y + diffuseColor * _hyd_uniforms_.ambient +\\n                              _hyd_uniforms_.specular * litR.z * _hyd_uniforms_.specularFactor * normalSpec.a),\\n            1.0 - reflection.r).rgb,\\n        diffuseColor.a);\\n    outColor = mix(outColor, vec4<f32>(_hyd_uniforms_.fogColor.rgb, diffuseColor.a),\\n                   clamp(pow((input.v_position.z / input.v_position.w), _hyd_uniforms_.fogPower) * _hyd_uniforms_.fogMult - _hyd_uniforms_.fogOffset, 0.0, 1.0));\\n    \\n    // return vec4<f32>(1.0, 0.0, 0.0, 1.0); // TODO: remove this\\n    return outColor;\\n}\\n\", \"glsl_path\": \"8.glsl\", \"wgsl_path\": \"8.wgsl\"}"
+    },
+    {
+        "attributes": [
+            {
+                "name": "position",
+                "glsl_type": "vec4",
+                "wgsl_type": "vec4<f32>"
+            },
+            {
+                "name": "normal",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "texCoord",
+                "glsl_type": "vec2",
+                "wgsl_type": "vec2<f32>"
+            },
+            {
+                "name": "tangent",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "binormal",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            }
+        ],
+        "uniforms": [
+            {
+                "name": "viewProjection",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "lightWorldPos",
+                "glsl_type": "vec3",
+                "wgsl_type": "vec3<f32>"
+            },
+            {
+                "name": "world",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "viewInverse",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            },
+            {
+                "name": "worldInverseTranspose",
+                "glsl_type": "mat4",
+                "wgsl_type": "mat4x4<f32>"
+            }
+        ],
+        "samplers": [],
+        "debug_info": "{\"glsl\": \"uniform mat4 viewProjection;\\nuniform vec3 lightWorldPos;\\nuniform mat4 world;\\nuniform mat4 viewInverse;\\nuniform mat4 worldInverseTranspose;\\nattribute vec4 position;\\nattribute vec3 normal;\\nattribute vec2 texCoord;\\nattribute vec3 tangent;\\nattribute vec3 binormal;\\nvarying vec4 v_position;\\nvarying vec2 v_texCoord;\\nvarying vec3 v_tangent;  // #normalMap\\nvarying vec3 v_binormal;  // #normalMap\\nvarying vec3 v_normal;\\nvarying vec3 v_surfaceToLight;\\nvarying vec3 v_surfaceToView;\\nvoid main() {\\n  v_texCoord = texCoord;\\n  v_position = (viewProjection * world * position);\\n  v_normal = (worldInverseTranspose * vec4(normal, 0)).xyz;\\n  v_surfaceToLight = lightWorldPos - (world * position).xyz;\\n  v_surfaceToView = (viewInverse[3] - (world * position)).xyz;\\n  v_binormal = (worldInverseTranspose * vec4(binormal, 0)).xyz;  // #normalMap\\n  v_tangent = (worldInverseTranspose * vec4(tangent, 0)).xyz;  // #normalMap\\n  gl_Position = v_position;\\n}\", \"wgsl\": \"struct VertexInput {\\n    @location(0) position : vec4<f32>,\\n    @location(1) normal : vec3<f32>,\\n    @location(2) texCoord : vec2<f32>,\\n    @location(3) tangent : vec3<f32>,  // #normalMap\\n    @location(4) binormal : vec3<f32>,  // #normalMap\\n};\\n\\nstruct VertexOutput {\\n    @builtin(position) Position : vec4<f32>,\\n    @location(0) v_position : vec4<f32>,\\n    @location(1) v_texCoord : vec2<f32>,\\n    @location(2) v_tangent : vec3<f32>,  // #normalMap\\n    @location(3) v_binormal : vec3<f32>,  // #normalMap\\n    @location(4) v_normal : vec3<f32>,\\n    @location(5) v_surfaceToLight : vec3<f32>,\\n    @location(6) v_surfaceToView : vec3<f32>,\\n};\\n\\n@vertex\\nfn main(input : VertexInput) -> VertexOutput {\\n    var output : VertexOutput;\\n\\n    output.v_texCoord = input.texCoord;\\n    output.v_texCoord.y = 1.0 - output.v_texCoord.y;\\n    output.v_position = _hyd_uniforms_.viewProjection * _hyd_uniforms_.world * input.position;\\n    output.v_normal = (_hyd_uniforms_.worldInverseTranspose * vec4<f32>(input.normal, 0.0)).xyz;\\n    output.v_surfaceToLight = _hyd_uniforms_.lightWorldPos - (_hyd_uniforms_.world * input.position).xyz;\\n    output.v_surfaceToView = (_hyd_uniforms_.viewInverse[3] - (_hyd_uniforms_.world * input.position)).xyz;\\n    output.v_binormal = (_hyd_uniforms_.worldInverseTranspose * vec4<f32>(input.binormal, 0.0)).xyz;  // #normalMap\\n    output.v_tangent = (_hyd_uniforms_.worldInverseTranspose * vec4<f32>(input.tangent, 0.0)).xyz;  // #normalMap\\n    output.Position = output.v_position;\\n\\n    return output;\\n}\\n\", \"glsl_path\": \"9.glsl\", \"wgsl_path\": \"9.wgsl\"}"
+    }
+]

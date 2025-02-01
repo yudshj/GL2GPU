@@ -1,0 +1,62 @@
+{
+    "manifest_version": 3,
+    "name": "WebGL to WebGPU extension",
+    "description": "WebGL to WebGPU extension description",
+    "version": "0.0.1",
+    "icons": {
+        "16": "logo/logo-16-grey.png",
+        "48": "logo/logo-48-grey.png",
+        "128": "logo/logo-128-grey.png"
+    },
+    "action": {
+        "default_title": "WebGL to WebGPU"
+    },
+    "permissions": ["activeTab", "scripting"],
+    "host_permissions": [
+        "*://*/*"
+    ],
+    "background": {
+        "service_worker": "background.js"
+    },
+    "web_accessible_resources": [
+        {
+            "resources": ["webgl-interpreter.js"],
+            "matches": ["*://*/*"]
+        }
+    ],
+    "content_scripts": [
+        {
+            "matches" : [
+              "file://*/*",
+              "http://*/*",
+              "https://*/*"
+            ],
+            "js" : ["webpack/hydWrapper.js"],
+            "run_at" : "document_start",
+            "all_frames" : true,
+            "world": "MAIN"
+        },
+        {
+            "matches" : [
+              "file://*/*",
+              "http://*/*",
+              "https://*/*"
+            ],
+            "js" : ["inject.js"],
+            "run_at" : "document_start",
+            "all_frames" : true,
+            "world": "MAIN"
+        },
+        {
+            "matches" : [
+              "file://*/*",
+              "http://*/*",
+              "https://*/*"
+            ],
+            "js" : ["foreground.js"],
+            "run_at" : "document_start",
+            "all_frames" : true,
+            "world": "ISOLATED"
+        }
+    ]
+}
