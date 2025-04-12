@@ -1,5 +1,14 @@
 # GL2GPU
 
+## DEMO
+
+![DEMO](gl2gpu-demo.webm)
+
+<video controls width="600">
+  <source src="https://raw.githubusercontent.com/yudshj/GL2GPU-Paper-Code/refs/heads/main/gl2gpu-demo.webm" type="video/webm"/>
+  <a href="https://raw.githubusercontent.com/yudshj/GL2GPU-Paper-Code/refs/heads/main/gl2gpu-demo.webm">Download</a>
+</video>
+
 > 如何使用静态的GL2GPU？
 
 Webpack编译。指令 `npm i; npx webpack w`，根据`webpack.config.js`中的配置，静态的GL2GPU将在`dist/`中生成最终代码。`dist/release`, `dist/development`, `dist/release-minimized` 里面的 `gl2gpu.js` 都可以被使用。
