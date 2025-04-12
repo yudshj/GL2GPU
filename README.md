@@ -2,12 +2,7 @@
 
 ## DEMO
 
-![DEMO](gl2gpu-demo.webm)
-
-<video controls width="600">
-  <source src="https://raw.githubusercontent.com/yudshj/GL2GPU-Paper-Code/refs/heads/main/gl2gpu-demo.webm" type="video/webm"/>
-  <a href="https://raw.githubusercontent.com/yudshj/GL2GPU-Paper-Code/refs/heads/main/gl2gpu-demo.webm">Download</a>
-</video>
+[gl2gpu-demo-www25-submission-6.webm](https://github.com/user-attachments/assets/89afa4a1-52e7-429a-9e9d-128bffef9cac)
 
 > 如何使用静态的GL2GPU？
 
