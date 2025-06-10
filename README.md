@@ -62,8 +62,8 @@ Tested across Mac, Windows, and Android devices with various GPUs (AMD, NVIDIA, 
 
 ## 📺 Live Demo
 
-Explore our interactive demo:
- 👉 https://gl2gpu.hanyd.site/
+* 🌐 Live site: https://gl2gpu.hanyd.site/
+* 🧪 Demo source: https://github.com/yudshj/gl2gpu-demo
 
 ------
 
