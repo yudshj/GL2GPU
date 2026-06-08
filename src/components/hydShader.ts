@@ -3,6 +3,7 @@ import {
     hydTrim,
     // shaderMap_legacy,
 } from "./shaderDB";
+import { ShaderTranslator } from "./shaderTranslator";
 
 // @ts-ignore
 window.hydTmp = new Set();
@@ -42,6 +43,7 @@ window.hydTmp = new Set();
 
 export class HydShader {
     private shaderMap: Map<string, InitShaderInfoType>;
+    private shaderTranslator: ShaderTranslator;
     // public shader: string;
     public glsl_shader: string;
     public shader_info: InitShaderInfoType;
@@ -54,10 +56,11 @@ export class HydShader {
 
     static errorShaderCount: number = 0;
 
-    constructor(device: GPUDevice, target: GLenum, shaderMap: Map<string, InitShaderInfoType>) {
+    constructor(device: GPUDevice, target: GLenum, shaderMap: Map<string, InitShaderInfoType>, shaderTranslator: ShaderTranslator) {
         this.type = target;
         this.device = device;
         this.shaderMap = shaderMap;
+        this.shaderTranslator = shaderTranslator;
     }
 
     // 生成了shader info
@@ -92,15 +95,10 @@ export class HydShader {
     //     "debug_info": "{\"glsl_path\": \"aquarium/src/1.glsl\", \"wgsl_path\": \"aquarium/src/1.wgsl\"}"
     // }
     public compileShader() {
-        // TODO: 从tint生成的WGSL代码中分析得到ShaderInfo
         this.shader_info = this.shaderMap.get(hydTrim(this.glsl_shader));
         if (!this.shader_info) {
-            console.warn(this.glsl_shader);
-            console.warn("DEBUG ONLY, DONOT USE THIS!!", this.translated_glsl_shader);
-            // @ts-ignore
-            window.hydTmp.add(this.glsl_shader);
-            HydShader.errorShaderCount++;
-            throw new Error("Shader not found in shaderDB. Total error count: " + HydShader.errorShaderCount);
+            this.shader_info = this.shaderTranslator.inspectShader(this.type, this.glsl_shader);
+            console.warn("[HYD] shader not found in shaderDB; deferred to runtime translator.");
         }
         this.compiled = true;
     }

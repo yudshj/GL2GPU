@@ -3,6 +3,7 @@ import fastHashCode from 'fast-hash-code';
 import {HydShader} from "./hydShader";
 import {MergeShaderInfo, ShaderInfo2HydAus, ShaderInfo2String, hydTrim} from "./shaderDB";
 import { HydHashable } from './base/hydHashable';
+import { ShaderTranslator } from './shaderTranslator';
 
 export const ALIGNMENT_BLOCK_SIZE: number = 256;
 
@@ -121,6 +122,7 @@ export class HydProgram implements HydHashable {
     }
     private vertexShader: HydShader;
     private fragmentShader: HydShader;
+    private readonly shaderTranslator: ShaderTranslator;
     public vertexModule: GPUShaderModule;
     public fragmentModule: GPUShaderModule;
     private readonly device: GPUDevice;
@@ -146,8 +148,9 @@ export class HydProgram implements HydHashable {
     public alignedUniformSize: number;
     // private uniformToFlush: number;
 
-    constructor(device: GPUDevice) {
+    constructor(device: GPUDevice, shaderTranslator: ShaderTranslator) {
         this.device = device;
+        this.shaderTranslator = shaderTranslator;
     }
 
     public write_uniform_i(dstOffset: number, num: number, value: ArrayLike<number>) {
@@ -189,6 +192,14 @@ export class HydProgram implements HydHashable {
     }
 
     public linkProgram() {
+        const translatedProgram = this.shaderTranslator.translateProgram(this.vertexShader, this.fragmentShader);
+        if (this.vertexShader && translatedProgram.vertex) {
+            this.vertexShader.shader_info = translatedProgram.vertex;
+        }
+        if (this.fragmentShader && translatedProgram.fragment) {
+            this.fragmentShader.shader_info = translatedProgram.fragment;
+        }
+
         HydProgram.linkedPrograms++;
         this._hash = HydProgram.linkedPrograms.toString();
         this.linked = true;

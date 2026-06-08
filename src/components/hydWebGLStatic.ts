@@ -29,6 +29,7 @@ import { FramebufferAttributes, HydFramebuffer } from "./hydFramebuffer";
 import TypedArray = NodeJS.TypedArray;
 import { hydWebGLConstants } from "./hydWebGLConstants";
 import { InitShaderInfoType } from "./shaderDB";
+import { ShaderTranslator } from "./shaderTranslator";
 
 const GLOB_GL_CTX = document.createElement('canvas').getContext('webgl2');
 const frameBeginFuncLst = [];
@@ -57,6 +58,7 @@ export class HydWebGLStatic {
 
     private hydRpCache: HydRenderPassCache;
     private shaderMap: Map<string, InitShaderInfoType>;
+    private shaderTranslator: ShaderTranslator;
 
     increaseOk() {
         // // @ts-ignore
@@ -105,8 +107,9 @@ export class HydWebGLStatic {
         this.regenerateDS(`defaultStencilBuffer ${width} ${height}`, 'stencil8', this.hydGlobalState.stencilState.frontFunc, WebGL2RenderingContext.STENCIL_ATTACHMENT, width, height);
         this.regenerateDS(`defaultDepthStencilBuffer ${width} ${height}`, 'depth24plus-stencil8', this.hydGlobalState.depthState.func, WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT, width, height);
     }
-    constructor(_canvas: HTMLCanvasElement, _gpuctx: GPUCanvasContext, _attributes: WebGLContextAttributes, _device: GPUDevice, _maxUniformSize: number, _replay: number, shaderMap: Map<string, InitShaderInfoType>) {
+    constructor(_canvas: HTMLCanvasElement, _gpuctx: GPUCanvasContext, _attributes: WebGLContextAttributes, _device: GPUDevice, _maxUniformSize: number, _replay: number, shaderMap: Map<string, InitShaderInfoType>, shaderTranslator: ShaderTranslator) {
         this.shaderMap = shaderMap;
+        this.shaderTranslator = shaderTranslator;
         this.hydMaxUniSize = _maxUniformSize;
         this.hydCanvas = _canvas;
         this.hydGpuctx = _gpuctx;
@@ -439,11 +442,11 @@ export class HydWebGLStatic {
     }
 
     createProgram() {
-        return new HydProgram(this.hydDevice);
+        return new HydProgram(this.hydDevice, this.shaderTranslator);
     }
 
     createShader(type: GLenum) {
-        return new HydShader(this.hydDevice, type, this.shaderMap);
+        return new HydShader(this.hydDevice, type, this.shaderMap, this.shaderTranslator);
     }
 
     createBuffer() {

@@ -1,5 +1,6 @@
 import { HydWebGLStatic, beginFrame, endFrame } from "./components/hydWebGLStatic";
 import { hydTrim, InitShaderInfoType } from "./components/shaderDB";
+import { ShaderTranslator, ShaderTranslatorOptions } from "./components/shaderTranslator";
 
 const hydWebGLTypes = ["experimental-webgl", "webgl", "webgl2"];
 
@@ -21,7 +22,7 @@ async function fetchJSON(url) {
     }
 }
 
-async function hydGetContext(element: HTMLCanvasElement, shader_info_url: string, arg0: [string, WebGLContextAttributes], arg1: [number, number]): Promise<HydWebGLStatic> {
+async function hydGetContext(element: HTMLCanvasElement, shader_info_url: string, arg0: [string, WebGLContextAttributes], arg1: [number, number], translatorOptions: ShaderTranslatorOptions = {}): Promise<HydWebGLStatic> {
     let [contextType, contextAttributes] = arg0;
     let [uniform_size, replay_delay] = arg1;
 
@@ -35,6 +36,7 @@ async function hydGetContext(element: HTMLCanvasElement, shader_info_url: string
             ];
         })
     );
+    const shaderTranslator = await ShaderTranslator.create(shaderMap, translatorOptions);
 
     // uniform_size = uniform_size || 1<<18;
     // replay_delay = replay_delay || 5000;
@@ -56,7 +58,7 @@ async function hydGetContext(element: HTMLCanvasElement, shader_info_url: string
         format: 'bgra8unorm',
     });
     // const wrapper = new HydWebGLWrapper(this, gpuctx, glctx, contextAttributes, hydDevice, uniform_size);
-    return new HydWebGLStatic(element, gpuctx, contextAttributes, hydDevice, uniform_size, replay_delay, shaderMap);
+    return new HydWebGLStatic(element, gpuctx, contextAttributes, hydDevice, uniform_size, replay_delay, shaderMap, shaderTranslator);
 };
 
 export { hydGetContext, beginFrame, endFrame };
