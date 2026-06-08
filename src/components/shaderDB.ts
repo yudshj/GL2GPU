@@ -1,5 +1,6 @@
 // import {HydSampler} from "./hydSampler";
 import { ProgramAttribute, ProgramUniformBuffer, ProgramUniformSampler } from "./hydProgram";
+import { hydTrim } from "./shaderSource";
 // import shaderInfo from "./shaders/shaders_info.json";
 // export const shaderMap_legacy: Map<string, InitShaderInfoType> = new Map(
 //     shaderInfo.map((info) => {
@@ -10,17 +11,15 @@ import { ProgramAttribute, ProgramUniformBuffer, ProgramUniformSampler } from ".
 //     })
 // );
 
-export function hydTrim(s: string) {
-    return s.trim().replace(/\r\n/g, "\n");
-}
+export { hydTrim };
 
-interface NameAndType {
+export interface NameAndType {
     name: string;
     glsl_type: string;
     wgsl_type: string;
 }
 
-interface TextureNameAndType {
+export interface TextureNameAndType {
     name: string;
     glsl_type: string;
     wgsl_texture_type: string;
@@ -44,14 +43,34 @@ export interface InitShaderInfoType {
 
 const Type2Constant: Map<string, number> = new Map([
     ["float", WebGL2RenderingContext.FLOAT],
+    ["int", WebGL2RenderingContext.INT],
+    ["uint", WebGL2RenderingContext.UNSIGNED_INT],
+    ["bool", WebGL2RenderingContext.BOOL],
     ["vec2", WebGL2RenderingContext.FLOAT_VEC2],
     ["vec3", WebGL2RenderingContext.FLOAT_VEC3],
     ["vec4", WebGL2RenderingContext.FLOAT_VEC4],
+    ["ivec2", WebGL2RenderingContext.INT_VEC2],
+    ["ivec3", WebGL2RenderingContext.INT_VEC3],
+    ["ivec4", WebGL2RenderingContext.INT_VEC4],
+    ["uvec2", WebGL2RenderingContext.UNSIGNED_INT_VEC2],
+    ["uvec3", WebGL2RenderingContext.UNSIGNED_INT_VEC3],
+    ["uvec4", WebGL2RenderingContext.UNSIGNED_INT_VEC4],
+    ["bvec2", WebGL2RenderingContext.BOOL_VEC2],
+    ["bvec3", WebGL2RenderingContext.BOOL_VEC3],
+    ["bvec4", WebGL2RenderingContext.BOOL_VEC4],
     ["mat2", WebGL2RenderingContext.FLOAT_MAT2],
     ["mat3", WebGL2RenderingContext.FLOAT_MAT3],
     ["mat4", WebGL2RenderingContext.FLOAT_MAT4],
+    ["mat2x3", WebGL2RenderingContext.FLOAT_MAT2x3],
+    ["mat2x4", WebGL2RenderingContext.FLOAT_MAT2x4],
+    ["mat3x2", WebGL2RenderingContext.FLOAT_MAT3x2],
+    ["mat3x4", WebGL2RenderingContext.FLOAT_MAT3x4],
+    ["mat4x2", WebGL2RenderingContext.FLOAT_MAT4x2],
+    ["mat4x3", WebGL2RenderingContext.FLOAT_MAT4x3],
     ["sampler2D", WebGL2RenderingContext.SAMPLER_2D],
     ["samplerCube", WebGL2RenderingContext.SAMPLER_CUBE],
+    ["sampler2DArray", WebGL2RenderingContext.SAMPLER_2D_ARRAY],
+    ["sampler3D", WebGL2RenderingContext.SAMPLER_3D],
 ]);
 
 export function MergeShaderInfo(shaderInfo: Array<ShaderInfoType | InitShaderInfoType>): ShaderInfoType {
@@ -126,6 +145,10 @@ export function ShaderInfo2HydAus(shaderInfo: ShaderInfoType): { attributes: Arr
                     return new ProgramUniformSampler(sampler.name, WebGL2RenderingContext.SAMPLER_2D, "2d");
                 case "texture_cube<f32>":
                     return new ProgramUniformSampler(sampler.name, WebGL2RenderingContext.SAMPLER_CUBE, "cube");
+                case "texture_2d_array<f32>":
+                    return new ProgramUniformSampler(sampler.name, WebGL2RenderingContext.SAMPLER_2D_ARRAY, "2d-array");
+                case "texture_3d<f32>":
+                    return new ProgramUniformSampler(sampler.name, WebGL2RenderingContext.SAMPLER_3D, "3d");
                 default:
                     throw new Error(`unknown sampler type ${sampler.wgsl_texture_type}`);
             }
