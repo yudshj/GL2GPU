@@ -44,6 +44,35 @@ You can integrate GL2GPU into your web application as a standalone JavaScript mo
 
 > Note: WebGPU support requires recent versions of Chrome (v114+) with WebGPU enabled.
 
+## Runtime Shader Translation
+
+GL2GPU keeps `shaders_info.json` as a warm cache, but cache misses now go through
+a runtime shader translation pipeline:
+
+1. WebGL GLSL is validated by the native WebGL compiler.
+2. `@webgpu/glslang@0.0.15` compiles GLSL to SPIR-V.
+3. the vendored Tint WASM bridge converts SPIR-V to WGSL.
+4. GL2GPU normalizes the generated WGSL to its existing uniform/sampler layout.
+
+The public API remains source-compatible:
+
+```ts
+await hydGetContext(canvas, "shaders_info.json", ["webgl2", attrs], [1 << 18, 0]);
+```
+
+For cache-only debugging, pass `{ cacheOnly: true }` as the optional fifth
+argument. To rebuild the Tint bridge, sync a recent Tint checkout and run:
+
+```sh
+PATH="/Users/hanyd/Code/depot_tools:$PATH" \
+TINT_SRC=/Users/hanyd/Code/tint \
+tools/tint-wasm/build.sh
+```
+
+The script expects Emscripten, CMake, Ninja, and `gclient`. It commits generated
+`src/vendor/tint-wasm/tint_wasm.js` and `src/vendor/tint-wasm/tint_wasm.wasm`,
+so normal GL2GPU users do not need a native toolchain.
+
 ------
 
 ## 🧪 Benchmarks
@@ -98,4 +127,3 @@ If you use GL2GPU in your research, please cite:
    (Peking University)
 
 ------
-
