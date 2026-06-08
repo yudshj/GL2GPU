@@ -8,6 +8,7 @@ import {
     TextureNameAndType,
 } from "./shaderDB";
 import { makeShaderMetadata, scanGlslDeclarations, ShaderStage } from "./shaderMetadata";
+import { normalizeWebGlTextureCoordinates } from "./shaderTexCoord";
 
 interface GlslangModule {
     compileGLSL(glsl: string, shaderType: ShaderStage, genDebug: boolean, spirvVersion?: "1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5"): Uint32Array;
@@ -571,7 +572,12 @@ export class ShaderTranslator {
                 this.glslang.compileGLSL(glslangSource, stage, false),
                 metadata.samplers,
             );
-            metadata.wgsl = normalizeTintWgsl(this.tint.spirvToWgsl(spirv), metadata);
+            metadata.wgsl = normalizeWebGlTextureCoordinates(
+                normalizeTintWgsl(this.tint.spirvToWgsl(spirv), metadata),
+                metadata,
+                stage,
+                shader.glsl_shader,
+            );
             metadata.debug_info = JSON.stringify({
                 source: "runtime",
                 stage,

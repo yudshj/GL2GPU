@@ -61,4 +61,4 @@ async function hydGetContext(element: HTMLCanvasElement, shader_info_url: string
     return new HydWebGLStatic(element, gpuctx, contextAttributes, hydDevice, uniform_size, replay_delay, shaderMap, shaderTranslator);
 };
 
-export { hydGetContext, beginFrame, endFrame };
+export { hydGetContext, hydGetContext as gl2gpuGetContext, beginFrame, endFrame };
