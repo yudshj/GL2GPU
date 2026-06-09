@@ -5,6 +5,7 @@ import {
 import { HydRenderPassCache } from "./hydRenderPassCache";
 import {
     HydGlobalStateHashed,
+    HydPixelUnpackState,
 } from "./hydGlobalState";
 import { HydVertexArray } from "./hydVertexArray";
 import {
@@ -28,12 +29,12 @@ import { HydBuffer } from "./hydBuffer";
 import { FramebufferAttributes, HydFramebuffer } from "./hydFramebuffer";
 import TypedArray = NodeJS.TypedArray;
 import { hydWebGLConstants } from "./hydWebGLConstants";
-import { InitShaderInfoType } from "./shaderDB";
 import { ShaderTranslator } from "./shaderTranslator";
 
 const GLOB_GL_CTX = document.createElement('canvas').getContext('webgl2');
 const frameBeginFuncLst = [];
 const frameEndFuncList = [];
+const VALID_PIXEL_ALIGNMENT = new Set([1, 2, 4, 8]);
 
 export function beginFrame() {
     frameBeginFuncLst.forEach((func) => func());
@@ -57,7 +58,6 @@ export class HydWebGLStatic {
     bindedGetRenderPassDesc: () => GPURenderPassDescriptor;
 
     private hydRpCache: HydRenderPassCache;
-    private shaderMap: Map<string, InitShaderInfoType>;
     private shaderTranslator: ShaderTranslator;
 
     increaseOk() {
@@ -107,8 +107,7 @@ export class HydWebGLStatic {
         this.regenerateDS(`defaultStencilBuffer ${width} ${height}`, 'stencil8', this.hydGlobalState.stencilState.frontFunc, WebGL2RenderingContext.STENCIL_ATTACHMENT, width, height);
         this.regenerateDS(`defaultDepthStencilBuffer ${width} ${height}`, 'depth24plus-stencil8', this.hydGlobalState.depthState.func, WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT, width, height);
     }
-    constructor(_canvas: HTMLCanvasElement, _gpuctx: GPUCanvasContext, _attributes: WebGLContextAttributes, _device: GPUDevice, _maxUniformSize: number, _replay: number, shaderMap: Map<string, InitShaderInfoType>, shaderTranslator: ShaderTranslator) {
-        this.shaderMap = shaderMap;
+    constructor(_canvas: HTMLCanvasElement, _gpuctx: GPUCanvasContext, _attributes: WebGLContextAttributes, _device: GPUDevice, _maxUniformSize: number, _replay: number, shaderTranslator: ShaderTranslator) {
         this.shaderTranslator = shaderTranslator;
         this.hydMaxUniSize = _maxUniformSize;
         this.hydCanvas = _canvas;
@@ -212,6 +211,12 @@ export class HydWebGLStatic {
                     return new Int32Array(this.hydGlobalState.miscState.scissorBox);
                 case WebGL2RenderingContext.SCISSOR_TEST:
                     return this.hydGlobalState.miscState.scissorTest;
+                case WebGL2RenderingContext.UNPACK_FLIP_Y_WEBGL:
+                    return this.hydGlobalState.miscState.unpackFlipYWebGL;
+                case WebGL2RenderingContext.UNPACK_ALIGNMENT:
+                    return this.hydGlobalState.miscState.unpackAlignment;
+                case WebGL2RenderingContext.PACK_ALIGNMENT:
+                    return this.hydGlobalState.miscState.packAlignment;
                 case WebGL2RenderingContext.STENCIL_TEST:
                     return this.hydGlobalState.stencilState.enabled;
                 case WebGL2RenderingContext.STENCIL_WRITEMASK:
@@ -446,7 +451,7 @@ export class HydWebGLStatic {
     }
 
     createShader(type: GLenum) {
-        return new HydShader(this.hydDevice, type, this.shaderMap, this.shaderTranslator);
+        return new HydShader(this.hydDevice, type, this.shaderTranslator);
     }
 
     createBuffer() {
@@ -737,9 +742,9 @@ export class HydWebGLStatic {
         const border: GLint = 0;
         const format: GLenum = args.at(-3);
         const type: GLenum = args.at(-2);
-        const pixels: ImageData | HTMLImageElement | HTMLCanvasElement | HTMLVideoElement | ImageBitmap | TypedArray = args.at(-1);
+        const pixels: ImageData | HTMLImageElement | HTMLCanvasElement | HTMLVideoElement | ImageBitmap | TypedArray | null = args.at(-1);
         if (args.length === 6) {
-            if ("width" in pixels && "height" in pixels) {
+            if (pixels !== null && "width" in pixels && "height" in pixels) {
                 width = pixels.width;
                 height = pixels.height;
             } else {
@@ -759,7 +764,8 @@ export class HydWebGLStatic {
         ) {
             throw new Error("unsupported texImage2D: " + args);
         }
-        this.hydGlobalState.textureUnits[this.hydGlobalState.commonState.activeTextureUnit].texImage2D(pixels, target, level, internalformat, width, height, border, format, type);
+        const unpack: HydPixelUnpackState = this.hydGlobalState.miscState.unpackState;
+        this.hydGlobalState.textureUnits[this.hydGlobalState.commonState.activeTextureUnit].texImage2D(pixels, target, level, internalformat, width, height, border, format, type, unpack);
         this.hydGlobalState.recordTransition("texImage2D", target, level, internalformat, width, height, border, format, type);
     }
 
@@ -993,8 +999,32 @@ export class HydWebGLStatic {
         this.hydGlobalState.recordTransition("drawBuffers", ...buffers);
     }
 
-    pixelStorei(pname: GLenum, param: GLint) {
-        console.warn("pixelStorei not implemented. Args:", pname, param);
+    pixelStorei(pname: GLenum, param: GLint | GLboolean) {
+        const value = typeof param === "boolean" ? (param ? 1 : 0) : param;
+        switch (pname) {
+            case WebGL2RenderingContext.UNPACK_FLIP_Y_WEBGL:
+                this.hydGlobalState.miscState.unpackFlipYWebGL = value !== 0;
+                this.hydGlobalState.recordTransition("pixelStorei", pname, value);
+                return;
+            case WebGL2RenderingContext.UNPACK_ALIGNMENT:
+                if (!VALID_PIXEL_ALIGNMENT.has(value)) {
+                    this.hydGlobalState.glError = WebGL2RenderingContext.INVALID_VALUE;
+                    return;
+                }
+                this.hydGlobalState.miscState.unpackAlignment = value;
+                this.hydGlobalState.recordTransition("pixelStorei", pname, value);
+                return;
+            case WebGL2RenderingContext.PACK_ALIGNMENT:
+                if (!VALID_PIXEL_ALIGNMENT.has(value)) {
+                    this.hydGlobalState.glError = WebGL2RenderingContext.INVALID_VALUE;
+                    return;
+                }
+                this.hydGlobalState.miscState.packAlignment = value;
+                this.hydGlobalState.recordTransition("pixelStorei", pname, value);
+                return;
+            default:
+                console.warn("pixelStorei not implemented. Args:", pname, param);
+        }
     }
 
     checkFramebufferStatus(): GLenum {

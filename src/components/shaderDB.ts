@@ -1,15 +1,6 @@
 // import {HydSampler} from "./hydSampler";
 import { ProgramAttribute, ProgramUniformBuffer, ProgramUniformSampler } from "./hydProgram";
 import { hydTrim } from "./shaderSource";
-// import shaderInfo from "./shaders/shaders_info.json";
-// export const shaderMap_legacy: Map<string, InitShaderInfoType> = new Map(
-//     shaderInfo.map((info) => {
-//         return [
-//             hydTrim(info.glsl),
-//             info
-//         ];
-//     })
-// );
 
 export { hydTrim };
 
@@ -75,7 +66,7 @@ const Type2Constant: Map<string, number> = new Map([
 
 export function MergeShaderInfo(shaderInfo: Array<ShaderInfoType | InitShaderInfoType>): ShaderInfoType {
     let uniformMap: Map<string, NameAndType> = new Map();    // (name: type), throw error when type conflict
-    let shaderMap: Map<string, TextureNameAndType> = new Map();     // (name: type), throw error when type conflict
+    let samplerMap: Map<string, TextureNameAndType> = new Map();     // (name: type), throw error when type conflict
     for (const info of shaderInfo) {
         for (const uniform of info.uniforms) {
             if (uniformMap.has(uniform.name)) {
@@ -87,19 +78,19 @@ export function MergeShaderInfo(shaderInfo: Array<ShaderInfoType | InitShaderInf
             }
         }
         for (const sampler of info.samplers) {
-            if (shaderMap.has(sampler.name)) {
-                if (shaderMap.get(sampler.name).glsl_type !== sampler.glsl_type) {
+            if (samplerMap.has(sampler.name)) {
+                if (samplerMap.get(sampler.name).glsl_type !== sampler.glsl_type) {
                     throw new Error(`sampler ${sampler.name} type conflict`);
                 }
             } else {
-                shaderMap.set(sampler.name, sampler);
+                samplerMap.set(sampler.name, sampler);
             }
         }
     }
     return {
         attributes: shaderInfo[0].attributes,
         uniforms: Array.from(uniformMap).map((pair) => pair[1]),
-        samplers: Array.from(shaderMap).map((pair) => pair[1]),
+        samplers: Array.from(samplerMap).map((pair) => pair[1]),
     };
 }
 

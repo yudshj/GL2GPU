@@ -2,7 +2,6 @@ import glslangInit from "../vendor/glslang/glslang.js";
 import tintInit from "../vendor/tint-wasm/tint_wasm.js";
 import type { TintWasmModule } from "../vendor/tint-wasm/tint_wasm.js";
 import {
-    hydTrim,
     InitShaderInfoType,
     NameAndType,
     TextureNameAndType,
@@ -14,8 +13,32 @@ interface GlslangModule {
     compileGLSL(glsl: string, shaderType: ShaderStage, genDebug: boolean, spirvVersion?: "1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5"): Uint32Array;
 }
 
+const DEFAULT_WASM_BASE_URL = (() => {
+    if (typeof document !== "undefined") {
+        const currentScript = document.currentScript as HTMLScriptElement;
+        if (currentScript && currentScript.src) {
+            return new URL(".", currentScript.src).href;
+        }
+        const scripts = Array.from(document.getElementsByTagName("script"));
+        for (let i = scripts.length - 1; i >= 0; i--) {
+            const src = scripts[i].src;
+            if (src && /(^|\/)gl2gpu(?:\.[^/]*)?\.js(?:[?#].*)?$/.test(src)) {
+                return new URL(".", src).href;
+            }
+        }
+    }
+    if (typeof location !== "undefined" && location.href) {
+        return new URL(".", location.href).href;
+    }
+    return "";
+})();
+
+function locateBundledWasm(path: string): string {
+    return DEFAULT_WASM_BASE_URL ? new URL(path, DEFAULT_WASM_BASE_URL).href : path;
+}
+
 export interface ShaderTranslatorOptions {
-    cacheOnly?: boolean;
+    legacyTextureCoordinateFixups?: boolean;
     glslangLocateFile?: (path: string) => string;
     glslangWasmBinary?: ArrayBuffer | Uint8Array;
     tintLocateFile?: (path: string) => string;
@@ -447,54 +470,52 @@ function normalizeTintWgsl(wgsl: string, metadata: InitShaderInfoType): string {
 }
 
 export class ShaderTranslator {
-    private readonly shaderMap: Map<string, InitShaderInfoType>;
     private readonly glslang: GlslangModule;
     private readonly tint: TintWasmModule;
     private readonly options: ShaderTranslatorOptions;
     private readonly runtimeCache: Map<string, InitShaderInfoType> = new Map();
 
     private constructor(
-        shaderMap: Map<string, InitShaderInfoType>,
         glslang: GlslangModule,
         tint: TintWasmModule,
         options: ShaderTranslatorOptions,
     ) {
-        this.shaderMap = shaderMap;
         this.glslang = glslang;
         this.tint = tint;
         this.options = options;
     }
 
-    static async create(shaderMap: Map<string, InitShaderInfoType>, options: ShaderTranslatorOptions = {}): Promise<ShaderTranslator> {
+    static async create(options: ShaderTranslatorOptions = {}): Promise<ShaderTranslator> {
         let glslang: GlslangModule = null;
         let tint: TintWasmModule = null;
 
-        if (!options.cacheOnly) {
-            try {
-                glslang = await glslangInit({
-                    locateFile: options.glslangLocateFile,
-                    wasmBinary: options.glslangWasmBinary,
-                });
-            } catch (error) {
-                console.warn("[HYD] glslang WASM unavailable, runtime shader translation disabled:", error);
-            }
-
-            try {
-                tint = await tintInit({
-                    locateFile: options.tintLocateFile,
-                    wasmBinary: options.tintWasmBinary,
-                });
-            } catch (error) {
-                console.warn("[HYD] Tint WASM unavailable, runtime shader translation disabled:", error);
-            }
+        try {
+            glslang = await glslangInit({
+                locateFile: options.glslangLocateFile || locateBundledWasm,
+                wasmBinary: options.glslangWasmBinary,
+            });
+        } catch (error) {
+            console.warn("[HYD] glslang WASM unavailable, runtime shader translation disabled:", error);
         }
 
-        return new ShaderTranslator(shaderMap, glslang, tint, options);
+        try {
+            tint = await tintInit({
+                locateFile: options.tintLocateFile || locateBundledWasm,
+                wasmBinary: options.tintWasmBinary,
+            });
+        } catch (error) {
+            console.warn("[HYD] Tint WASM unavailable, runtime shader translation disabled:", error);
+        }
+
+        return new ShaderTranslator(glslang, tint, options);
+    }
+
+    private get runtimeTranslationAvailable(): boolean {
+        return !!this.glslang && !!this.tint;
     }
 
     inspectShader(type: GLenum, source: string): InitShaderInfoType {
-        const key = hydTrim(source);
-        return this.shaderMap.get(key) || makeShaderMetadata(source, type);
+        return makeShaderMetadata(source, type);
     }
 
     translateProgram(vertexShader?: ShaderLike, fragmentShader?: ShaderLike): TranslatedProgram {
@@ -510,8 +531,7 @@ export class ShaderTranslator {
     }
 
     private metadataFor(shader: ShaderLike): InitShaderInfoType {
-        const key = hydTrim(shader.glsl_shader);
-        return shader.shader_info || this.shaderMap.get(key) || makeShaderMetadata(shader.glsl_shader, shader.type);
+        return shader.shader_info || makeShaderMetadata(shader.glsl_shader, shader.type);
     }
 
     private makeLayout(vertexShader?: ShaderLike, fragmentShader?: ShaderLike): ProgramTranslationLayout {
@@ -549,12 +569,7 @@ export class ShaderTranslator {
     }
 
     private translateShader(shader: ShaderLike, stage: ShaderStage, layout: ProgramTranslationLayout): InitShaderInfoType {
-        const key = hydTrim(shader.glsl_shader);
-        const cached = this.shaderMap.get(key);
-        if (cached) {
-            return cached;
-        }
-
+        const key = shader.glsl_shader;
         const runtimeKey = `${stage}:${layout.cacheKey}:${key}`;
         const cachedRuntime = this.runtimeCache.get(runtimeKey);
         if (cachedRuntime) {
@@ -562,8 +577,8 @@ export class ShaderTranslator {
         }
 
         const metadata = makeShaderMetadata(shader.glsl_shader, shader.type);
-        if (this.options.cacheOnly || !this.glslang || !this.tint) {
-            throw new Error(`Shader not found in shaderDB and runtime translator is unavailable (${stage}).`);
+        if (!this.runtimeTranslationAvailable) {
+            throw new Error(`Runtime shader translator is unavailable (${stage}).`);
         }
 
         try {
@@ -572,17 +587,16 @@ export class ShaderTranslator {
                 this.glslang.compileGLSL(glslangSource, stage, false),
                 metadata.samplers,
             );
-            metadata.wgsl = normalizeWebGlTextureCoordinates(
-                normalizeTintWgsl(this.tint.spirvToWgsl(spirv), metadata),
-                metadata,
-                stage,
-                shader.glsl_shader,
-            );
+            const wgsl = normalizeTintWgsl(this.tint.spirvToWgsl(spirv), metadata);
+            metadata.wgsl = this.options.legacyTextureCoordinateFixups
+                ? normalizeWebGlTextureCoordinates(wgsl, metadata, stage, shader.glsl_shader)
+                : wgsl;
             metadata.debug_info = JSON.stringify({
                 source: "runtime",
                 stage,
                 translated: true,
                 glsl: "310es",
+                legacyTextureCoordinateFixups: !!this.options.legacyTextureCoordinateFixups,
             });
             this.runtimeCache.set(runtimeKey, metadata);
             return metadata;

@@ -46,22 +46,22 @@ You can integrate GL2GPU into your web application as a standalone JavaScript mo
 
 ## Runtime Shader Translation
 
-GL2GPU keeps `shaders_info.json` as a warm cache, but cache misses now go through
-a runtime shader translation pipeline:
+GL2GPU now translates shaders at runtime and does not load the legacy shader
+database or fall back to hand-written WGSL shader entries:
 
 1. WebGL GLSL is validated by the native WebGL compiler.
 2. `@webgpu/glslang@0.0.15` compiles GLSL to SPIR-V.
 3. the vendored Tint WASM bridge converts SPIR-V to WGSL.
 4. GL2GPU normalizes the generated WGSL to its existing uniform/sampler layout.
 
-The public API remains source-compatible:
+The public API keeps the old second argument position for source compatibility,
+but the shader-info URL is ignored:
 
 ```ts
-await hydGetContext(canvas, "shaders_info.json", ["webgl2", attrs], [1 << 18, 0]);
+await hydGetContext(canvas, null, ["webgl2", attrs], [1 << 18, 0]);
 ```
 
-For cache-only debugging, pass `{ cacheOnly: true }` as the optional fifth
-argument. To rebuild the Tint bridge, sync a recent Tint checkout and run:
+To rebuild the Tint bridge, sync a recent Tint checkout and run:
 
 ```sh
 PATH="/Users/hanyd/Code/depot_tools:$PATH" \

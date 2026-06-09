@@ -149,20 +149,34 @@ export class BlendState implements HydHashable {
     }
 }
 
+export interface HydPixelUnpackState {
+    flipY: boolean;
+    alignment: number;
+}
+
 export class MiscState implements HydHashable {
     scissorTest: boolean;
     scissorBox: [number, number, number, number];
     colorWriteMask: [boolean, boolean, boolean, boolean];
+    unpackFlipYWebGL: boolean;
     unpackAlignment: number;
     packAlignment: number;
 
+    public get unpackState(): HydPixelUnpackState {
+        return {
+            flipY: this.unpackFlipYWebGL,
+            alignment: this.unpackAlignment,
+        };
+    }
+
     public get hash(): string {
-        return this.scissorTest.toString() + this.scissorBox.toString() + this.colorWriteMask.toString() + this.unpackAlignment.toString() + this.packAlignment.toString();
+        return this.scissorTest.toString() + this.scissorBox.toString() + this.colorWriteMask.toString() + this.unpackFlipYWebGL.toString() + this.unpackAlignment.toString() + this.packAlignment.toString();
     }
     constructor() {
         this.scissorTest = false;
         this.scissorBox = undefined; // [x, y, width, height]
         this.colorWriteMask = [true, true, true, true];
+        this.unpackFlipYWebGL = false;
         this.unpackAlignment = 4;
         this.packAlignment = 4;
     }

@@ -240,7 +240,7 @@ var WebGLUtil = (function() {
         var gl_context = null;
         try {
           // gl_context = canvas.getContext(context_types[type], attribs);
-          gl_context = await GL2GPU.gl2gpuGetContext(canvas, "/js/shaders_info.json", ["webgl", attribs], [1<<21, window.replayDelay]);
+          gl_context = await GL2GPU.gl2gpuGetContext(canvas, null, ["webgl", attribs], [1<<21, window.replayDelay]);
         } catch (e) {
         }
         if (gl_context) {

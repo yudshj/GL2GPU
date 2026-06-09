@@ -157,7 +157,7 @@ tdl.webgl.create3DContext = async function(canvas, opt_attribs, opt_preferredCon
   for (var ii = 0; ii < names.length; ++ii) {
     try {
       // context = canvas.getContext(names[ii], opt_attribs);
-      context = await GL2GPU.gl2gpuGetContext(canvas, "/js/shaders_info.json", [names[ii], opt_attribs], [1<<21, window.replayDelay]);
+      context = await GL2GPU.gl2gpuGetContext(canvas, null, [names[ii], opt_attribs], [1<<21, window.replayDelay]);
     } catch(e) {}
     if (context) {
       break;
@@ -606,6 +606,5 @@ tdl.webgl.cancelRequestAnimationFrame = function(requestId) {
 
   tdl.webgl.cancelRequestAnimationFrameImpl_(requestId);
 };
-
 
 
