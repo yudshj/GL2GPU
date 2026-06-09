@@ -78,6 +78,9 @@ function textureFormatLookup(internalFormat: GLenum, format: GLenum, type: GLenu
     if (internalFormat === WebGL2RenderingContext.RGBA && format === WebGL2RenderingContext.RGBA && type === WebGL2RenderingContext.UNSIGNED_BYTE) {
         return "rgba8unorm";
     }
+    if (internalFormat === WebGL2RenderingContext.RGBA && format === WebGL2RenderingContext.RGBA && type === WebGL2RenderingContext.FLOAT) {
+        return "rgba32float";
+    }
     if (internalFormat === WebGL2RenderingContext.LUMINANCE && format === WebGL2RenderingContext.LUMINANCE && type === WebGL2RenderingContext.UNSIGNED_BYTE) {
         return "r8unorm";
     }
@@ -236,6 +239,7 @@ export class HydTexture implements HydHashable {
     };
     private _sampler: GPUSampler = null;
     private _view: GPUTextureView = null;
+    private _attachmentViews: Map<string, GPUTextureView> = new Map();
     private _hash: any;
 
     get isDepthStencil(): boolean {
@@ -272,6 +276,14 @@ export class HydTexture implements HydHashable {
 
     public get format(): GPUTextureFormat {
         return this._textureDescriptor.format;
+    }
+
+    public get width(): number {
+        return Number(this._textureDescriptor.size.width) || 0;
+    }
+
+    public get height(): number {
+        return Number(this._textureDescriptor.size.height) || 0;
     }
 
     public set viewDimension(viewDimension: GPUTextureViewDimension) {
@@ -347,9 +359,12 @@ export class HydTexture implements HydHashable {
     }
     
     public destroy() {
-        this._texture.destroy();
+        if (this._texture) {
+            this._texture.destroy();
+        }
         this._texture = null;
         this._view = null;
+        this._attachmentViews.clear();
         this._sampler = null;
         this._hash = null;
         HydTexture.isDestroyedTexture = true;
@@ -407,6 +422,30 @@ export class HydTexture implements HydHashable {
         }
     }
 
+    private static getArrayLayer(target: GLenum): number {
+        return targetToOrigin.get(target)?.z || 0;
+    }
+
+    public getFramebufferView(target?: GLenum, mipLevel: GLint = 0): GPUTextureView {
+        const baseMipLevel = mipLevel || 0;
+        const baseArrayLayer = HydTexture.getArrayLayer(target);
+        const key = `${baseMipLevel}:${baseArrayLayer}`;
+        let view = this._attachmentViews.get(key);
+        if (!view) {
+            view = this.texture.createView({
+                dimension: "2d",
+                format: this.format,
+                baseMipLevel,
+                mipLevelCount: 1,
+                baseArrayLayer,
+                arrayLayerCount: 1,
+                label: `attachment_view_${HydTexture.__viewCount++}@${this.label}:${key}`,
+            });
+            this._attachmentViews.set(key, view);
+        }
+        return view;
+    }
+
     public texImage2D(
         data: ImageData | HTMLImageElement | HTMLCanvasElement | HTMLVideoElement | ImageBitmap | TypedArray | null,
         target: GLenum,
@@ -447,6 +486,7 @@ export class HydTexture implements HydHashable {
             (typeof ImageBitmap !== "undefined" && uploadData instanceof ImageBitmap) ||
             uploadData instanceof ImageData ||
             uploadData instanceof HTMLCanvasElement ||
+            uploadData instanceof HTMLVideoElement ||
             (typeof OffscreenCanvas !== "undefined" && uploadData instanceof OffscreenCanvas)) {
             this.device.queue.copyExternalImageToTexture(
                 { source: uploadData, flipY: shouldApplyExternalFlipY(uploadData, unpack) },
@@ -464,8 +504,65 @@ export class HydTexture implements HydHashable {
                 },
                 [width, height],
             );
-        } else if (uploadData instanceof HTMLVideoElement) {
-            throw new Error("Not implemented");
+        }
+    }
+
+    public texSubImage2D(
+        data: ImageData | HTMLImageElement | HTMLCanvasElement | HTMLVideoElement | ImageBitmap | TypedArray,
+        target: GLenum,
+        mipLevel: GLint,
+        xoffset: GLint,
+        yoffset: GLint,
+        width: GLsizei,
+        height: GLsizei,
+        format: GLenum,
+        type: GLenum,
+        unpack: HydPixelUnpackState = DEFAULT_PIXEL_UNPACK_STATE,
+    ) {
+        let uploadData = data;
+        let uploadBytesPerRow: number = undefined;
+        if (data !== null && "byteLength" in data) {
+            const prepared = prepareTypedTextureUpload(data, width, height, format, format, type, unpack);
+            uploadData = prepared.data;
+            uploadBytesPerRow = prepared.bytesPerRow;
+            format = prepared.format;
+            type = prepared.type;
+        }
+
+        const baseOrigin = targetToOrigin.get(target) || { x: 0, y: 0, z: 0 };
+        const origin = {
+            x: (baseOrigin.x || 0) + xoffset,
+            y: (baseOrigin.y || 0) + yoffset,
+            z: baseOrigin.z || 0,
+        };
+        const destination: GPUImageCopyTexture = {
+            texture: this.texture,
+            mipLevel,
+            origin,
+        };
+
+        if (uploadData instanceof HTMLImageElement ||
+            (typeof ImageBitmap !== "undefined" && uploadData instanceof ImageBitmap) ||
+            uploadData instanceof ImageData ||
+            uploadData instanceof HTMLCanvasElement ||
+            uploadData instanceof HTMLVideoElement ||
+            (typeof OffscreenCanvas !== "undefined" && uploadData instanceof OffscreenCanvas)) {
+            this.device.queue.copyExternalImageToTexture(
+                { source: uploadData, flipY: shouldApplyExternalFlipY(uploadData, unpack) },
+                destination,
+                [width, height],
+            );
+        } else if (uploadData && "byteLength" in uploadData) {
+            this.device.queue.writeTexture(
+                destination,
+                uploadData,
+                {
+                    offset: 0,
+                    bytesPerRow: uploadBytesPerRow,
+                    rowsPerImage: height,
+                },
+                [width, height],
+            );
         }
     }
 
@@ -539,6 +636,8 @@ export class HydTexture implements HydHashable {
     public texParameteri(pname: GLenum, param: GLenum) {
         console.assert(pnameToString.has(pname) && parameterToString.has(param));
         this.state[pnameToString.get(pname)] = parameterToString.get(param);
+        this._sampler = null;
+        this._hash = null;
     }
 
     public renderbufferStorage(format: GPUTextureFormat, width: number, height: number) {
@@ -547,18 +646,34 @@ export class HydTexture implements HydHashable {
             format,
             dimension: "2d",
             usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
-            isDepthStencil: true,
+            isDepthStencil: format.startsWith("depth") || format === "stencil8",
             // viewDimension: "2d", // TODO: force renderbuffer use 2d view!
             // sampleType: 'depth',
         });
     }
 
     private configureTexture(descriptor: HydTextureDescriptor) {
+        const descriptorChanged =
+            this._textureDescriptor.dimension !== descriptor.dimension ||
+            this._textureDescriptor.format !== descriptor.format ||
+            this._textureDescriptor.usage !== descriptor.usage ||
+            this._textureDescriptor.isDepthStencil !== descriptor.isDepthStencil ||
+            this._textureDescriptor.size.width !== descriptor.size.width ||
+            this._textureDescriptor.size.height !== descriptor.size.height ||
+            this._textureDescriptor.size.depthOrArrayLayers !== descriptor.size.depthOrArrayLayers;
+        if (descriptorChanged && this._texture) {
+            this.destroy();
+        }
         this._textureDescriptor.dimension = descriptor.dimension;
         this._textureDescriptor.format = descriptor.format;
         this._textureDescriptor.size = descriptor.size as GPUExtent3DDict;
         this._textureDescriptor.usage = descriptor.usage;
         this._textureDescriptor.isDepthStencil = descriptor.isDepthStencil;
+        if (descriptorChanged) {
+            this._view = null;
+            this._attachmentViews.clear();
+            this._hash = null;
+        }
         // this._textureDescriptor.sampleType = descriptor.sampleType;
         // this._textureDescriptor.viewDimension = descriptor.viewDimension;
     }

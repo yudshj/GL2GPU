@@ -17,6 +17,22 @@ export class FramebufferAttributes implements HydHashable {
     public get hash(): string {
         return `${this.attachmentPoint}-${this.level}-${this.face}-${this.attachment.hash}`;
     }
+
+    public get view(): GPUTextureView {
+        return this.attachment.getFramebufferView(this.face, this.level);
+    }
+
+    public get format(): GPUTextureFormat {
+        return this.attachment.format;
+    }
+
+    public get width(): number {
+        return this.attachment.width;
+    }
+
+    public get height(): number {
+        return this.attachment.height;
+    }
 }
 
 export class HydFramebuffer implements HydHashable {

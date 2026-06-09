@@ -174,7 +174,7 @@ export class MiscState implements HydHashable {
     }
     constructor() {
         this.scissorTest = false;
-        this.scissorBox = undefined; // [x, y, width, height]
+        this.scissorBox = [0, 0, 0, 0]; // [x, y, width, height]
         this.colorWriteMask = [true, true, true, true];
         this.unpackFlipYWebGL = false;
         this.unpackAlignment = 4;
@@ -307,7 +307,7 @@ export class HydGlobalState {
                         if (value === WebGL2RenderingContext.BACK) {
                             return { format: 'bgra8unorm', blend } as GPUColorTargetState;
                         } else if (WebGL2RenderingContext.COLOR_ATTACHMENT0 <= value && value <= WebGL2RenderingContext.COLOR_ATTACHMENT15) {
-                            return { format: this.commonState.drawFramebufferBinding.attachments.get(value).attachment.texture.format, blend } as GPUColorTargetState;
+                            return { format: this.commonState.drawFramebufferBinding.attachments.get(value).format, blend } as GPUColorTargetState;
                         } else {
                             return null;
                         }
@@ -348,7 +348,7 @@ export class HydGlobalState {
                 if (value === WebGL2RenderingContext.BACK) {
                     return 'bgra8unorm';
                 } else if (WebGL2RenderingContext.COLOR_ATTACHMENT0 <= value && value <= WebGL2RenderingContext.COLOR_ATTACHMENT15) {
-                    return this.commonState.drawFramebufferBinding.attachments.get(value).attachment.texture.format;
+                    return this.commonState.drawFramebufferBinding.attachments.get(value).format;
                 } else {
                     return null;
                 }
@@ -370,7 +370,7 @@ export class HydGlobalState {
                 if (value === WebGL2RenderingContext.BACK) {
                     cacheKey += 'CV'
                 } else if (WebGL2RenderingContext.COLOR_ATTACHMENT0 <= value && value <= WebGL2RenderingContext.COLOR_ATTACHMENT15) {
-                    cacheKey += this.commonState.drawFramebufferBinding.attachments.get(value).attachment.view.label;
+                    cacheKey += this.commonState.drawFramebufferBinding.attachments.get(value).view.label;
                 } else {
                     cacheKey += 'null';
                 }
@@ -403,7 +403,7 @@ export class HydGlobalState {
                             clearValue: this.clearState.color,
                         };
                     } else if (WebGL2RenderingContext.COLOR_ATTACHMENT0 <= value && value <= WebGL2RenderingContext.COLOR_ATTACHMENT15) {
-                        const view = this.commonState.drawFramebufferBinding.attachments.get(value).attachment.view;
+                        const view = this.commonState.drawFramebufferBinding.attachments.get(value).view;
                         return {
                             view,
                             label: view.label,
@@ -501,13 +501,16 @@ export class HydGlobalState {
 
     private getDepthStencilAttachment(): { view: GPUTextureView, format: GPUTextureFormat } {
         if (this.depthState.enabled && this.stencilState.enabled) {
-            return this.commonState.drawFramebufferBinding.attachments.get(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT).attachment;
+            const attachment = this.commonState.drawFramebufferBinding.attachments.get(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT);
+            return { view: attachment.view, format: attachment.format };
         }
         if (this.depthState.enabled) {
-            return this.commonState.drawFramebufferBinding.attachments.get(WebGL2RenderingContext.DEPTH_ATTACHMENT).attachment;
+            const attachment = this.commonState.drawFramebufferBinding.attachments.get(WebGL2RenderingContext.DEPTH_ATTACHMENT);
+            return { view: attachment.view, format: attachment.format };
         }
         if (this.stencilState.enabled) {
-            return this.commonState.drawFramebufferBinding.attachments.get(WebGL2RenderingContext.STENCIL_ATTACHMENT).attachment;
+            const attachment = this.commonState.drawFramebufferBinding.attachments.get(WebGL2RenderingContext.STENCIL_ATTACHMENT);
+            return { view: attachment.view, format: attachment.format };
         }
         throw new Error("getDepthStencilAttachment failed");
     }

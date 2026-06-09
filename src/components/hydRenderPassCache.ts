@@ -277,6 +277,13 @@ export class HydRenderPassCache {
         }
     }
 
+    public RpSetScissorRect(scissorBox: [number, number, number, number]) {
+        if (this.scissorInfo.join(',') !== scissorBox.join(',')) {
+            this.scissorInfo = scissorBox;
+            this.renderPassEncoder.setScissorRect(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]);
+        }
+    }
+
     /**
      * Draws primitives.
      * See [[#rendering-operations]] for the detailed specification.

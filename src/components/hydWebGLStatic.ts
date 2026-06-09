@@ -474,35 +474,97 @@ export class HydWebGLStatic {
         return new HydVertexArray();
     }
 
-    bindRenderbuffer(target: GLenum, renderbuffer: HydTexture) {
+    private currentTexture(): HydTexture {
+        const texture = this.hydGlobalState.textureUnits[this.hydGlobalState.commonState.activeTextureUnit];
+        if (!texture) {
+            this.hydGlobalState.glError = WebGL2RenderingContext.INVALID_OPERATION;
+            throw new Error("No texture bound to active texture unit");
+        }
+        return texture;
+    }
+
+    private isSupportedTextureUploadFormat(internalformat: GLenum, format: GLenum, type: GLenum): boolean {
+        return (internalformat === WebGL2RenderingContext.RGBA && format === WebGL2RenderingContext.RGBA && (type === WebGL2RenderingContext.UNSIGNED_BYTE || type === WebGL2RenderingContext.FLOAT))
+            || (internalformat === WebGL2RenderingContext.DEPTH_COMPONENT32F && format === WebGL2RenderingContext.DEPTH_COMPONENT && type === WebGL2RenderingContext.FLOAT)
+            || (internalformat === WebGL2RenderingContext.LUMINANCE && format === WebGL2RenderingContext.LUMINANCE && type === WebGL2RenderingContext.UNSIGNED_BYTE)
+            || (internalformat === WebGL2RenderingContext.RGB && format === WebGL2RenderingContext.RGB && type === WebGL2RenderingContext.UNSIGNED_BYTE);
+    }
+
+    private getFramebufferForTarget(target: GLenum): HydFramebuffer {
+        if (target === WebGL2RenderingContext.FRAMEBUFFER || target === WebGL2RenderingContext.DRAW_FRAMEBUFFER) {
+            return this.hydGlobalState.commonState.drawFramebufferBinding;
+        }
+        if (target === WebGL2RenderingContext.READ_FRAMEBUFFER) {
+            return this.hydGlobalState.commonState.readFramebufferBinding;
+        }
+        throw new Error("unsupported framebuffer target: " + target);
+    }
+
+    private getDrawFramebufferHeight(): number {
+        const framebuffer = this.hydGlobalState.commonState.drawFramebufferBinding;
+        if (framebuffer === this.hydGlobalState.defaultFramebuffer || framebuffer.drawBuffers.includes(WebGL2RenderingContext.BACK)) {
+            return this.hydCanvas.height;
+        }
+        for (const attachment of framebuffer.attachments.values()) {
+            if (attachment.height > 0) {
+                return attachment.height;
+            }
+        }
+        return this.hydCanvas.height;
+    }
+
+    private toGpuViewport(): [number, number, number, number, number, number] {
+        const [x, y, width, height, minDepth, maxDepth] = this.hydGlobalState.commonState.viewport;
+        const framebufferHeight = this.getDrawFramebufferHeight();
+        return [x, framebufferHeight - y - height, width, height, minDepth, maxDepth];
+    }
+
+    private toGpuScissorRect(): [number, number, number, number] {
+        const [x, y, width, height] = this.hydGlobalState.miscState.scissorBox;
+        const framebufferHeight = this.getDrawFramebufferHeight();
+        return [x, framebufferHeight - y - height, width, height];
+    }
+
+    bindRenderbuffer(target: GLenum, renderbuffer: HydTexture | null) {
         if (target === WebGL2RenderingContext.RENDERBUFFER) {
             this.hydGlobalState.commonState.renderbufferBinding = renderbuffer;
         } else {
             console.warn("unknown target: " + target);
         }
-        this.hydGlobalState.recordTransition("bindRenderbuffer", target, renderbuffer.hash);
+        this.hydGlobalState.recordTransition("bindRenderbuffer", target, renderbuffer ? renderbuffer.hash : "null");
     }
 
     renderbufferStorage(target: GLenum, internalFormat: GLenum, width: GLsizei, height: GLsizei) {
         if (target === WebGL2RenderingContext.RENDERBUFFER) {
+            const renderbuffer = this.hydGlobalState.commonState.renderbufferBinding;
+            if (!renderbuffer) {
+                this.hydGlobalState.glError = WebGL2RenderingContext.INVALID_OPERATION;
+                throw new Error("renderbufferStorage called with no renderbuffer bound");
+            }
             switch (internalFormat) {
                 case WebGL2RenderingContext.DEPTH_COMPONENT16:
-                    this.hydGlobalState.commonState.renderbufferBinding.renderbufferStorage('depth16unorm', width, height);
+                    renderbuffer.renderbufferStorage('depth16unorm', width, height);
                     break;
                 case WebGL2RenderingContext.DEPTH_COMPONENT24:
-                    this.hydGlobalState.commonState.renderbufferBinding.renderbufferStorage('depth24plus', width, height);
+                    renderbuffer.renderbufferStorage('depth24plus', width, height);
                     break;
                 case WebGL2RenderingContext.DEPTH24_STENCIL8:
-                    this.hydGlobalState.commonState.renderbufferBinding.renderbufferStorage('depth24plus-stencil8', width, height);
+                case WebGL2RenderingContext.DEPTH_STENCIL:
+                    renderbuffer.renderbufferStorage('depth24plus-stencil8', width, height);
                     break;
                 case WebGL2RenderingContext.DEPTH_COMPONENT32F:
-                    this.hydGlobalState.commonState.renderbufferBinding.renderbufferStorage('depth32float', width, height);
+                    renderbuffer.renderbufferStorage('depth32float', width, height);
                     break;
                 case WebGL2RenderingContext.STENCIL_INDEX8:
-                    this.hydGlobalState.commonState.renderbufferBinding.renderbufferStorage('stencil8', width, height);
+                    renderbuffer.renderbufferStorage('stencil8', width, height);
                     break;
                 case WebGL2RenderingContext.RGBA32F:
-                    this.hydGlobalState.commonState.renderbufferBinding.renderbufferStorage('rgba32float', width, height);
+                    renderbuffer.renderbufferStorage('rgba32float', width, height);
+                    break;
+                case WebGL2RenderingContext.RGBA4:
+                case WebGL2RenderingContext.RGB565:
+                case WebGL2RenderingContext.RGB5_A1:
+                    renderbuffer.renderbufferStorage('rgba8unorm', width, height);
                     break;
                 default:
                     throw new Error("unsupported internalFormat: " + internalFormat);
@@ -744,7 +806,10 @@ export class HydWebGLStatic {
         const type: GLenum = args.at(-2);
         const pixels: ImageData | HTMLImageElement | HTMLCanvasElement | HTMLVideoElement | ImageBitmap | TypedArray | null = args.at(-1);
         if (args.length === 6) {
-            if (pixels !== null && "width" in pixels && "height" in pixels) {
+            if (pixels instanceof HTMLVideoElement) {
+                width = pixels.videoWidth;
+                height = pixels.videoHeight;
+            } else if (pixels !== null && "width" in pixels && "height" in pixels) {
                 width = pixels.width;
                 height = pixels.height;
             } else {
@@ -754,19 +819,52 @@ export class HydWebGLStatic {
             width = args.at(3);
             height = args.at(4);
         }
-        if (pixels instanceof HTMLVideoElement
-            // || border !== 0
-            || !((internalformat === WebGL2RenderingContext.RGBA && format === WebGL2RenderingContext.RGBA && type === WebGL2RenderingContext.UNSIGNED_BYTE)
-                || (internalformat === WebGL2RenderingContext.DEPTH_COMPONENT32F && format === WebGL2RenderingContext.DEPTH_COMPONENT && type === WebGL2RenderingContext.FLOAT)
-                || (internalformat === WebGL2RenderingContext.LUMINANCE && format === WebGL2RenderingContext.LUMINANCE && type === WebGL2RenderingContext.UNSIGNED_BYTE)
-                || (internalformat === WebGL2RenderingContext.RGB && format === WebGL2RenderingContext.RGB && type === WebGL2RenderingContext.UNSIGNED_BYTE)
-            )
-        ) {
+        if (!this.isSupportedTextureUploadFormat(internalformat, format, type)) {
             throw new Error("unsupported texImage2D: " + args);
         }
         const unpack: HydPixelUnpackState = this.hydGlobalState.miscState.unpackState;
-        this.hydGlobalState.textureUnits[this.hydGlobalState.commonState.activeTextureUnit].texImage2D(pixels, target, level, internalformat, width, height, border, format, type, unpack);
+        this.currentTexture().texImage2D(pixels, target, level, internalformat, width, height, border, format, type, unpack);
         this.hydGlobalState.recordTransition("texImage2D", target, level, internalformat, width, height, border, format, type);
+    }
+
+    texSubImage2D(...args: Array<any>) {
+        this._der_flush();
+        console.assert(args.length === 7 || args.length === 9);
+        const target: GLenum = args.at(0);
+        const level: GLint = args.at(1);
+        const xoffset: GLint = args.at(2);
+        const yoffset: GLint = args.at(3);
+        let width: GLsizei;
+        let height: GLsizei;
+        let format: GLenum;
+        let type: GLenum;
+        let pixels: ImageData | HTMLImageElement | HTMLCanvasElement | HTMLVideoElement | ImageBitmap | TypedArray;
+        if (args.length === 7) {
+            format = args.at(4);
+            type = args.at(5);
+            pixels = args.at(6);
+            if (pixels instanceof HTMLVideoElement) {
+                width = pixels.videoWidth;
+                height = pixels.videoHeight;
+            } else if (pixels && "width" in pixels && "height" in pixels) {
+                width = pixels.width;
+                height = pixels.height;
+            } else {
+                throw new Error("unsupported texSubImage2D: " + args);
+            }
+        } else {
+            width = args.at(4);
+            height = args.at(5);
+            format = args.at(6);
+            type = args.at(7);
+            pixels = args.at(8);
+        }
+        if (!this.isSupportedTextureUploadFormat(format, format, type)) {
+            throw new Error("unsupported texSubImage2D: " + args);
+        }
+        const unpack: HydPixelUnpackState = this.hydGlobalState.miscState.unpackState;
+        this.currentTexture().texSubImage2D(pixels, target, level, xoffset, yoffset, width, height, format, type, unpack);
+        this.hydGlobalState.recordTransition("texSubImage2D", target, level, xoffset, yoffset, width, height, format, type);
     }
 
     texImage3D(...args: Array<any>) {
@@ -794,11 +892,15 @@ export class HydWebGLStatic {
 
     generateMipmap(target: GLenum) {
         console.assert(target === WebGL2RenderingContext.TEXTURE_2D || target === WebGL2RenderingContext.TEXTURE_CUBE_MAP);
-        // mipLevelCount = Math.floor(Math.log2(Math.max(source.width, source.height))) + 1;
-        console.warn("generateMipmap is not implemented");
+        this.currentTexture();
+        this.hydGlobalState.recordTransition("generateMipmap", target);
     }
 
     viewport(x: GLint, y: GLint, width: GLsizei, height: GLsizei) {
+        const viewport = this.hydGlobalState.commonState.viewport;
+        if (viewport[0] !== x || viewport[1] !== y || viewport[2] !== width || viewport[3] !== height) {
+            this._der_flush();
+        }
         this.hydGlobalState.commonState.viewport[0] = x;
         this.hydGlobalState.commonState.viewport[1] = y;
         this.hydGlobalState.commonState.viewport[2] = width;
@@ -806,7 +908,20 @@ export class HydWebGLStatic {
         this.hydGlobalState.recordTransition("viewport", x, y, width, height);
     }
 
+    scissor(x: GLint, y: GLint, width: GLsizei, height: GLsizei) {
+        const scissorBox = this.hydGlobalState.miscState.scissorBox;
+        if (scissorBox[0] !== x || scissorBox[1] !== y || scissorBox[2] !== width || scissorBox[3] !== height) {
+            this._der_flush();
+        }
+        this.hydGlobalState.miscState.scissorBox = [x, y, width, height];
+        this.hydGlobalState.recordTransition("scissor", x, y, width, height);
+    }
+
     depthRange(zNear: number, zFar: number) {
+        const viewport = this.hydGlobalState.commonState.viewport;
+        if (viewport[4] !== zNear || viewport[5] !== zFar) {
+            this._der_flush();
+        }
         this.hydGlobalState.commonState.viewport[4] = zNear;
         this.hydGlobalState.commonState.viewport[5] = zFar;
         this.hydGlobalState.recordTransition("depthRange", zNear, zFar);
@@ -863,7 +978,10 @@ export class HydWebGLStatic {
                 this.hydGlobalState.blendState.enabled = value;
                 break;
             case WebGL2RenderingContext.SCISSOR_TEST:
-                this.hydGlobalState.miscState.scissorTest = value;
+                if (this.hydGlobalState.miscState.scissorTest !== value) {
+                    this._der_flush();
+                    this.hydGlobalState.miscState.scissorTest = value;
+                }
                 break;
             case WebGL2RenderingContext.POLYGON_OFFSET_FILL:
                 this.hydGlobalState.polygonState.polygonOffsetFill = value;
@@ -961,11 +1079,16 @@ export class HydWebGLStatic {
         this.hydGlobalState.recordTransition("bindFramebuffer", target, framebuffer.hash);
     }
 
-    framebufferTexture2D(target: GLenum, attachment: GLenum, texTarget: GLenum, texture: HydTexture, level: GLint) {
-        console.assert(texTarget === WebGL2RenderingContext.TEXTURE_2D);
-        console.assert(target === WebGL2RenderingContext.FRAMEBUFFER);
+    framebufferTexture2D(target: GLenum, attachment: GLenum, texTarget: GLenum, texture: HydTexture | null, level: GLint) {
+        const framebuffer = this.getFramebufferForTarget(target);
+        if (texture === null) {
+            framebuffer.attachments.delete(attachment);
+            framebuffer.resetHash();
+            this.hydGlobalState.recordTransition("framebufferTexture2D", target, attachment, texTarget, "null", level);
+            return;
+        }
 
-        const attrib = new FramebufferAttributes(attachment, level, undefined, texture);
+        const attrib = new FramebufferAttributes(attachment, level, texTarget, texture);
         switch (attachment) {
             case WebGL2RenderingContext.DEPTH_ATTACHMENT:
                 texture.state.compare = this.hydGlobalState.depthState.func;
@@ -978,24 +1101,30 @@ export class HydWebGLStatic {
                 break;
         }
 
-        this.hydGlobalState.commonState.drawFramebufferBinding.attachments.set(attachment, attrib);
-        this.hydGlobalState.defaultFramebuffer.resetHash();
+        framebuffer.attachments.set(attachment, attrib);
+        framebuffer.resetHash();
         this.hydGlobalState.recordTransition("framebufferTexture2D", target, attachment, texTarget, texture.hash, level);
     }
 
-    framebufferRenderbuffer(target: GLenum, attachment: GLenum, renderbufferTarget: GLenum, renderbuffer: HydTexture) {
-        console.assert(target === WebGL2RenderingContext.FRAMEBUFFER);
+    framebufferRenderbuffer(target: GLenum, attachment: GLenum, renderbufferTarget: GLenum, renderbuffer: HydTexture | null) {
         console.assert(renderbufferTarget === WebGL2RenderingContext.RENDERBUFFER);
+        const framebuffer = this.getFramebufferForTarget(target);
+        if (renderbuffer === null) {
+            framebuffer.attachments.delete(attachment);
+            framebuffer.resetHash();
+            this.hydGlobalState.recordTransition("framebufferRenderbuffer", target, attachment, renderbufferTarget, "null");
+            return;
+        }
 
         const attrib: FramebufferAttributes = new FramebufferAttributes(attachment, undefined, undefined, renderbuffer);
-        this.hydGlobalState.commonState.drawFramebufferBinding.attachments.set(attachment, attrib);
-        this.hydGlobalState.defaultFramebuffer.resetHash();
+        framebuffer.attachments.set(attachment, attrib);
+        framebuffer.resetHash();
         this.hydGlobalState.recordTransition("framebufferRenderbuffer", target, attachment, renderbufferTarget, renderbuffer.hash);
     }
 
     drawBuffers(buffers: Array<GLenum>) {
         this.hydGlobalState.commonState.drawFramebufferBinding.drawBuffers = buffers;
-        this.hydGlobalState.defaultFramebuffer.resetHash();
+        this.hydGlobalState.commonState.drawFramebufferBinding.resetHash();
         this.hydGlobalState.recordTransition("drawBuffers", ...buffers);
     }
 
@@ -1041,6 +1170,10 @@ export class HydWebGLStatic {
 
         const {pipelineHash, pipeline, bindGroupHash: _bindGroupHash, bindGroup, vertexBuffersHash, vertexBufferHashes, vertexBuffers, vertexBufferOffsets, renderPassHash, renderBundleEncoderDescriptor} = this.hydGlobalState.getPBV();
         this.hydRpCache.RpSetDescriptor(renderPassHash, renderBundleEncoderDescriptor, this.bindedGetRenderPassDesc);
+        this.hydRpCache.RpSetViewport(this.toGpuViewport());
+        if (this.hydGlobalState.miscState.scissorTest) {
+            this.hydRpCache.RpSetScissorRect(this.toGpuScissorRect());
+        }
         this.hydRpCache.RpSetPipeline(pipelineHash, pipeline);
         this.hydRpCache.RpSetBindGroup(bindGroup, this.hydUniOff);
         this.hydRpCache.RpSetVertexBuffers(vertexBuffersHash, vertexBufferHashes, vertexBuffers, vertexBufferOffsets);
