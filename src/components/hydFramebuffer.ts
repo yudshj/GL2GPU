@@ -5,21 +5,23 @@ export class FramebufferAttributes implements HydHashable {
     public attachmentPoint: number;
     public level: number;
     public face: number;
+    public layer: number;
     public attachment: HydTexture;
 
-    constructor(attachmentPoint: number, level: number, face: number, attachment: HydTexture) {
+    constructor(attachmentPoint: number, level: number, face: number, attachment: HydTexture, layer?: number) {
         this.attachmentPoint = attachmentPoint;
         this.level = level;
         this.face = face;
+        this.layer = layer;
         this.attachment = attachment;
     }
 
     public get hash(): string {
-        return `${this.attachmentPoint}-${this.level}-${this.face}-${this.attachment.hash}`;
+        return `${this.attachmentPoint}-${this.level}-${this.face}-${this.layer}-${this.attachment.hash}`;
     }
 
     public get view(): GPUTextureView {
-        return this.attachment.getFramebufferView(this.face, this.level);
+        return this.attachment.getFramebufferView(this.face, this.level, this.layer);
     }
 
     public get format(): GPUTextureFormat {

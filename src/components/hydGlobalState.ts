@@ -6,6 +6,26 @@ import { HydTexture } from "./hydTexture";
 import { HydVertexArray } from "./hydVertexArray";
 import fastHashCode from "fast-hash-code";
 
+const CURRENT_VERTEX_ATTRIB_BUFFER_ELEMENTS = 4096;
+const TEXTURE_UNIT_BINDING_ORDER: GPUTextureViewDimension[] = ["2d", "cube", "3d", "2d-array", "cube-array"];
+
+export type HydTextureUnitBindings = Partial<Record<GPUTextureViewDimension, HydTexture>>;
+
+function programAttributeTypeToVertexFormat(type: GLenum): GPUVertexFormat {
+    switch (type) {
+        case WebGL2RenderingContext.FLOAT:
+            return 'float32';
+        case WebGL2RenderingContext.FLOAT_VEC2:
+            return 'float32x2';
+        case WebGL2RenderingContext.FLOAT_VEC3:
+            return 'float32x3';
+        case WebGL2RenderingContext.FLOAT_VEC4:
+            return 'float32x4';
+        default:
+            return 'float32x4';
+    }
+}
+
 // export class ViewportState {
 //     x: number;
 //     y: number;
@@ -48,6 +68,7 @@ export class CommonState implements HydHashable {
         }
         if (this.currentProgram) {
             ret += this.currentProgram.hash;
+            ret += this.currentProgram.hydSamplers.map((sampler) => `${sampler.name}:${sampler.textureUnit}`).join('|');
         }
         return ret;
     }
@@ -118,7 +139,7 @@ export class ClearState implements HydHashable {
         return this.color.toString() + this.depth.toString() + this.stencil.toString();
     }
     constructor() {
-        this.color = [1.0, 1.0, 1.0, 1.0];
+        this.color = [0.0, 0.0, 0.0, 0.0];
         this.depth = 1;
         this.stencil = 0x00;
         this.target = WebGL2RenderingContext.COLOR_BUFFER_BIT | WebGL2RenderingContext.DEPTH_BUFFER_BIT;
@@ -233,8 +254,9 @@ export class HydGlobalState {
     public blendState = new BlendState();
     public miscState = new MiscState();
     public stencilState = new StencilState();
-    public textureUnits: HydTexture[] = [];
+    public textureUnits: HydTextureUnitBindings[] = [];
     public topology: GPUPrimitiveTopology = null;
+    public readonly currentVertexAttribValues: Float32Array[] = Array.from({ length: 16 }, () => new Float32Array([0, 0, 0, 1]));
 
     public readonly defaultVertexArrayBinding: HydVertexArray = new HydVertexArray();
     public readonly defaultFramebuffer: HydFramebuffer;
@@ -243,6 +265,7 @@ export class HydGlobalState {
     private __bindGroupCount: number = 0;
     private __pipelineCount: number = 0;
     private uniformBuffer: GPUBuffer;
+    private readonly defaultSampleTextures: Map<GPUTextureViewDimension, HydTexture> = new Map();
 
     constructor(attributes: WebGLContextAttributes, uniform: GPUBuffer, device: GPUDevice) {
         this.contextAttributes = attributes;
@@ -263,6 +286,62 @@ export class HydGlobalState {
             null,
         );
         this.uniformBuffer = uniform;
+    }
+
+    private getDefaultSampleTexture(viewDimension: GPUTextureViewDimension): HydTexture {
+        let texture = this.defaultSampleTextures.get(viewDimension);
+        if (!texture) {
+            texture = new HydTexture(this.device);
+            texture.label = `HydDefaultSampleTexture-${viewDimension}`;
+            texture.ensureSampleable(viewDimension);
+            this.defaultSampleTextures.set(viewDimension, texture);
+        }
+        return texture;
+    }
+
+    public getTextureUnitBinding(textureUnit: number, viewDimension: GPUTextureViewDimension): HydTexture | null {
+        return this.textureUnits[textureUnit]?.[viewDimension] || null;
+    }
+
+    public setTextureUnitBinding(textureUnit: number, viewDimension: GPUTextureViewDimension, texture: HydTexture | null) {
+        let bindings = this.textureUnits[textureUnit];
+        if (!bindings) {
+            bindings = {};
+            this.textureUnits[textureUnit] = bindings;
+        }
+        if (texture) {
+            bindings[viewDimension] = texture;
+        } else {
+            delete bindings[viewDimension];
+        }
+    }
+
+    public deleteTextureBinding(texture: HydTexture) {
+        for (const bindings of this.textureUnits) {
+            if (!bindings) continue;
+            for (const viewDimension of TEXTURE_UNIT_BINDING_ORDER) {
+                if (bindings[viewDimension] === texture) {
+                    delete bindings[viewDimension];
+                }
+            }
+        }
+    }
+
+    private getSamplerTexture(textureUnit: number, viewDimension: GPUTextureViewDimension): HydTexture {
+        const texture = this.getTextureUnitBinding(textureUnit, viewDimension);
+        if (!texture) {
+            return this.getDefaultSampleTexture(viewDimension);
+        }
+        texture.ensureSampleable(viewDimension);
+        return texture;
+    }
+
+    private getColorWriteMask(): GPUColorWriteFlags {
+        const [r, g, b, a] = this.miscState.colorWriteMask;
+        return (r ? GPUColorWrite.RED : 0) |
+            (g ? GPUColorWrite.GREEN : 0) |
+            (b ? GPUColorWrite.BLUE : 0) |
+            (a ? GPUColorWrite.ALPHA : 0);
     }
 
     public getPipelineDescriptor(topology: GPUPrimitiveTopology, vertexBufferLayout: GPUVertexBufferLayout[]): [string, GPURenderPipelineDescriptor] {
@@ -297,6 +376,7 @@ export class HydGlobalState {
                 },
             } : undefined;
             cacheKey += this.blendState.enabled ? 'true' + this.blendState.srcRGB + this.blendState.dstRGB + this.blendState.equationRGB + this.blendState.srcAlpha + this.blendState.dstAlpha + this.blendState.equationAlpha : 'false';
+            cacheKey += this.miscState.colorWriteMask.join(',');
             pipelineDescriptor.fragment = {
                 module: this.commonState.currentProgram.fragmentModule,
                 entryPoint: 'main',
@@ -305,9 +385,9 @@ export class HydGlobalState {
                     .map((value) => {
                         cacheKey += value.toString();
                         if (value === WebGL2RenderingContext.BACK) {
-                            return { format: 'bgra8unorm', blend } as GPUColorTargetState;
+                            return { format: 'bgra8unorm', blend, writeMask: this.getColorWriteMask() } as GPUColorTargetState;
                         } else if (WebGL2RenderingContext.COLOR_ATTACHMENT0 <= value && value <= WebGL2RenderingContext.COLOR_ATTACHMENT15) {
-                            return { format: this.commonState.drawFramebufferBinding.attachments.get(value).format, blend } as GPUColorTargetState;
+                            return { format: this.commonState.drawFramebufferBinding.attachments.get(value).format, blend, writeMask: this.getColorWriteMask() } as GPUColorTargetState;
                         } else {
                             return null;
                         }
@@ -317,7 +397,7 @@ export class HydGlobalState {
         if (this.depthState.enabled || this.stencilState.enabled) {
             pipelineDescriptor.depthStencil = {
                 format: this.getDepthStencilAttachment().format,
-                depthWriteEnabled: this.depthState.enabled,
+                depthWriteEnabled: this.depthState.enabled && this.depthState.writeMask,
                 depthCompare: this.depthState.enabled ? this.depthState.func : 'always',
                 stencilFront: {
                     compare: this.stencilState.frontFunc,
@@ -337,7 +417,7 @@ export class HydGlobalState {
                 depthBiasSlopeScale: this.polygonState.polygonOffsetFill ? this.polygonState.polygonOffsetFactor : undefined,
                 // depthBiasClamp: this.polygonState.polygonOffsetClamp,
             }
-            cacheKey += pipelineDescriptor.depthStencil;
+            cacheKey += this.depthState.hash + this.stencilState.hash;
         }
         return [fastHashCode(cacheKey).toString(), pipelineDescriptor];
     }
@@ -363,7 +443,7 @@ export class HydGlobalState {
     }
 
     public getRenderPassDescriptorCacheKey(): string {
-        let cacheKey: string = (this.clearState.target & WebGL2RenderingContext.COLOR_BUFFER_BIT) ? 'clear' : 'load' +
+        let cacheKey: string = ((this.clearState.target & WebGL2RenderingContext.COLOR_BUFFER_BIT) ? 'clear' : 'load') +
             this.clearState.color[0] + this.clearState.color[1] + this.clearState.color[2] + this.clearState.color[3];
         this.commonState.drawFramebufferBinding.drawBuffers
             .forEach((value) => {
@@ -437,6 +517,32 @@ export class HydGlobalState {
     private _bindGroupLayoutCache: Map<string, GPUBindGroupLayout> = new Map();
     private _pipelineLayoutCache: Map<string, GPUPipelineLayout> = new Map();
     private _pipelineCache: Map<string, GPURenderPipeline> = new Map();
+    private _currentVertexAttribBuffers: GPUBuffer[] = [];
+    private _currentVertexAttribBufferKeys: string[] = [];
+
+    private getCurrentVertexAttribBuffer(index: number): [GPUBuffer, string] {
+        if (!this._currentVertexAttribBuffers[index]) {
+            this._currentVertexAttribBuffers[index] = this.device.createBuffer({
+                label: `currentVertexAttrib${index}`,
+                size: CURRENT_VERTEX_ATTRIB_BUFFER_ELEMENTS * 16,
+                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+            });
+        }
+        const values = this.currentVertexAttribValues[index] || this.currentVertexAttribValues[0];
+        const key = `${index}:${values[0]},${values[1]},${values[2]},${values[3]}`;
+        if (this._currentVertexAttribBufferKeys[index] !== key) {
+            const repeated = new Float32Array(CURRENT_VERTEX_ATTRIB_BUFFER_ELEMENTS * 4);
+            for (let i = 0; i < CURRENT_VERTEX_ATTRIB_BUFFER_ELEMENTS; i++) {
+                repeated[i * 4] = values[0];
+                repeated[i * 4 + 1] = values[1];
+                repeated[i * 4 + 2] = values[2];
+                repeated[i * 4 + 3] = values[3];
+            }
+            this.device.queue.writeBuffer(this._currentVertexAttribBuffers[index], 0, repeated.buffer, repeated.byteOffset, repeated.byteLength);
+            this._currentVertexAttribBufferKeys[index] = key;
+        }
+        return [this._currentVertexAttribBuffers[index], key];
+    }
 
     public getPBV(): PbvInfo {
         const [vertexBufferHashes, vertexBuffers, vertexBufferOffsets, vertexBufferLayoutHash, vertexBufferLayout] = this.getVertexBuffer();
@@ -543,7 +649,7 @@ export class HydGlobalState {
         let bindGroupLayoutKey = '0-du-' + program.alignedUniformSize;
 
         for (const sampler of program.hydSamplers) {
-            const textureAttachment: HydTexture = this.textureUnits[sampler.textureUnit];
+            const textureAttachment: HydTexture = this.getSamplerTexture(sampler.textureUnit, sampler.viewDimension);
             bindGroupLayoutEntry.push({
                 binding: bindGroupLayoutEntry.length,
                 visibility: GPUShaderStage.FRAGMENT,
@@ -569,10 +675,10 @@ export class HydGlobalState {
                 binding: bindGroupEntry.length,
                 resource: textureAttachment.view,
             });
-            bindGroupKey += this.textureUnits[sampler.textureUnit].hash;
+            bindGroupKey += textureAttachment.hash;
         }
         for (const sampler of program.hydSamplers) {
-            const textureAttachment: HydTexture = this.textureUnits[sampler.textureUnit];
+            const textureAttachment: HydTexture = this.getSamplerTexture(sampler.textureUnit, sampler.viewDimension);
             // textureAttachment.bindGroupHashes.push([this._bindGroupCache, bindGroupKey]);
             textureAttachment.onDestroy.push(() => {
                 if (this._bindGroupCache.has(bindGroupKey)) {
@@ -586,8 +692,9 @@ export class HydGlobalState {
     }
 
     public getVertexBuffer(): [string[], GPUBuffer[], number[], string, GPUVertexBufferLayout[]] {
-        const bufferAttributeMap = new Map<string, [GPUBuffer, number, Array<GPUVertexAttribute>]>();
+        const bufferAttributeMap = new Map<string, [GPUBuffer, number, GPUVertexStepMode, Array<GPUVertexAttribute>]>();
         const vao = this.commonState.vertexArrayBinding;
+        const activeAttributeLocations = new Set(this.commonState.currentProgram.hydAttributes.map((attribute) => attribute.location));
         const buffers: GPUBuffer[] = [];
         const layouts: GPUVertexBufferLayout[] = [];
         const offsets: number[] = [];
@@ -606,7 +713,9 @@ export class HydGlobalState {
             public GPUAttribute: GPUVertexAttribute;
         }
         */
-        for (const attribute of vao.attributes) {
+        for (let location = 0; location < vao.attributes.length; location++) {
+            if (!activeAttributeLocations.has(location)) continue;
+            const attribute = vao.attributes[location];
             if (attribute.enabled) {
                 if (!attribute.buffer) {
                     // throw new Error('[HYD] VertexArray attribute buffer is null.');
@@ -615,15 +724,16 @@ export class HydGlobalState {
                 }
                 // TODO: if offset > stride, then we need to set the offset of this vertexBuffer when calling renderPass.setVertexBuffer
                 // https://github.com/gpuweb/gpuweb/issues/1357#issuecomment-765079909
-                let hash = attribute.buffer.hash + '|' + attribute.stride + '|' + Math.floor(attribute.offset / 2048);
+                const stepMode: GPUVertexStepMode = attribute.divisor > 0 ? 'instance' : 'vertex';
+                let hash = attribute.buffer.hash + '|' + attribute.stride + '|' + stepMode + '|' + Math.floor(attribute.offset / 2048);
                 if (bufferAttributeMap.has(hash)) {
-                    bufferAttributeMap.get(hash)[2].push({
+                    bufferAttributeMap.get(hash)[3].push({
                         shaderLocation: attribute.shaderLocation,
                         offset: attribute.offset,
                         format: attribute.format,
                     });
                 } else {
-                    bufferAttributeMap.set(hash, [attribute.buffer.buffer, attribute.stride, [{
+                    bufferAttributeMap.set(hash, [attribute.buffer.buffer, attribute.stride, stepMode, [{
                         shaderLocation: attribute.shaderLocation,
                         offset: attribute.offset,
                         format: attribute.format,
@@ -632,8 +742,22 @@ export class HydGlobalState {
             }
         }
 
+        for (const programAttribute of this.commonState.currentProgram.hydAttributes) {
+            const location = programAttribute.location;
+            const attribute = vao.attributes[location];
+            if (attribute && !attribute.enabled) {
+                const [buffer, key] = this.getCurrentVertexAttribBuffer(location);
+                const hash = `current-vertex-attrib-${key}`;
+                bufferAttributeMap.set(hash, [buffer, 16, 'instance', [{
+                    shaderLocation: location,
+                    offset: 0,
+                    format: programAttributeTypeToVertexFormat(programAttribute.type),
+                }]]);
+            }
+        }
+
         let layoutKey = '';
-        for (const [bufferHash, [buffer, arrayStride, attributes]] of bufferAttributeMap) {
+        for (const [bufferHash, [buffer, arrayStride, stepMode, attributes]] of bufferAttributeMap) {
             buffers.push(buffer);
             // let offset = attributes[0].offset;
             // for (let i = 1; i < attributes.length; i++) {
@@ -647,9 +771,9 @@ export class HydGlobalState {
             layouts.push({
                 arrayStride,
                 attributes,
-                stepMode: 'vertex',
+                stepMode,
             });
-            layoutKey += attributes.toString() + arrayStride + '|';
+            layoutKey += attributes.toString() + arrayStride + stepMode + '|';
             vbKeys.push(bufferHash + '|' + offset);
         }
         return [vbKeys, buffers, offsets, layoutKey, layouts];
@@ -729,6 +853,12 @@ export class HydGlobalStateHashed extends HydGlobalState implements HydHashable 
     }
 
     public get hash(): string {
+        const textureUnitHash = this.textureUnits.map((bindings) => {
+            if (!bindings) return "null";
+            return TEXTURE_UNIT_BINDING_ORDER
+                .map((viewDimension) => `${viewDimension}:${bindings[viewDimension]?.hash || "null"}`)
+                .join(',');
+        }).join('|');
         return this.commonState.hash
             + this.depthState.hash
             + this.polygonState.hash
@@ -736,7 +866,7 @@ export class HydGlobalStateHashed extends HydGlobalState implements HydHashable 
             + this.blendState.hash
             + this.miscState.hash
             + this.stencilState.hash
-            + this.textureUnits.map((texture) => texture.hash).join('|')
+            + textureUnitHash
             + this.clearState.target.toString()
             + this.topology;
     }

@@ -1,7 +1,7 @@
 import fastHashCode from 'fast-hash-code';
 
 import {HydShader} from "./hydShader";
-import {MergeShaderInfo, ShaderInfo2HydAus, ShaderInfo2String, hydTrim} from "./shaderDB";
+import {MergeShaderInfo, samplerFlipYUniformName, ShaderInfo2HydAus, ShaderInfo2String, hydTrim} from "./shaderDB";
 import { HydHashable } from './base/hydHashable';
 import { ShaderTranslator } from './shaderTranslator';
 
@@ -74,11 +74,13 @@ export class ProgramUniformBuffer {
     public offset: number;
     public byteLength: number;
     public alignedByteLength: number;
+    public internal: boolean;
 
-    constructor(name: string, type: GLenum, size: GLsizei) {
+    constructor(name: string, type: GLenum, size: GLsizei, internal: boolean = false) {
         this.name = name;
         this.size = size;
         this.webgl_type = type;
+        this.internal = internal;
         // TODO: 考虑size
         this.byteLength = glSizeToBytes.get(type);
         this.alignedByteLength = glSizeToAlignedBytes.get(type);
@@ -94,6 +96,7 @@ export class ProgramUniformSampler {
     // isCompare: boolean;    // TODO: is compare 应该跟着texture的format走?
     // sampleType: GPUTextureSampleType;
     viewDimension: GPUTextureViewDimension;
+    originFlipUniform?: ProgramUniformBuffer;
     constructor(name: string, webgl_type: GLenum, viewDimension: GPUTextureViewDimension) {
         this.name = name;
         this.size = 1;
@@ -133,6 +136,7 @@ export class HydProgram implements HydHashable {
     public hydAttributes: Array<ProgramAttribute> = [];
     public hydUniforms: Array<ProgramUniformBuffer> = [];
     public hydSamplers: Array<ProgramUniformSampler> = [];
+    public readonly boundAttributeLocations: Map<string, number> = new Map();
     
     // public uniformMergedBuffer: Uint8Array;
     // public uniformArrayBufferView: DataView;
@@ -191,8 +195,12 @@ export class HydProgram implements HydHashable {
         }
     }
 
+    public bindAttribLocation(index: number, name: string) {
+        this.boundAttributeLocations.set(name, index);
+    }
+
     public linkProgram() {
-        const translatedProgram = this.shaderTranslator.translateProgram(this.vertexShader, this.fragmentShader);
+        const translatedProgram = this.shaderTranslator.translateProgram(this.vertexShader, this.fragmentShader, this.boundAttributeLocations);
         if (this.vertexShader && translatedProgram.vertex) {
             this.vertexShader.shader_info = translatedProgram.vertex;
         }
@@ -217,6 +225,20 @@ export class HydProgram implements HydHashable {
         }
         console.warn('[HYD] linkProgram:', tmpOutput);
         const mergedShaderInfo = MergeShaderInfo(shaders);
+        for (const sampler of mergedShaderInfo.samplers) {
+            if (sampler.glsl_type !== "sampler2D") {
+                continue;
+            }
+            const name = samplerFlipYUniformName(sampler.name);
+            if (!mergedShaderInfo.uniforms.some((uniform) => uniform.name === name)) {
+                mergedShaderInfo.uniforms.push({
+                    name,
+                    glsl_type: "float",
+                    wgsl_type: "f32",
+                    internal: true,
+                });
+            }
+        }
         const code = ShaderInfo2String(mergedShaderInfo);
         if (this.vertexShader) {
             const vs = code + this.vertexShader.shader_info.wgsl;
@@ -232,8 +254,19 @@ export class HydProgram implements HydHashable {
         }
         const aus = ShaderInfo2HydAus(mergedShaderInfo);
         this.hydAttributes = aus.attributes;
+        for (const attribute of this.hydAttributes) {
+            const location = translatedProgram.attributeLocations?.get(attribute.name);
+            if (location !== undefined) {
+                attribute.location = location;
+            }
+        }
         this.hydUniforms = aus.uniforms;
         this.hydSamplers = aus.samplers;
+        for (const sampler of this.hydSamplers) {
+            if (sampler.webgl_type === WebGL2RenderingContext.SAMPLER_2D) {
+                sampler.originFlipUniform = this.hydUniforms.find((uniform) => uniform.name === samplerFlipYUniformName(sampler.name));
+            }
+        }
 
         // TODO: algorithm: uniform buffer alignment
         let currentOffset = 0;

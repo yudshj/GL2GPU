@@ -4,6 +4,7 @@ import type { TintWasmModule } from "../vendor/tint-wasm/tint_wasm.js";
 import {
     InitShaderInfoType,
     NameAndType,
+    samplerFlipYUniformName,
     TextureNameAndType,
 } from "./shaderDB";
 import { makeShaderMetadata, scanGlslDeclarations, ShaderStage } from "./shaderMetadata";
@@ -54,6 +55,7 @@ export interface ShaderLike {
 export interface TranslatedProgram {
     vertex?: InitShaderInfoType;
     fragment?: InitShaderInfoType;
+    attributeLocations?: Map<string, number>;
 }
 
 interface ProgramTranslationLayout {
@@ -79,6 +81,7 @@ const GLOBAL_DECLARATION_REGEX = /(^|[;\n])(\s*(?:layout\s*\([^)]*\)\s*)?(?:(?:l
 const SPV_OP_NAME = 5;
 const SPV_OP_TYPE_SAMPLED_IMAGE = 27;
 const SPV_OP_TYPE_POINTER = 32;
+const SPV_OP_FUNCTION_PARAMETER = 55;
 const SPV_OP_VARIABLE = 59;
 const SPV_OP_LOAD = 61;
 const SPV_OP_DECORATE = 71;
@@ -106,12 +109,24 @@ function uniqueByName<T extends NameAndType | TextureNameAndType>(items: T[]): T
     return out;
 }
 
-function assignLocations(items: NameAndType[]): Map<string, number> {
+function assignLocations(items: NameAndType[], boundLocations: Map<string, number> = new Map()): Map<string, number> {
     const locations = new Map<string, number>();
+    const usedLocations = new Set<number>();
     for (const item of items) {
-        if (!locations.has(item.name)) {
-            locations.set(item.name, locations.size);
+        const boundLocation = boundLocations.get(item.name);
+        if (boundLocation !== undefined && !locations.has(item.name)) {
+            locations.set(item.name, boundLocation);
+            usedLocations.add(boundLocation);
         }
+    }
+    let nextLocation = 0;
+    for (const item of items) {
+        if (locations.has(item.name)) continue;
+        while (usedLocations.has(nextLocation)) {
+            nextLocation++;
+        }
+        locations.set(item.name, nextLocation);
+        usedLocations.add(nextLocation);
     }
     return locations;
 }
@@ -152,6 +167,11 @@ function prepareSourceAndDeclarations(source: string): PreparedGlslSource {
         }
         return "";
     });
+    if (!preamble.some((line) => /^precision\s+(?:lowp|mediump|highp)\s+float\s*;/.test(line))) {
+        const defaultFloatPrecision = "precision highp float;";
+        preamble.splice(1, 0, defaultFloatPrecision);
+        seenPreamble.add(defaultFloatPrecision);
+    }
 
     const declarations: ParsedGlslDeclaration[] = [];
     body = body.replace(GLOBAL_DECLARATION_REGEX, (full, prefix, _declaration, qualifier, glslType, rawNames) => {
@@ -228,8 +248,13 @@ function samplerGlslTextureType(glslType: string): string {
 function addSamplerPrecisionDeclarations(lines: string[], metadata: InitShaderInfoType) {
     const seen = new Set<string>();
     for (const sampler of metadata.samplers) {
+        const separateSamplerPrecision = "precision highp sampler;";
         const samplerPrecision = `precision highp ${sampler.glsl_type};`;
         const texturePrecision = `precision highp ${samplerGlslTextureType(sampler.glsl_type)};`;
+        if (!seen.has(separateSamplerPrecision)) {
+            seen.add(separateSamplerPrecision);
+            lines.push(separateSamplerPrecision);
+        }
         if (!seen.has(samplerPrecision)) {
             seen.add(samplerPrecision);
             lines.push(samplerPrecision);
@@ -242,6 +267,10 @@ function addSamplerPrecisionDeclarations(lines: string[], metadata: InitShaderIn
 }
 
 function rewriteSamplerExpressions(source: string, metadata: InitShaderInfoType): string {
+    return rewriteSamplerExpressionsForSamplers(source, metadata.samplers);
+}
+
+function rewriteSamplerExpressionsForSamplers(source: string, samplers: Array<{ name: string, glsl_type: string }>): string {
     let out = source;
     const sampleFunctions = [
         "texture",
@@ -255,7 +284,7 @@ function rewriteSamplerExpressions(source: string, metadata: InitShaderInfoType)
         "textureProjLodOffset",
         "textureGradOffset",
     ];
-    for (const sampler of metadata.samplers) {
+    for (const sampler of samplers) {
         const name = escapeRegExp(sampler.name);
         const constructor = sampler.glsl_type;
         out = out.replace(
@@ -267,6 +296,206 @@ function rewriteSamplerExpressions(source: string, metadata: InitShaderInfoType)
         out = out.replace(new RegExp(`\\btexelFetch\\s*\\(\\s*${name}\\s*,`, "g"), `texelFetch(${sampler.name}T,`);
     }
     return out;
+}
+
+function findMatchingParen(source: string, openIndex: number): number {
+    let depth = 0;
+    for (let i = openIndex; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === "(") {
+            depth++;
+        } else if (ch === ")") {
+            depth--;
+            if (depth === 0) {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
+function splitTopLevelArguments(source: string): string[] {
+    const args: string[] = [];
+    let start = 0;
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let braceDepth = 0;
+
+    for (let i = 0; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === "(") {
+            parenDepth++;
+        } else if (ch === ")") {
+            parenDepth--;
+        } else if (ch === "[") {
+            bracketDepth++;
+        } else if (ch === "]") {
+            bracketDepth--;
+        } else if (ch === "{") {
+            braceDepth++;
+        } else if (ch === "}") {
+            braceDepth--;
+        } else if (ch === "," && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
+            args.push(source.slice(start, i));
+            start = i + 1;
+        }
+    }
+
+    args.push(source.slice(start));
+    return args;
+}
+
+interface SamplerFunctionParam {
+    index: number;
+    glslType: string;
+    name: string;
+}
+
+interface SamplerFunctionLowering {
+    name: string;
+    params: SamplerFunctionParam[];
+}
+
+const FUNCTION_SIGNATURE_WITH_PAREN_ARGS_REGEX = /((?:^|[;\n{}])\s*(?:[A-Za-z_]\w*\s+)+([A-Za-z_]\w*)\s*)\(([^()]*)\)(\s*[;{])/gm;
+
+function parseSamplerFunctionParameter(raw: string): { glslType: string, name: string } | null {
+    const normalized = raw.trim()
+        .replace(/^(?:const|in|out|inout)\s+/, "")
+        .replace(/^(?:lowp|mediump|highp)\s+/, "");
+    const match = normalized.match(/^(sampler(?:2D|Cube|2DArray|3D))\s+([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?$/);
+    return match ? { glslType: match[1], name: match[2] } : null;
+}
+
+function expandSamplerArgument(expr: string): string[] {
+    const trimmed = expr.trim();
+    const constructor = trimmed.match(/^sampler(?:2D|Cube|2DArray|3D)\s*\(([\s\S]*)\)$/);
+    if (constructor) {
+        const args = splitTopLevelArguments(constructor[1]);
+        if (args.length === 2) {
+            return [args[0].trim(), args[1].trim()];
+        }
+    }
+
+    const identifier = trimmed.match(/^([A-Za-z_]\w*)$/);
+    if (identifier) {
+        return [`${identifier[1]}T`, `${identifier[1]}S`];
+    }
+    return [`${trimmed}T`, `${trimmed}S`];
+}
+
+function rewriteSamplerFunctionCalls(source: string, lowerings: SamplerFunctionLowering[]): string {
+    let out = source;
+    for (const lowering of lowerings) {
+        let result = "";
+        let cursor = 0;
+        const callRegex = new RegExp(`\\b${escapeRegExp(lowering.name)}\\s*\\(`, "g");
+        for (let match = callRegex.exec(out); match !== null; match = callRegex.exec(out)) {
+            const openParen = callRegex.lastIndex - 1;
+            const closeParen = findMatchingParen(out, openParen);
+            if (closeParen < 0) break;
+
+            const next = out.slice(closeParen + 1).match(/^\s*([;{])/);
+            const statementStart = Math.max(
+                out.lastIndexOf(";", match.index - 1),
+                out.lastIndexOf("{", match.index - 1),
+                out.lastIndexOf("}", match.index - 1),
+                out.lastIndexOf("\n", match.index - 1),
+            ) + 1;
+            const prefix = out.slice(statementStart, match.index);
+            const isPrototype = !!(next && next[1] === ";" && /^\s*(?:[A-Za-z_]\w*\s+)+$/.test(prefix));
+            if ((next && next[1] === "{") || isPrototype) {
+                callRegex.lastIndex = closeParen + 1;
+                continue;
+            }
+
+            const args = splitTopLevelArguments(out.slice(openParen + 1, closeParen));
+            const samplerByIndex = new Map(lowering.params.map((param) => [param.index, param]));
+            const rewrittenArgs: string[] = [];
+            for (let i = 0; i < args.length; i++) {
+                if (samplerByIndex.has(i)) {
+                    rewrittenArgs.push(...expandSamplerArgument(args[i]));
+                } else {
+                    rewrittenArgs.push(args[i].trim());
+                }
+            }
+
+            result += out.slice(cursor, match.index);
+            result += `${lowering.name}(${rewrittenArgs.join(", ")})`;
+            cursor = closeParen + 1;
+            callRegex.lastIndex = closeParen + 1;
+        }
+        if (cursor !== 0) {
+            out = result + out.slice(cursor);
+        }
+    }
+    return out;
+}
+
+function lowerSamplerFunctionParameters(source: string): string {
+    const loweringByName = new Map<string, SamplerFunctionLowering>();
+    let out = source.replace(FUNCTION_SIGNATURE_WITH_PAREN_ARGS_REGEX, (full, prefix, functionName, rawParams, suffix) => {
+        const params = splitTopLevelArguments(rawParams);
+        const samplerParams: SamplerFunctionParam[] = [];
+        const rewrittenParams: string[] = [];
+        for (let index = 0; index < params.length; index++) {
+            const parsed = parseSamplerFunctionParameter(params[index]);
+            if (!parsed) {
+                rewrittenParams.push(params[index].trim());
+                continue;
+            }
+
+            samplerParams.push({ index, glslType: parsed.glslType, name: parsed.name });
+            rewrittenParams.push(`${samplerGlslTextureType(parsed.glslType)} ${parsed.name}T`);
+            rewrittenParams.push(`sampler ${parsed.name}S`);
+        }
+
+        if (samplerParams.length === 0) {
+            return full;
+        }
+        if (!loweringByName.has(functionName)) {
+            loweringByName.set(functionName, { name: functionName, params: samplerParams });
+        }
+        return `${prefix}(${rewrittenParams.join(", ")})${suffix}`;
+    });
+
+    const lowerings = Array.from(loweringByName.values());
+    if (lowerings.length === 0) {
+        return source;
+    }
+
+    for (const lowering of lowerings) {
+        out = rewriteSamplerExpressionsForSamplers(out, lowering.params.map((param) => ({
+            name: param.name,
+            glsl_type: param.glslType,
+        })));
+    }
+    return rewriteSamplerFunctionCalls(out, lowerings);
+}
+
+function rewriteFragmentImplicitTextureLod(source: string): string {
+    let result = "";
+    let cursor = 0;
+    const callRegex = /\btexture\s*\(/g;
+
+    for (let match = callRegex.exec(source); match !== null; match = callRegex.exec(source)) {
+        const openParen = callRegex.lastIndex - 1;
+        const closeParen = findMatchingParen(source, openParen);
+        if (closeParen < 0) {
+            break;
+        }
+        const args = splitTopLevelArguments(source.slice(openParen + 1, closeParen));
+        if (args.length >= 2 && /^sampler(?:2D|Cube|2DArray|3D)\s*\(/.test(args[0].trim())) {
+            result += source.slice(cursor, match.index);
+            result += `textureLod(${args[0].trim()}, ${args[1].trim()}, 0.0)`;
+            cursor = closeParen + 1;
+        }
+        callRegex.lastIndex = closeParen + 1;
+    }
+
+    if (cursor === 0) {
+        return source;
+    }
+    return result + source.slice(cursor);
 }
 
 function decodeSpirvString(words: Uint32Array, start: number, end: number): string {
@@ -319,6 +548,7 @@ export function patchGlslangSampledTextureVariables(spirv: Uint32Array, samplers
     const pointerTypes = new Map<number, { storageClass: number, pointeeType: number }>();
     const pointerTypeOffsets = new Map<number, number>();
     const variables = new Map<number, number>();
+    const pointerValues = new Map<number, number>();
     const offsets: number[] = [];
 
     for (let offset = 5; offset < filtered.length;) {
@@ -342,6 +572,8 @@ export function patchGlslangSampledTextureVariables(spirv: Uint32Array, samplers
             pointerTypeOffsets.set(filtered[offset + 1], offset);
         } else if (op === SPV_OP_VARIABLE && wordCount >= 4) {
             variables.set(filtered[offset + 2], filtered[offset + 1]);
+        } else if (op === SPV_OP_FUNCTION_PARAMETER && wordCount >= 3) {
+            pointerValues.set(filtered[offset + 2], filtered[offset + 1]);
         }
 
         offset += wordCount;
@@ -368,6 +600,13 @@ export function patchGlslangSampledTextureVariables(spirv: Uint32Array, samplers
         return filtered;
     }
 
+    for (const [valueId, pointerTypeId] of variables) {
+        const imageType = pointerPatches.get(pointerTypeId);
+        if (imageType !== undefined) {
+            pointerValues.set(valueId, pointerTypeId);
+        }
+    }
+
     const patched = new Uint32Array(filtered);
     for (const [pointerTypeId, imageType] of pointerPatches) {
         const pointerOffset = pointerTypeOffsets.get(pointerTypeId);
@@ -382,7 +621,11 @@ export function patchGlslangSampledTextureVariables(spirv: Uint32Array, samplers
             continue;
         }
         const pointerId = patched[offset + 3];
-        const imageType = textureVariables.get(pointerId);
+        let imageType = textureVariables.get(pointerId);
+        const pointerTypeId = pointerValues.get(pointerId);
+        if (imageType === undefined && pointerTypeId !== undefined) {
+            imageType = pointerPatches.get(pointerTypeId);
+        }
         if (imageType !== undefined) {
             patched[offset + 1] = imageType;
         }
@@ -426,7 +669,11 @@ export function buildGlslangSource(source: string, stage: ShaderStage, metadata:
     }
 
     const normalized = stage === "fragment" ? normalizeLegacyFragmentBuiltins(body) : { source: body, usesFragColor: false };
-    body = rewriteSamplerExpressions(normalized.source, metadata);
+    body = lowerSamplerFunctionParameters(normalized.source);
+    body = rewriteSamplerExpressions(body, metadata);
+    if (stage === "fragment") {
+        body = rewriteFragmentImplicitTextureLod(body);
+    }
     if (stage === "fragment" && normalized.usesFragColor) {
         lines.push("layout(location = 0) out vec4 _hyd_fragColor;");
     }
@@ -465,8 +712,63 @@ function normalizeTintWgsl(wgsl: string, metadata: InitShaderInfoType): string {
     for (const [placeholder, value] of uniformPlaceholders) {
         out = wordBoundaryReplace(out, placeholder, value);
     }
+    out = out.replace(/\barr_to_mat\d+x\d+_stride_\d+\s*\(\s*(_hyd_uniforms_\.[A-Za-z_]\w*)\s*\)/g, "$1");
 
-    return out.trim() + "\n";
+    return normalizeSamplerOriginCoordinates(out.trim() + "\n", metadata);
+}
+
+const WGSL_TEXTURE_SAMPLE_CALL = /\b(textureSample(?:Level|Bias|Grad)?)\s*\(/g;
+
+function addSamplerOriginHelper(wgsl: string): string {
+    if (wgsl.includes("fn _hyd_samplerOriginCoord")) {
+        return wgsl;
+    }
+    const helper = `fn _hyd_samplerOriginCoord(texCoord: vec2<f32>, flipY: f32) -> vec2<f32> {\n    return vec2<f32>(texCoord.x, select(texCoord.y, 1.0 - texCoord.y, flipY > 0.5));\n}\n\n`;
+    const fragmentIndex = wgsl.search(/^\s*@fragment\b/m);
+    if (fragmentIndex < 0) {
+        return helper + wgsl;
+    }
+    return wgsl.slice(0, fragmentIndex) + helper + wgsl.slice(fragmentIndex);
+}
+
+function normalizeSamplerOriginCoordinates(wgsl: string, metadata: InitShaderInfoType): string {
+    const sampler2DNames = metadata.samplers
+        .filter((sampler) => sampler.glsl_type === "sampler2D")
+        .map((sampler) => sampler.name);
+    if (sampler2DNames.length === 0) {
+        return wgsl;
+    }
+
+    let changed = false;
+    let result = "";
+    let cursor = 0;
+    WGSL_TEXTURE_SAMPLE_CALL.lastIndex = 0;
+    for (let match = WGSL_TEXTURE_SAMPLE_CALL.exec(wgsl); match !== null; match = WGSL_TEXTURE_SAMPLE_CALL.exec(wgsl)) {
+        const openParen = WGSL_TEXTURE_SAMPLE_CALL.lastIndex - 1;
+        const closeParen = findMatchingParen(wgsl, openParen);
+        if (closeParen < 0) {
+            break;
+        }
+        const args = splitTopLevelArguments(wgsl.slice(openParen + 1, closeParen));
+        if (args.length >= 3) {
+            const samplerName = sampler2DNames.find((name) => {
+                return args[0].trim() === `${name}T` && args[1].trim() === `${name}S`;
+            });
+            if (samplerName && !args[2].includes("_hyd_samplerOriginCoord")) {
+                const rewrittenArgs = args.slice();
+                rewrittenArgs[2] = `_hyd_samplerOriginCoord(${args[2].trim()}, _hyd_uniforms_.${samplerFlipYUniformName(samplerName)})`;
+                result += wgsl.slice(cursor, openParen + 1) + rewrittenArgs.map((arg) => arg.trim()).join(", ") + ")";
+                cursor = closeParen + 1;
+                changed = true;
+            }
+        }
+        WGSL_TEXTURE_SAMPLE_CALL.lastIndex = closeParen + 1;
+    }
+    if (!changed) {
+        return wgsl;
+    }
+    result += wgsl.slice(cursor);
+    return addSamplerOriginHelper(result);
 }
 
 export class ShaderTranslator {
@@ -518,9 +820,10 @@ export class ShaderTranslator {
         return makeShaderMetadata(source, type);
     }
 
-    translateProgram(vertexShader?: ShaderLike, fragmentShader?: ShaderLike): TranslatedProgram {
-        const layout = this.makeLayout(vertexShader, fragmentShader);
+    translateProgram(vertexShader?: ShaderLike, fragmentShader?: ShaderLike, boundAttributeLocations: Map<string, number> = new Map()): TranslatedProgram {
+        const layout = this.makeLayout(vertexShader, fragmentShader, boundAttributeLocations);
         const translated: TranslatedProgram = {};
+        translated.attributeLocations = layout.attributeLocations;
         if (vertexShader) {
             translated.vertex = this.translateShader(vertexShader, "vertex", layout);
         }
@@ -534,7 +837,7 @@ export class ShaderTranslator {
         return shader.shader_info || makeShaderMetadata(shader.glsl_shader, shader.type);
     }
 
-    private makeLayout(vertexShader?: ShaderLike, fragmentShader?: ShaderLike): ProgramTranslationLayout {
+    private makeLayout(vertexShader?: ShaderLike, fragmentShader?: ShaderLike, boundAttributeLocations: Map<string, number> = new Map()): ProgramTranslationLayout {
         const vertexMetadata = vertexShader ? this.metadataFor(vertexShader) : undefined;
         const fragmentMetadata = fragmentShader ? this.metadataFor(fragmentShader) : undefined;
         const vertexVaryings = vertexShader ? scanGlslDeclarations(vertexShader.glsl_shader, "vertex").varyings : [];
@@ -547,13 +850,14 @@ export class ShaderTranslator {
             ...(vertexMetadata ? vertexMetadata.uniforms : []),
             ...(fragmentMetadata ? fragmentMetadata.uniforms : []),
         ]);
-        const samplerOffset = uniforms.length > 0 ? 1 : 0;
+        const hasHydUniformBlock = uniforms.length > 0 || samplers.some((sampler) => sampler.glsl_type === "sampler2D");
+        const samplerOffset = hasHydUniformBlock ? 1 : 0;
         const samplerBindings = new Map<string, number>();
         samplers.forEach((sampler, index) => {
             samplerBindings.set(sampler.name, samplerOffset + index * 2);
         });
 
-        const attributeLocations = assignLocations(vertexMetadata ? vertexMetadata.attributes : []);
+        const attributeLocations = assignLocations(vertexMetadata ? vertexMetadata.attributes : [], boundAttributeLocations);
         const varyingLocations = assignLocations(uniqueByName([...vertexVaryings, ...fragmentVaryings]));
 
         return {
@@ -581,8 +885,9 @@ export class ShaderTranslator {
             throw new Error(`Runtime shader translator is unavailable (${stage}).`);
         }
 
+        let glslangSource = "";
         try {
-            const glslangSource = buildGlslangSource(shader.glsl_shader, stage, metadata, layout);
+            glslangSource = buildGlslangSource(shader.glsl_shader, stage, metadata, layout);
             const spirv = patchGlslangSampledTextureVariables(
                 this.glslang.compileGLSL(glslangSource, stage, false),
                 metadata.samplers,
@@ -602,7 +907,7 @@ export class ShaderTranslator {
             return metadata;
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            throw new Error(`Runtime shader translation failed for ${stage} shader: ${message}`);
+            throw new Error(`Runtime shader translation failed for ${stage} shader: ${message}\n--- original GLSL ---\n${shader.glsl_shader}\n--- normalized GLSL ---\n${glslangSource}`);
         }
     }
 }

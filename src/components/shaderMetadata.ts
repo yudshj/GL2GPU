@@ -62,6 +62,14 @@ function normalizeIdentifierName(raw: string): string {
     return raw.replace(/\[[^\]]*\]$/, "").replace(/;$/, "").trim();
 }
 
+function escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isIdentifierReferenced(source: string, name: string): boolean {
+    return new RegExp(`\\b${escapeRegExp(name)}\\b`).test(source);
+}
+
 function toWgslType(glslType: string): string {
     const mapped = TYPE_MAP.get(glslType);
     if (!mapped) {
@@ -88,7 +96,9 @@ export function scanGlslDeclarations(source: string, stage: ShaderStage): GlslDe
     };
 
     const seen = new Set<string>();
-    const declarationRegex = /(?:^|[;\n])\s*(?:(?:layout\s*\([^)]*\)\s*)?)(?:(?:lowp|mediump|highp)\s+)?(attribute|uniform|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([^;]+)\s*;/g;
+    const declarationPattern = /(?:^|[;\n])\s*(?:(?:layout\s*\([^)]*\)\s*)?)(?:(?:lowp|mediump|highp)\s+)?(attribute|uniform|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([^;]+)\s*;/g;
+    const bodyWithoutGlobalDeclarations = cleaned.replace(declarationPattern, "\n");
+    const declarationRegex = new RegExp(declarationPattern);
     let match: RegExpExecArray;
     while ((match = declarationRegex.exec(cleaned)) !== null) {
         const qualifier = match[1];
@@ -117,6 +127,9 @@ export function scanGlslDeclarations(source: string, stage: ShaderStage): GlslDe
             }
 
             if (qualifier === "attribute" || (qualifier === "in" && stage === "vertex")) {
+                if (!isIdentifierReferenced(bodyWithoutGlobalDeclarations, name)) {
+                    continue;
+                }
                 declarations.attributes.push(declarationFrom(glslType, name));
                 continue;
             }

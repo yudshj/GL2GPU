@@ -8,6 +8,7 @@ export interface NameAndType {
     name: string;
     glsl_type: string;
     wgsl_type: string;
+    internal?: boolean;
 }
 
 export interface TextureNameAndType {
@@ -30,6 +31,10 @@ export interface InitShaderInfoType {
     wgsl: string;
     glsl: string;
     debug_info: string;
+}
+
+export function samplerFlipYUniformName(samplerName: string): string {
+    return `_hyd_samplerFlipY_${samplerName}`;
 }
 
 const Type2Constant: Map<string, number> = new Map([
@@ -120,7 +125,7 @@ export function ShaderInfo2HydAus(shaderInfo: ShaderInfoType): { attributes: Arr
             };
         }),
         uniforms: shaderInfo.uniforms.map((uniform) => {
-            return new ProgramUniformBuffer(uniform.name, Type2Constant.get(uniform.glsl_type), 1);
+            return new ProgramUniformBuffer(uniform.name, Type2Constant.get(uniform.glsl_type), 1, !!uniform.internal);
         }),
         samplers: shaderInfo.samplers.map((sampler) => {
             // switch (sampler.glsl_type) {

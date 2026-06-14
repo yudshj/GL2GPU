@@ -12,7 +12,7 @@ class GPURenderBundleTransition {
 
     public onceHash: string | GPUBindGroup = null;
     public onceNext: GPURenderBundleTransition;
-    public bindGroupOffset: number = -1;
+    public bindGroupOffset: number | null = null;
 
     constructor(opName: GpuOperators, opArgs: any[], father: GPURenderBundleTransition) {
         this.opName = opName;
@@ -34,13 +34,13 @@ class GPURenderBundleTransition {
         return this.onceNext = transition;
     }
 
-    public gotoBindGroup(bindGroup: GPUBindGroup, do0: number) {
+    public gotoBindGroup(bindGroup: GPUBindGroup, do0: number | null) {
         if (this.bindGroupOffset === do0 && this.onceHash == bindGroup) {
             return this.onceNext;
         }
         this.onceHash = bindGroup;
         this.bindGroupOffset = do0;
-        const hash = 'b0' + bindGroup.label + do0;
+        const hash = 'b0' + bindGroup.label + (do0 === null ? 'none' : do0);
         const transition = this.jumpTable.get(hash);
         if (!transition) {
             const newTransition = new GPURenderBundleTransition('setBindGroup', [0, bindGroup, do0], this);
@@ -75,7 +75,7 @@ class HydRenderPassEncoder {
             pipeline
         );
     }
-    public setBindGroup(bindGroup: GPUBindGroup, do0: number) {
+    public setBindGroup(bindGroup: GPUBindGroup, do0: number | null) {
         this.bundleCache = this.bundleCache.gotoBindGroup(bindGroup, do0);
     }
     public setVertexBuffer(opHash: string, slot: number, buffer: GPUBuffer, offset: number) {
@@ -113,8 +113,12 @@ class HydRenderPassEncoder {
             for (let i = operators.length - 2; i >= 0; i--) {
                 const [opName, opArgs] = operators[i];
                 if (opName === 'setBindGroup') {
-                    tmp[0] = opArgs[2];
-                    bundleEncoder.setBindGroup(opArgs[0], opArgs[1], tmp);
+                    if (opArgs[2] === null || opArgs[2] === undefined) {
+                        bundleEncoder.setBindGroup(opArgs[0], opArgs[1]);
+                    } else {
+                        tmp[0] = opArgs[2];
+                        bundleEncoder.setBindGroup(opArgs[0], opArgs[1], tmp);
+                    }
                 } else {
                     bundleEncoder[opName].apply(bundleEncoder, opArgs);
                 }
@@ -209,19 +213,21 @@ export class HydRenderPassCache {
     //     }
     // }
 
-    // public RpSetStencilReference(reference: number) {
-    //     if (this.stencilReferenceInfo !== reference) {
-    //         this.stencilReferenceInfo = reference;
-    //         this.renderPassEncoder.setStencilReference(reference);
-    //     }
-    // }
+    public RpSetStencilReference(reference: number) {
+        if (this.stencilReferenceInfo !== reference) {
+            this.stencilReferenceInfo = reference;
+            this.renderPassEncoder.setStencilReference(reference);
+        }
+    }
 
-    // public RpSetBlendConstant(color: Iterable<number>) {
-    //     if (this.colorInfo[0] !== color[0] || this.colorInfo[1] !== color[1] || this.colorInfo[2] !== color[2] || this.colorInfo[3] !== color[3]) {
-    //         this.colorInfo = color;
-    //         this.renderPassEncoder.setBlendConstant(color);
-    //     }
-    // }
+    public RpSetBlendConstant(color: Iterable<number>) {
+        const values = Array.from(color) as [number, number, number, number];
+        const previous = Array.from(this.colorInfo);
+        if (previous[0] !== values[0] || previous[1] !== values[1] || previous[2] !== values[2] || previous[3] !== values[3]) {
+            this.colorInfo = values;
+            this.renderPassEncoder.setBlendConstant(values);
+        }
+    }
 
     public RpSetDescriptor(hash: string, renderBundleEncoderDescriptor: GPURenderBundleEncoderDescriptor, callback: () => GPURenderPassDescriptor) {
         if (this.renderPassDescriptorCacheKey !== hash) {
@@ -234,6 +240,13 @@ export class HydRenderPassCache {
         }
     }
 
+    public RpClear(callback: () => GPURenderPassDescriptor) {
+        this.RpEnd();
+        const renderPassEncoder = this.commandEncoder.beginRenderPass(callback());
+        renderPassEncoder.end();
+        this.resetCache();
+    }
+
     public RpSetPipeline(hash: string, pipeline: GPURenderPipeline) {
         if (this.renderPassPipelineCacheKey !== hash) {
             this.renderPassPipelineCacheKey = hash;
@@ -241,7 +254,7 @@ export class HydRenderPassCache {
         }
     }
 
-    public RpSetBindGroup(bindGroup: GPUBindGroup, dynamicOffset0: number) {
+    public RpSetBindGroup(bindGroup: GPUBindGroup, dynamicOffset0: number | null) {
         this.renderBundleGenerator.setBindGroup(bindGroup, dynamicOffset0);
         // this.renderBundleGenerator.setBindGroup(bindGroup.label + dynamicOffset0, index, bindGroup, dynamicOffset0);
     }
