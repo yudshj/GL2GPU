@@ -5307,7 +5307,373 @@ function normalizeWebGlTextureCoordinates(wgsl, metadata, stage, source) {
     return wgsl;
 }
 
+;// ./src/components/shaderWgslOptimizer.ts
+function shaderWgslOptimizer_escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function wordBoundaryReplace(source, from, to) {
+    return source.replace(new RegExp(`\\b${shaderWgslOptimizer_escapeRegExp(from)}\\b`, "g"), to);
+}
+function countIdentifier(source, name) {
+    return source.match(new RegExp(`\\b${shaderWgslOptimizer_escapeRegExp(name)}\\b`, "g"))?.length ?? 0;
+}
+function findMatching(source, openIndex, openChar, closeChar) {
+    let depth = 0;
+    for (let i = openIndex; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === openChar) {
+            depth++;
+        }
+        else if (ch === closeChar) {
+            depth--;
+            if (depth === 0) {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+function shaderWgslOptimizer_splitTopLevelArguments(source) {
+    const args = [];
+    let start = 0;
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let braceDepth = 0;
+    for (let i = 0; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === "(") {
+            parenDepth++;
+        }
+        else if (ch === ")") {
+            parenDepth--;
+        }
+        else if (ch === "[") {
+            bracketDepth++;
+        }
+        else if (ch === "]") {
+            bracketDepth--;
+        }
+        else if (ch === "{") {
+            braceDepth++;
+        }
+        else if (ch === "}") {
+            braceDepth--;
+        }
+        else if (ch === "," && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
+            args.push(source.slice(start, i));
+            start = i + 1;
+        }
+    }
+    args.push(source.slice(start));
+    return args.map((arg) => arg.trim()).filter((arg) => arg.length > 0);
+}
+function parseFunctions(source) {
+    const functions = [];
+    const regex = /((?:@[A-Za-z_]\w*(?:\([^)]*\))?\s*)*)fn\s+([A-Za-z_]\w*)\s*\(/g;
+    for (let match = regex.exec(source); match !== null; match = regex.exec(source)) {
+        const openParen = regex.lastIndex - 1;
+        const closeParen = findMatching(source, openParen, "(", ")");
+        if (closeParen < 0) {
+            continue;
+        }
+        const bodyOpen = source.indexOf("{", closeParen + 1);
+        if (bodyOpen < 0) {
+            continue;
+        }
+        const bodyClose = findMatching(source, bodyOpen, "{", "}");
+        if (bodyClose < 0) {
+            continue;
+        }
+        const attributes = match[1] || "";
+        const fnStart = match.index + attributes.length;
+        functions.push({
+            name: match[2],
+            start: match.index,
+            end: bodyClose + 1,
+            fnStart,
+            openParen,
+            closeParen,
+            bodyOpen,
+            bodyClose,
+            attributes,
+            params: source.slice(openParen + 1, closeParen),
+            returnType: source.slice(closeParen + 1, bodyOpen).trimEnd(),
+            body: source.slice(bodyOpen + 1, bodyClose),
+        });
+        regex.lastIndex = bodyClose + 1;
+    }
+    return functions;
+}
+function parsePrivateDeclarations(source) {
+    const declarations = [];
+    const regex = /\bvar<private>\s+([A-Za-z_]\w*)\s*:\s*[^;]+;\s*/g;
+    for (let match = regex.exec(source); match !== null; match = regex.exec(source)) {
+        declarations.push({
+            name: match[1],
+            start: match.index,
+            end: regex.lastIndex,
+        });
+    }
+    return declarations;
+}
+function parseStructs(source) {
+    const structs = [];
+    const regex = /\bstruct\s+([A-Za-z_]\w*)\s*\{/g;
+    for (let match = regex.exec(source); match !== null; match = regex.exec(source)) {
+        const bodyOpen = regex.lastIndex - 1;
+        const bodyClose = findMatching(source, bodyOpen, "{", "}");
+        if (bodyClose < 0) {
+            continue;
+        }
+        const body = source.slice(bodyOpen + 1, bodyClose);
+        const fields = [];
+        const fieldRegex = /(?:@[A-Za-z_]\w*(?:\([^)]*\))?\s*)*([A-Za-z_]\w*)\s*:\s*[^,]+,/g;
+        for (let field = fieldRegex.exec(body); field !== null; field = fieldRegex.exec(body)) {
+            fields.push(field[1]);
+        }
+        structs.push({ name: match[1], fields });
+        regex.lastIndex = bodyClose + 1;
+    }
+    return structs;
+}
+function parseParamNames(params) {
+    const names = new Set();
+    for (const param of shaderWgslOptimizer_splitTopLevelArguments(params)) {
+        const cleaned = param.replace(/@[A-Za-z_]\w*(?:\([^)]*\))?/g, " ").trim();
+        const match = cleaned.match(/\b([A-Za-z_]\w*)\s*:\s*[^:]+$/);
+        if (match) {
+            names.add(match[1]);
+        }
+    }
+    return names;
+}
+function stripRecognizedEntryStatements(body, assignments, helperName, returnStatement) {
+    let out = body;
+    for (const assignment of assignments) {
+        out = out.replace(new RegExp(`^\\s*${shaderWgslOptimizer_escapeRegExp(assignment.target)}\\s*=\\s*${shaderWgslOptimizer_escapeRegExp(assignment.value)}\\s*;\\s*$`, "m"), "");
+    }
+    out = out.replace(new RegExp(`^\\s*${shaderWgslOptimizer_escapeRegExp(helperName)}\\s*\\(\\s*\\)\\s*;\\s*$`, "m"), "");
+    out = out.replace(new RegExp(`^\\s*${shaderWgslOptimizer_escapeRegExp(returnStatement)}\\s*$`, "m"), "");
+    return out.replace(/\/\/.*$/gm, "").trim();
+}
+function removeRanges(source, ranges) {
+    let out = source;
+    const sorted = ranges.slice().sort((a, b) => b.start - a.start);
+    for (const range of sorted) {
+        out = out.slice(0, range.start) + range.replacement + out.slice(range.end);
+    }
+    return out;
+}
+function assignmentCount(source, name) {
+    const regex = new RegExp(`\\b${shaderWgslOptimizer_escapeRegExp(name)}\\s*(?:[+\\-*/%&|^]?=)`, "g");
+    return source.match(regex)?.length ?? 0;
+}
+function applyIdentifierMap(source, replacements) {
+    let out = source;
+    const names = Array.from(replacements.keys()).sort((a, b) => b.length - a.length);
+    for (const name of names) {
+        out = wordBoundaryReplace(out, name, replacements.get(name));
+    }
+    return out;
+}
+function lowerEntryWrapper(source) {
+    const functions = parseFunctions(source);
+    const entries = functions.filter((fn) => /@(vertex|fragment)\b/.test(fn.attributes));
+    if (entries.length !== 1) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: entries.length === 0 ? "no-entry-wrapper" : "multiple-entrypoints" };
+    }
+    const entry = entries[0];
+    const privateDeclarations = parsePrivateDeclarations(source);
+    if (privateDeclarations.length === 0) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "no-private-io" };
+    }
+    const privateNames = new Set(privateDeclarations.map((declaration) => declaration.name));
+    const params = parseParamNames(entry.params);
+    const entryAssignments = [];
+    const assignmentRegex = /^\s*([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)\s*;\s*$/gm;
+    for (let match = assignmentRegex.exec(entry.body); match !== null; match = assignmentRegex.exec(entry.body)) {
+        if (privateNames.has(match[1]) && params.has(match[2])) {
+            entryAssignments.push({ target: match[1], value: match[2] });
+        }
+    }
+    const helperCallMatch = /^\s*([A-Za-z_]\w*)\s*\(\s*\)\s*;\s*$/m.exec(entry.body);
+    if (!helperCallMatch) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "entry-helper-call-not-found" };
+    }
+    const helper = functions.find((fn) => fn.name === helperCallMatch[1] && fn !== entry && !/@(vertex|fragment)\b/.test(fn.attributes));
+    if (!helper) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "helper-function-not-found" };
+    }
+    const returnMatch = /^\s*return\s+([A-Za-z_]\w*)\s*\(([\s\S]*?)\)\s*;\s*$/m.exec(entry.body);
+    if (!returnMatch) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "entry-return-constructor-not-found" };
+    }
+    const outputStructName = returnMatch[1];
+    const outputStruct = parseStructs(source).find((item) => item.name === outputStructName);
+    if (!outputStruct) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "entry-output-struct-not-found" };
+    }
+    const returnArgs = shaderWgslOptimizer_splitTopLevelArguments(returnMatch[2]);
+    if (returnArgs.length !== outputStruct.fields.length) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "entry-output-arity-mismatch" };
+    }
+    const inputMap = new Map();
+    for (const assignment of entryAssignments) {
+        inputMap.set(assignment.target, assignment.value);
+    }
+    const outputMap = new Map();
+    for (let i = 0; i < returnArgs.length; i++) {
+        const arg = returnArgs[i].trim();
+        if (/^[A-Za-z_]\w*$/.test(arg) && privateNames.has(arg)) {
+            outputMap.set(arg, `_hyd_output.${outputStruct.fields[i]}`);
+        }
+    }
+    const mappedPrivateNames = new Set([...inputMap.keys(), ...outputMap.keys()]);
+    if (mappedPrivateNames.size === 0) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "no-mapped-private-io" };
+    }
+    const recognizedRemainder = stripRecognizedEntryStatements(entry.body, entryAssignments, helper.name, returnMatch[0]);
+    if (recognizedRemainder.length > 0) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "entry-body-has-extra-statements" };
+    }
+    const outsideHelperAndEntry = removeRanges(source, [
+        { start: helper.start, end: helper.end, replacement: "" },
+        { start: entry.start, end: entry.end, replacement: "" },
+        ...privateDeclarations.map((declaration) => ({ start: declaration.start, end: declaration.end, replacement: "" })),
+    ]);
+    for (const name of mappedPrivateNames) {
+        if (countIdentifier(outsideHelperAndEntry, name) > 0) {
+            return { wgsl: source, loweredPrivateVars: 0, skipped: "private-io-escapes-wrapper" };
+        }
+    }
+    for (const name of inputMap.keys()) {
+        if (assignmentCount(helper.body, name) > 0) {
+            return { wgsl: source, loweredPrivateVars: 0, skipped: "input-private-written-in-helper" };
+        }
+    }
+    for (const name of outputMap.keys()) {
+        if (assignmentCount(helper.body, name) !== 1) {
+            return { wgsl: source, loweredPrivateVars: 0, skipped: "output-private-not-single-writer" };
+        }
+    }
+    const replacements = new Map([...inputMap, ...outputMap]);
+    let loweredBody = applyIdentifierMap(helper.body, replacements)
+        .replace(/^\s*return\s*;\s*$/gm, "")
+        .trim();
+    loweredBody = loweredBody.split("\n").map((line) => `  ${line}`).join("\n");
+    const newEntry = `${entry.attributes}fn ${entry.name}(${entry.params})${entry.returnType} {\n  var _hyd_output: ${outputStructName};\n${loweredBody}\n  return _hyd_output;\n}`;
+    const mappedDeclarations = privateDeclarations
+        .filter((declaration) => mappedPrivateNames.has(declaration.name))
+        .map((declaration) => ({ start: declaration.start, end: declaration.end, replacement: "" }));
+    const wgsl = removeRanges(source, [
+        { start: entry.start, end: entry.end, replacement: newEntry },
+        { start: helper.start, end: helper.end, replacement: "" },
+        ...mappedDeclarations,
+    ]).replace(/\n{3,}/g, "\n\n");
+    return {
+        wgsl,
+        loweredPrivateVars: mappedPrivateNames.size,
+    };
+}
+function foldVectorConstructors(source) {
+    let folded = 0;
+    let out = source.replace(/\bvec2f\s*\(\s*([A-Za-z_]\w*)\.x\s*,\s*\1\.y\s*\)/g, (_match, value) => {
+        folded++;
+        return value;
+    });
+    out = out.replace(/\bvec3f\s*\(\s*([A-Za-z_]\w*)\.x\s*,\s*\1\.y\s*,\s*\1\.z\s*\)/g, (_match, value) => {
+        folded++;
+        return value;
+    });
+    out = out.replace(/\bvec4f\s*\(\s*([A-Za-z_]\w*)\.x\s*,\s*\1\.y\s*,\s*\1\.z\s*,\s*\1\.w\s*\)/g, (_match, value) => {
+        folded++;
+        return value;
+    });
+    out = out.replace(/\bvec4f\s*\(\s*([A-Za-z_]\w*)\.x\s*,\s*\1\.y\s*,\s*\1\.z\s*,\s*([^,)]+?)\s*\)/g, (_match, value, scalar) => {
+        folded++;
+        return `vec4f(${value}, ${scalar.trim()})`;
+    });
+    return { wgsl: out, folded };
+}
+function foldSimpleIfElseSelect(source) {
+    let folded = 0;
+    const out = source.replace(/if\s*\(\s*([\s\S]*?)\s*\)\s*\{\s*([A-Za-z_]\w*)\s*=\s*([^;{}]+?)\s*;\s*\}\s*else\s*\{\s*\2\s*=\s*([^;{}]+?)\s*;\s*\}/g, (_match, condition, target, whenTrue, whenFalse) => {
+        folded++;
+        return `${target} = select(${whenFalse.trim()}, ${whenTrue.trim()}, ${condition.trim()});`;
+    });
+    return { wgsl: out, folded };
+}
+function removeSingleUseLets(source) {
+    let out = source;
+    let removed = 0;
+    let changed = true;
+    while (changed) {
+        changed = false;
+        const regex = /^([ \t]*)let\s+(x_\d+)\s*=\s*([^;{}]+);\s*\n/gm;
+        for (let match = regex.exec(out); match !== null; match = regex.exec(out)) {
+            const full = match[0];
+            const name = match[2];
+            const expression = match[3].trim();
+            const after = out.slice(match.index + full.length);
+            const useCount = countIdentifier(after, name);
+            const isSimpleAlias = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?$/.test(expression);
+            if (useCount === 0 || (!isSimpleAlias && useCount !== 1)) {
+                continue;
+            }
+            out = out.slice(0, match.index) + out.slice(match.index + full.length);
+            const replacement = isSimpleAlias ? expression : `(${expression})`;
+            out = out.slice(0, match.index) + wordBoundaryReplace(out.slice(match.index), name, replacement);
+            removed++;
+            changed = true;
+            break;
+        }
+    }
+    return { wgsl: out, removed };
+}
+function runPeepholes(source) {
+    let out = source;
+    let removedTemporaries = 0;
+    let foldedConstructors = 0;
+    const select = foldSimpleIfElseSelect(out);
+    out = select.wgsl;
+    foldedConstructors += select.folded;
+    const constructors = foldVectorConstructors(out);
+    out = constructors.wgsl;
+    foldedConstructors += constructors.folded;
+    const lets = removeSingleUseLets(out);
+    out = lets.wgsl;
+    removedTemporaries += lets.removed;
+    const constructorsAfterLets = foldVectorConstructors(out);
+    out = constructorsAfterLets.wgsl;
+    foldedConstructors += constructorsAfterLets.folded;
+    return { wgsl: out, removedTemporaries, foldedConstructors };
+}
+function optimizeTintWgsl(wgsl) {
+    const stats = {
+        optimizeTintWgsl: true,
+        loweredPrivateVars: 0,
+        removedTemporaries: 0,
+        foldedConstructors: 0,
+        skippedPasses: [],
+    };
+    const lowered = lowerEntryWrapper(wgsl);
+    let out = lowered.wgsl;
+    stats.loweredPrivateVars = lowered.loweredPrivateVars;
+    if (lowered.skipped && !["no-entry-wrapper", "no-private-io"].includes(lowered.skipped)) {
+        stats.skippedPasses.push(`entry-wrapper:${lowered.skipped}`);
+    }
+    const peepholes = runPeepholes(out);
+    out = peepholes.wgsl;
+    stats.removedTemporaries = peepholes.removedTemporaries;
+    stats.foldedConstructors = peepholes.foldedConstructors;
+    return {
+        wgsl: out.trim() + "\n",
+        stats,
+    };
+}
+
 ;// ./src/components/shaderTranslator.ts
+
 
 
 
@@ -5349,7 +5715,7 @@ const SPV_DECORATION_RELAXED_PRECISION = 0;
 function shaderTranslator_escapeRegExp(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-function wordBoundaryReplace(source, from, to) {
+function shaderTranslator_wordBoundaryReplace(source, from, to) {
     return source.replace(new RegExp(`\\b${shaderTranslator_escapeRegExp(from)}\\b`, "g"), to);
 }
 function uniqueByName(items) {
@@ -5442,13 +5808,13 @@ function prepareSourceAndDeclarations(source) {
 function normalizeLegacyFragmentBuiltins(source) {
     let out = source;
     const usesFragColor = /\bgl_FragColor\b/.test(out);
-    out = wordBoundaryReplace(out, "gl_FragColor", "_hyd_fragColor");
-    out = wordBoundaryReplace(out, "texture2D", "texture");
-    out = wordBoundaryReplace(out, "textureCube", "texture");
-    out = wordBoundaryReplace(out, "texture2DProj", "textureProj");
-    out = wordBoundaryReplace(out, "texture2DProjLodEXT", "textureProjLod");
-    out = wordBoundaryReplace(out, "texture2DLodEXT", "textureLod");
-    out = wordBoundaryReplace(out, "textureCubeLodEXT", "textureLod");
+    out = shaderTranslator_wordBoundaryReplace(out, "gl_FragColor", "_hyd_fragColor");
+    out = shaderTranslator_wordBoundaryReplace(out, "texture2D", "texture");
+    out = shaderTranslator_wordBoundaryReplace(out, "textureCube", "texture");
+    out = shaderTranslator_wordBoundaryReplace(out, "texture2DProj", "textureProj");
+    out = shaderTranslator_wordBoundaryReplace(out, "texture2DProjLodEXT", "textureProjLod");
+    out = shaderTranslator_wordBoundaryReplace(out, "texture2DLodEXT", "textureLod");
+    out = shaderTranslator_wordBoundaryReplace(out, "textureCubeLodEXT", "textureLod");
     return { source: out, usesFragColor };
 }
 function makeSamplerBindingDeclarations(metadata, layout) {
@@ -5888,15 +6254,15 @@ function normalizeTintWgsl(wgsl, metadata) {
         const placeholder = `__HYD_UNIFORM_${uniformPlaceholders.length}__`;
         uniformPlaceholders.push([placeholder, `_hyd_uniforms_.${uniform.name}`]);
         out = out.replace(new RegExp(`\\b[A-Za-z_]\\w*\\s*\\.\\s*${shaderTranslator_escapeRegExp(uniform.name)}\\b`, "g"), placeholder);
-        out = wordBoundaryReplace(out, uniform.name, placeholder);
+        out = shaderTranslator_wordBoundaryReplace(out, uniform.name, placeholder);
     }
     for (const sampler of metadata.samplers) {
         out = out.replace(new RegExp(`textureSample\\s*\\(\\s*${sampler.name}\\s*,`, "g"), `textureSample(${sampler.name}T, ${sampler.name}S,`);
-        out = wordBoundaryReplace(out, `${sampler.name}_sampler`, `${sampler.name}S`);
-        out = wordBoundaryReplace(out, `${sampler.name}_texture`, `${sampler.name}T`);
+        out = shaderTranslator_wordBoundaryReplace(out, `${sampler.name}_sampler`, `${sampler.name}S`);
+        out = shaderTranslator_wordBoundaryReplace(out, `${sampler.name}_texture`, `${sampler.name}T`);
     }
     for (const [placeholder, value] of uniformPlaceholders) {
-        out = wordBoundaryReplace(out, placeholder, value);
+        out = shaderTranslator_wordBoundaryReplace(out, placeholder, value);
     }
     out = out.replace(/\barr_to_mat\d+x\d+_stride_\d+\s*\(\s*(_hyd_uniforms_\.[A-Za-z_]\w*)\s*\)/g, "$1");
     return normalizeSamplerOriginCoordinates(out.trim() + "\n", metadata);
@@ -6052,7 +6418,19 @@ class ShaderTranslator {
         try {
             glslangSource = buildGlslangSource(shader.glsl_shader, stage, metadata, layout);
             const spirv = patchGlslangSampledTextureVariables(this.glslang.compileGLSL(glslangSource, stage, false), metadata.samplers);
-            const wgsl = normalizeTintWgsl(this.tint.spirvToWgsl(spirv), metadata);
+            let wgsl = normalizeTintWgsl(this.tint.spirvToWgsl(spirv), metadata);
+            let optimizerStats = {
+                optimizeTintWgsl: this.options.optimizeTintWgsl !== false,
+                loweredPrivateVars: 0,
+                removedTemporaries: 0,
+                foldedConstructors: 0,
+                skippedPasses: [],
+            };
+            if (this.options.optimizeTintWgsl !== false) {
+                const optimized = optimizeTintWgsl(wgsl);
+                wgsl = optimized.wgsl;
+                optimizerStats = optimized.stats;
+            }
             metadata.wgsl = this.options.legacyTextureCoordinateFixups
                 ? normalizeWebGlTextureCoordinates(wgsl, metadata, stage, shader.glsl_shader)
                 : wgsl;
@@ -6062,6 +6440,7 @@ class ShaderTranslator {
                 translated: true,
                 glsl: "310es",
                 legacyTextureCoordinateFixups: !!this.options.legacyTextureCoordinateFixups,
+                optimizer: optimizerStats,
             });
             this.runtimeCache.set(runtimeKey, metadata);
             return metadata;

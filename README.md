@@ -77,6 +77,26 @@ so normal GL2GPU users do not need a native toolchain.
 
 ## 🧪 Benchmarks
 
+Runtime Tint performance can be compared with the pre-Tint hand-written shader
+baseline without enabling `shaders_info.json` in production:
+
+```sh
+npm run build
+npm run benchmark:paper -- \
+  --modes tint,manual \
+  --samples aquarium,motionmark,sprites,sprites-100k \
+  --trials 3 \
+  --frames 100 \
+  --headless true
+```
+
+The harness serves the current `dist/webgpu` demos, uses current
+`dist/release/gl2gpu.js` for `tint`, and uses `3dec70b:dist/js/gl2gpu.js` plus
+`3dec70b:dist/js/shaders_info.json` for the manual oracle unless
+`--manual-root /path/to/baseline` is supplied. Results, screenshots, RMSE, FPS
+ratios, shader DB request counts, and optimizer stats are written to
+`output/paper-benchmark/results.json`.
+
 | Benchmark   | Avg. Frame Time Reduction |
 | ----------- | ------------------------- |
 | MotionMark  | 73.9% – 87.7%             |

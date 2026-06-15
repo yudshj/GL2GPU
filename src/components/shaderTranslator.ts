@@ -9,6 +9,7 @@ import {
 } from "./shaderDB";
 import { makeShaderMetadata, scanGlslDeclarations, ShaderStage } from "./shaderMetadata";
 import { normalizeWebGlTextureCoordinates } from "./shaderTexCoord";
+import { optimizeTintWgsl, WgslOptimizerStats } from "./shaderWgslOptimizer";
 
 interface GlslangModule {
     compileGLSL(glsl: string, shaderType: ShaderStage, genDebug: boolean, spirvVersion?: "1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5"): Uint32Array;
@@ -39,6 +40,7 @@ function locateBundledWasm(path: string): string {
 }
 
 export interface ShaderTranslatorOptions {
+    optimizeTintWgsl?: boolean;
     legacyTextureCoordinateFixups?: boolean;
     glslangLocateFile?: (path: string) => string;
     glslangWasmBinary?: ArrayBuffer | Uint8Array;
@@ -892,7 +894,19 @@ export class ShaderTranslator {
                 this.glslang.compileGLSL(glslangSource, stage, false),
                 metadata.samplers,
             );
-            const wgsl = normalizeTintWgsl(this.tint.spirvToWgsl(spirv), metadata);
+            let wgsl = normalizeTintWgsl(this.tint.spirvToWgsl(spirv), metadata);
+            let optimizerStats: WgslOptimizerStats = {
+                optimizeTintWgsl: this.options.optimizeTintWgsl !== false,
+                loweredPrivateVars: 0,
+                removedTemporaries: 0,
+                foldedConstructors: 0,
+                skippedPasses: [],
+            };
+            if (this.options.optimizeTintWgsl !== false) {
+                const optimized = optimizeTintWgsl(wgsl);
+                wgsl = optimized.wgsl;
+                optimizerStats = optimized.stats;
+            }
             metadata.wgsl = this.options.legacyTextureCoordinateFixups
                 ? normalizeWebGlTextureCoordinates(wgsl, metadata, stage, shader.glsl_shader)
                 : wgsl;
@@ -902,6 +916,7 @@ export class ShaderTranslator {
                 translated: true,
                 glsl: "310es",
                 legacyTextureCoordinateFixups: !!this.options.legacyTextureCoordinateFixups,
+                optimizer: optimizerStats,
             });
             this.runtimeCache.set(runtimeKey, metadata);
             return metadata;

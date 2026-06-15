@@ -22,7 +22,9 @@
     "typecheck": "tsc --noEmit",
     "test:shader": "ts-node --compiler-options '{\"module\":\"commonjs\"}' test/shaders/shaderTranslator.test.ts",
     "test:texture": "ts-node --compiler-options '{\"module\":\"commonjs\"}' test/texture/textureUpload.test.ts && ts-node --compiler-options '{\"module\":\"commonjs\"}' test/texture/webglApiState.test.ts",
-    "test:webglsamples": "node tools/webglsamples-harness.js --samples all"
+    "test:webglsamples": "node tools/webglsamples-harness.js --samples all",
+    "benchmark:paper": "node tools/paper-benchmark-harness.js",
+    "quality:render": "node tools/render-quality-harness.js"
   },
   "dependencies": {
     "@types/chrome": "^0.0.239",

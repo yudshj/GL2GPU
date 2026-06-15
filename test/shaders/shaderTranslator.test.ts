@@ -2,6 +2,7 @@ import { deepEqual } from "node:assert/strict";
 
 import { scanGlslDeclarations } from "../../src/components/shaderMetadata";
 import { normalizeWebGlTextureCoordinates } from "../../src/components/shaderTexCoord";
+import { optimizeTintWgsl } from "../../src/components/shaderWgslOptimizer";
 import type { InitShaderInfoType } from "../../src/components/shaderDB";
 
 const vertex = `
@@ -235,6 +236,81 @@ void main() {
 `);
 if (particleBillboardVertexWgsl.includes("1.0 - output.Texcoord.y")) {
     throw new Error("expected non-orientation Aquarium particle vertex texcoord to stay unchanged");
+}
+
+const tintWrapperWgsl = `
+var<private> a_pos : vec4f;
+var<private> v_color : vec4f;
+var<private> gl_Position : vec4f;
+
+fn main_1() {
+  let x_1 = vec4f(a_pos.x, a_pos.y, a_pos.z, a_pos.w);
+  v_color = x_1;
+  gl_Position = x_1;
+  return;
+}
+
+struct main_out {
+  @location(0)
+  v_color_1 : vec4f,
+  @builtin(position)
+  gl_Position_1 : vec4f,
+}
+
+@vertex
+fn main(@location(0) a_pos_param : vec4f) -> main_out {
+  a_pos = a_pos_param;
+  main_1();
+  return main_out(v_color, gl_Position);
+}
+`;
+const optimizedWrapper = optimizeTintWgsl(tintWrapperWgsl);
+if (optimizedWrapper.wgsl.includes("var<private> a_pos") || optimizedWrapper.wgsl.includes("fn main_1")) {
+    throw new Error("expected Tint entry wrapper private IO to be lowered");
+}
+if (!optimizedWrapper.wgsl.includes("var _hyd_output: main_out;")) {
+    throw new Error("expected optimized entry to use a local output struct");
+}
+if (!optimizedWrapper.wgsl.includes("_hyd_output.v_color_1 = a_pos_param;")) {
+    throw new Error("expected input private and redundant constructor to fold into direct output assignment");
+}
+if (optimizedWrapper.stats.loweredPrivateVars !== 3) {
+    throw new Error(`expected 3 lowered private vars, got ${optimizedWrapper.stats.loweredPrivateVars}`);
+}
+if (optimizedWrapper.stats.removedTemporaries < 1 || optimizedWrapper.stats.foldedConstructors < 1) {
+    throw new Error("expected peephole optimizer to remove a temp and fold a constructor");
+}
+
+const unsafePrivateEscapeWgsl = `
+var<private> a_pos : vec4f;
+var<private> v_color : vec4f;
+
+fn helper() -> vec4f {
+  return v_color;
+}
+
+fn main_1() {
+  v_color = a_pos;
+  return;
+}
+
+struct main_out {
+  @location(0) v_color_1 : vec4f,
+}
+
+@vertex
+fn main(@location(0) a_pos_param : vec4f) -> main_out {
+  a_pos = a_pos_param;
+  main_1();
+  return main_out(v_color);
+}
+`;
+const unsafeOptimized = optimizeTintWgsl(unsafePrivateEscapeWgsl);
+if (!unsafeOptimized.wgsl.includes("var<private> v_color")) {
+    throw new Error("expected escaped private var shader to stay unlowered");
+}
+if (!unsafeOptimized.stats.skippedPasses.some((reason) => reason.includes("private-io-escapes-wrapper"))) {
+    throw new Error("expected escaped private var skip reason");
 }
 
 console.log("shader metadata tests passed");
