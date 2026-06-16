@@ -598,6 +598,55 @@ function pushUnique(list, value, limit = 20) {
   if (!list.includes(text)) list.push(text);
 }
 
+function sanitizeName(value) {
+  return String(value).replace(/[^A-Za-z0-9_.-]+/g, "_");
+}
+
+async function installShaderCapture(page, shaderCaptures) {
+  await page.exposeBinding("__hydShaderCapture", (_source, record) => {
+    if (record && typeof record === "object") {
+      shaderCaptures.push(record);
+    }
+  });
+  await page.addInitScript(() => {
+    window.__HYD_SHADER_CAPTURE = (record) => {
+      if (typeof window.__hydShaderCapture === "function") {
+        window.__hydShaderCapture(record);
+      }
+    };
+  });
+}
+
+function summarizeShaderCaptures(shaderCaptures) {
+  const summary = {
+    count: shaderCaptures.length,
+    byKind: {},
+    byStage: {},
+    finalShapeTotals: {},
+  };
+  for (const capture of shaderCaptures) {
+    summary.byKind[capture.kind || "unknown"] = (summary.byKind[capture.kind || "unknown"] || 0) + 1;
+    summary.byStage[capture.stage || "unknown"] = (summary.byStage[capture.stage || "unknown"] || 0) + 1;
+    const stats = capture.finalWgsl?.stats || capture.postProcessWgsl?.stats;
+    if (!stats) continue;
+    for (const [key, value] of Object.entries(stats)) {
+      if (typeof value === "number") {
+        summary.finalShapeTotals[key] = (summary.finalShapeTotals[key] || 0) + value;
+      }
+    }
+  }
+  return summary;
+}
+
+function writeShaderCaptures(name, mode, shaderCaptures) {
+  if (shaderCaptures.length === 0) return null;
+  const dir = path.join(outputRoot, "shader-captures");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${sanitizeName(name)}-${sanitizeName(mode)}.json`);
+  fs.writeFileSync(file, JSON.stringify(shaderCaptures, null, 2));
+  return file;
+}
+
 async function discoverSample(context, baseURL, sample) {
   const [name, route] = sample;
   const page = await context.newPage();
@@ -661,6 +710,8 @@ async function triggerStartControls(page) {
 async function capture(context, baseURL, sample, mode, discoveredRequests) {
   const [name, route] = sample;
   const page = await context.newPage();
+  const shaderCaptures = [];
+  await installShaderCapture(page, shaderCaptures);
   if (mode === "webgl") {
     await page.addInitScript(deterministicScript());
   }
@@ -804,8 +855,22 @@ async function capture(context, baseURL, sample, mode, discoveredRequests) {
       }),
     })),
   })).catch((error) => ({ error: error.message || String(error) }));
+  const shaderCapturePath = writeShaderCaptures(name, mode, shaderCaptures);
   await page.close();
-  return { name, route, mode, screenshot, state, canvases: canvasState, selectedCanvas: preferred, messages, failures, shaderDbRequests };
+  return {
+    name,
+    route,
+    mode,
+    screenshot,
+    state,
+    canvases: canvasState,
+    selectedCanvas: preferred,
+    messages,
+    failures,
+    shaderDbRequests,
+    shaderCaptures: summarizeShaderCaptures(shaderCaptures),
+    shaderCapturePath,
+  };
 }
 
 function imageMetric(metric, a, b) {

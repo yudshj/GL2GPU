@@ -24,7 +24,8 @@
     "test:texture": "ts-node --compiler-options '{\"module\":\"commonjs\"}' test/texture/textureUpload.test.ts && ts-node --compiler-options '{\"module\":\"commonjs\"}' test/texture/webglApiState.test.ts",
     "test:webglsamples": "node tools/webglsamples-harness.js --samples all",
     "benchmark:paper": "node tools/paper-benchmark-harness.js",
-    "quality:render": "node tools/render-quality-harness.js"
+    "quality:render": "node tools/render-quality-harness.js",
+    "benchmark:gl2gpu-demo": "node tools/gl2gpu-demo-benchmark-harness.js"
   },
   "dependencies": {
     "@types/chrome": "^0.0.239",

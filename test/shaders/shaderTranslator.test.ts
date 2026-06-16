@@ -3,6 +3,7 @@ import { deepEqual } from "node:assert/strict";
 import { scanGlslDeclarations } from "../../src/components/shaderMetadata";
 import { normalizeWebGlTextureCoordinates } from "../../src/components/shaderTexCoord";
 import { optimizeTintWgsl } from "../../src/components/shaderWgslOptimizer";
+import { computeShaderShapeStats } from "../../src/components/shaderCapture";
 import type { InitShaderInfoType } from "../../src/components/shaderDB";
 
 const vertex = `
@@ -311,6 +312,100 @@ if (!unsafeOptimized.wgsl.includes("var<private> v_color")) {
 }
 if (!unsafeOptimized.stats.skippedPasses.some((reason) => reason.includes("private-io-escapes-wrapper"))) {
     throw new Error("expected escaped private var skip reason");
+}
+
+const pointerParamWgsl = `
+fn lit_f1_f1_f1_(l : ptr<function, f32>, h : ptr<function, f32>, m : ptr<function, f32>) -> vec4f {
+  var x_22 : f32;
+  x_22 = select(0.0f, pow(max(0.0f, *(h)), *(m)), (*(l) > 0.0f));
+  return vec4f(1.0f, max(*(l), 0.0f), x_22, 1.0f);
+}
+
+@fragment
+fn main() -> @location(0) vec4f {
+  var param : f32;
+  var param_1 : f32;
+  var param_2 : f32;
+  var litR : vec4f;
+  param = 1.0f;
+  param_1 = 2.0f;
+  param_2 = 3.0f;
+  litR = lit_f1_f1_f1_(&(param), &(param_1), &(param_2));
+  return litR;
+}
+`;
+const pointerParamOptimized = optimizeTintWgsl(pointerParamWgsl);
+if (pointerParamOptimized.wgsl.includes("ptr<function") || pointerParamOptimized.wgsl.includes("&(") || pointerParamOptimized.wgsl.includes("*(l)")) {
+    throw new Error("expected readonly pointer params to lower to value params");
+}
+if (!pointerParamOptimized.wgsl.includes("fn lit_f1_f1_f1_(l : f32, h : f32, m : f32)")) {
+    throw new Error("expected pointer helper signature to become value params");
+}
+if (!pointerParamOptimized.wgsl.includes("let param : f32 = 1.0f;")) {
+    throw new Error("expected single-assignment locals to promote to let bindings");
+}
+if (pointerParamOptimized.stats.loweredPointerParams !== 3 || pointerParamOptimized.stats.promotedLocalVars < 4) {
+    throw new Error(`unexpected pointer/local optimizer stats: ${JSON.stringify(pointerParamOptimized.stats)}`);
+}
+
+const motionMarkModWgsl = `
+@vertex
+fn main() -> @builtin(position) vec4f {
+  var fade : f32;
+  fade = ((_hyd_uniforms_.scalarOffset + ((_hyd_uniforms_.time * _hyd_uniforms_.scalar) / 10.0f)) - (1.0f * floor(((_hyd_uniforms_.scalarOffset + ((_hyd_uniforms_.time * _hyd_uniforms_.scalar) / 10.0f)) / 1.0f))));
+  return vec4f(fade);
+}
+`;
+const motionMarkModOptimized = optimizeTintWgsl(motionMarkModWgsl);
+if (!motionMarkModOptimized.wgsl.includes("fract(")) {
+    throw new Error("expected mod(x, 1.0) expansion to fold to fract(x)");
+}
+if (motionMarkModOptimized.wgsl.includes("floor(")) {
+    throw new Error("expected folded mod(x, 1.0) to remove floor");
+}
+if (motionMarkModOptimized.stats.foldedModByOne !== 1) {
+    throw new Error(`expected one mod-by-one fold, got ${motionMarkModOptimized.stats.foldedModByOne}`);
+}
+
+const lazyPowSelectWgsl = `
+fn lit(l : f32, h : f32, m : f32) -> vec4f {
+  return vec4f(1.0f, max(l, 0.0f), select(0.0f, pow(max(0.0f, h), m), (l > 0.0f)), 1.0f);
+}
+
+fn keep_sampler_origin_select(texCoord : vec2f, flipY : f32) -> vec2f {
+  return vec2f(texCoord.x, select(texCoord.y, 1.0f - texCoord.y, flipY > 0.5f));
+}
+`;
+const lazyPowSelectOptimized = optimizeTintWgsl(lazyPowSelectWgsl);
+if (!lazyPowSelectOptimized.wgsl.includes("var _hyd_lazy_pow_select_0 : f32 = 0.0f;")) {
+    throw new Error("expected pow select to lower to a lazy local");
+}
+if (!lazyPowSelectOptimized.wgsl.includes("if ((l > 0.0f))")) {
+    throw new Error("expected pow select condition to become a branch");
+}
+if (!lazyPowSelectOptimized.wgsl.includes("_hyd_lazy_pow_select_0 = pow(max(0.0f, h), m);")) {
+    throw new Error("expected pow arm to be evaluated inside the branch");
+}
+if (!lazyPowSelectOptimized.wgsl.includes("select(texCoord.y, 1.0f - texCoord.y, flipY > 0.5f)")) {
+    throw new Error("expected non-pow sampler-origin select to stay unchanged");
+}
+if (lazyPowSelectOptimized.stats.branchifiedSelects !== 1) {
+    throw new Error(`expected one lazy pow select branchification, got ${lazyPowSelectOptimized.stats.branchifiedSelects}`);
+}
+
+const shapeStats = computeShaderShapeStats(`
+var<private> texCoord : vec2<f32>;
+@fragment
+fn main() -> @location(0) vec4<f32> {
+  let x_1 = vec4<f32>(texCoord.x, texCoord.y, 0.0, 1.0);
+  if (x_1.x > 0.0) {
+    return textureSampleLevel(diffuseT, diffuseS, texCoord, select(0.0, 1.0, texCoord.y > 0.5));
+  }
+  return textureSample(diffuseT, diffuseS, texCoord);
+}
+`);
+if (shapeStats.varPrivate !== 1 || shapeStats.tempLets !== 1 || shapeStats.textureSampleLevel !== 1 || shapeStats.textureSample !== 1 || shapeStats.selects !== 1) {
+    throw new Error(`unexpected WGSL shape stats: ${JSON.stringify(shapeStats)}`);
 }
 
 console.log("shader metadata tests passed");

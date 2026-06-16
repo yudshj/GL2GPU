@@ -8,6 +8,12 @@ import {
     TextureNameAndType,
 } from "./shaderDB";
 import { makeShaderMetadata, scanGlslDeclarations, ShaderStage } from "./shaderMetadata";
+import {
+    ShaderCaptureRecord,
+    sourceCapture,
+    stableHashString,
+    stableHashU32,
+} from "./shaderCapture";
 import { normalizeWebGlTextureCoordinates } from "./shaderTexCoord";
 import { optimizeTintWgsl, WgslOptimizerStats } from "./shaderWgslOptimizer";
 
@@ -42,6 +48,8 @@ function locateBundledWasm(path: string): string {
 export interface ShaderTranslatorOptions {
     optimizeTintWgsl?: boolean;
     legacyTextureCoordinateFixups?: boolean;
+    captureShaders?: boolean;
+    preserveImplicitTextureLod?: boolean;
     glslangLocateFile?: (path: string) => string;
     glslangWasmBinary?: ArrayBuffer | Uint8Array;
     tintLocateFile?: (path: string) => string;
@@ -79,6 +87,15 @@ interface PreparedGlslSource {
     declarations: ParsedGlslDeclaration[];
 }
 
+interface BuildGlslangSourceOptions {
+    preserveImplicitTextureLod?: boolean;
+}
+
+interface ResourcePruneStats {
+    removedUniforms: string[];
+    removedSamplers: string[];
+}
+
 const GLOBAL_DECLARATION_REGEX = /(^|[;\n])(\s*(?:layout\s*\([^)]*\)\s*)?(?:(?:lowp|mediump|highp)\s+)?(?:(?:flat|smooth|noperspective|centroid|sample)\s+)*(attribute|uniform|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([^;]+)\s*;)/g;
 const SPV_OP_NAME = 5;
 const SPV_OP_TYPE_SAMPLED_IMAGE = 27;
@@ -95,8 +112,39 @@ function escapeRegExp(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function nowMs(): number {
+    if (typeof performance !== "undefined" && typeof performance.now === "function") {
+        return performance.now();
+    }
+    return Date.now();
+}
+
 function wordBoundaryReplace(source: string, from: string, to: string): string {
     return source.replace(new RegExp(`\\b${escapeRegExp(from)}\\b`, "g"), to);
+}
+
+function referencesIdentifier(source: string, name: string): boolean {
+    return new RegExp(`\\b${escapeRegExp(name)}\\b`).test(source);
+}
+
+function pruneUnusedShaderResources(metadata: InitShaderInfoType, wgsl: string): ResourcePruneStats {
+    const removedUniforms: string[] = [];
+    const removedSamplers: string[] = [];
+    metadata.uniforms = metadata.uniforms.filter((uniform) => {
+        const keep = referencesIdentifier(wgsl, `_hyd_uniforms_.${uniform.name}`) || referencesIdentifier(wgsl, uniform.name);
+        if (!keep) {
+            removedUniforms.push(uniform.name);
+        }
+        return keep;
+    });
+    metadata.samplers = metadata.samplers.filter((sampler) => {
+        const keep = referencesIdentifier(wgsl, `${sampler.name}S`) || referencesIdentifier(wgsl, `${sampler.name}T`);
+        if (!keep) {
+            removedSamplers.push(sampler.name);
+        }
+        return keep;
+    });
+    return { removedUniforms, removedSamplers };
 }
 
 function uniqueByName<T extends NameAndType | TextureNameAndType>(items: T[]): T[] {
@@ -636,7 +684,13 @@ export function patchGlslangSampledTextureVariables(spirv: Uint32Array, samplers
     return patched;
 }
 
-export function buildGlslangSource(source: string, stage: ShaderStage, metadata: InitShaderInfoType, layout: ProgramTranslationLayout): string {
+export function buildGlslangSource(
+    source: string,
+    stage: ShaderStage,
+    metadata: InitShaderInfoType,
+    layout: ProgramTranslationLayout,
+    options: BuildGlslangSourceOptions = {},
+): string {
     const prepared = prepareSourceAndDeclarations(source);
     const lines: string[] = [prepared.source.trimEnd()];
     const declarations = prepared.declarations;
@@ -673,7 +727,7 @@ export function buildGlslangSource(source: string, stage: ShaderStage, metadata:
     const normalized = stage === "fragment" ? normalizeLegacyFragmentBuiltins(body) : { source: body, usesFragColor: false };
     body = lowerSamplerFunctionParameters(normalized.source);
     body = rewriteSamplerExpressions(body, metadata);
-    if (stage === "fragment") {
+    if (stage === "fragment" && options.preserveImplicitTextureLod === false) {
         body = rewriteFragmentImplicitTextureLod(body);
     }
     if (stage === "fragment" && normalized.usesFragColor) {
@@ -876,7 +930,16 @@ export class ShaderTranslator {
 
     private translateShader(shader: ShaderLike, stage: ShaderStage, layout: ProgramTranslationLayout): InitShaderInfoType {
         const key = shader.glsl_shader;
-        const runtimeKey = `${stage}:${layout.cacheKey}:${key}`;
+        const preserveImplicitTextureLod = this.options.preserveImplicitTextureLod !== false;
+        const shouldOptimizeTintWgsl = this.options.optimizeTintWgsl !== false;
+        const runtimeKey = [
+            stage,
+            layout.cacheKey,
+            `lod=${preserveImplicitTextureLod ? 1 : 0}`,
+            `opt=${shouldOptimizeTintWgsl ? 1 : 0}`,
+            `legacyTexCoord=${this.options.legacyTextureCoordinateFixups ? 1 : 0}`,
+            key,
+        ].join(":");
         const cachedRuntime = this.runtimeCache.get(runtimeKey);
         if (cachedRuntime) {
             return cachedRuntime;
@@ -888,35 +951,94 @@ export class ShaderTranslator {
         }
 
         let glslangSource = "";
+        const timingsMs: Record<string, number> = {};
         try {
-            glslangSource = buildGlslangSource(shader.glsl_shader, stage, metadata, layout);
+            const buildStart = nowMs();
+            glslangSource = buildGlslangSource(shader.glsl_shader, stage, metadata, layout, {
+                preserveImplicitTextureLod,
+            });
+            timingsMs.glslPreprocess = nowMs() - buildStart;
+
+            const compileStart = nowMs();
             const spirv = patchGlslangSampledTextureVariables(
                 this.glslang.compileGLSL(glslangSource, stage, false),
                 metadata.samplers,
             );
-            let wgsl = normalizeTintWgsl(this.tint.spirvToWgsl(spirv), metadata);
+            timingsMs.glslang = nowMs() - compileStart;
+
+            const tintStart = nowMs();
+            const tintWgsl = this.tint.spirvToWgsl(spirv);
+            timingsMs.tint = nowMs() - tintStart;
+
+            const normalizeStart = nowMs();
+            let wgsl = normalizeTintWgsl(tintWgsl, metadata);
+            const normalizedWgsl = wgsl;
+            timingsMs.wgslNormalize = nowMs() - normalizeStart;
+
             let optimizerStats: WgslOptimizerStats = {
-                optimizeTintWgsl: this.options.optimizeTintWgsl !== false,
+                optimizeTintWgsl: shouldOptimizeTintWgsl,
                 loweredPrivateVars: 0,
+                loweredPointerParams: 0,
+                promotedLocalVars: 0,
+                branchifiedSelects: 0,
+                hoistedModOperands: 0,
+                foldedModByOne: 0,
+                elidedRangeClamps: 0,
                 removedTemporaries: 0,
                 foldedConstructors: 0,
                 skippedPasses: [],
             };
-            if (this.options.optimizeTintWgsl !== false) {
+            if (shouldOptimizeTintWgsl) {
+                const optimizeStart = nowMs();
                 const optimized = optimizeTintWgsl(wgsl);
                 wgsl = optimized.wgsl;
                 optimizerStats = optimized.stats;
+                timingsMs.wgslOptimize = nowMs() - optimizeStart;
             }
-            metadata.wgsl = this.options.legacyTextureCoordinateFixups
-                ? normalizeWebGlTextureCoordinates(wgsl, metadata, stage, shader.glsl_shader)
-                : wgsl;
+            if (this.options.legacyTextureCoordinateFixups) {
+                const legacyFixupStart = nowMs();
+                metadata.wgsl = normalizeWebGlTextureCoordinates(wgsl, metadata, stage, shader.glsl_shader);
+                timingsMs.legacyTextureCoordinateFixups = nowMs() - legacyFixupStart;
+            } else {
+                metadata.wgsl = wgsl;
+            }
+            const resourcePrune = pruneUnusedShaderResources(metadata, metadata.wgsl);
+            const shaderId = `${stage}:${stableHashString(shader.glsl_shader)}:${layout.cacheKey}`;
+            const capture: ShaderCaptureRecord = {
+                kind: "shader-stage",
+                stage,
+                shaderId,
+                source: "runtime",
+                optimizer: optimizerStats,
+                timingsMs,
+                glsl: sourceCapture(shader.glsl_shader),
+                normalizedGlsl: sourceCapture(glslangSource),
+                spirv: {
+                    hash: stableHashU32(spirv),
+                    wordCount: spirv.length,
+                    byteLength: spirv.byteLength,
+                },
+                tintWgsl: sourceCapture(tintWgsl),
+                normalizedWgsl: sourceCapture(normalizedWgsl),
+                postProcessWgsl: sourceCapture(metadata.wgsl),
+            };
+            metadata.shader_capture = capture;
             metadata.debug_info = JSON.stringify({
                 source: "runtime",
                 stage,
                 translated: true,
                 glsl: "310es",
                 legacyTextureCoordinateFixups: !!this.options.legacyTextureCoordinateFixups,
+                preserveImplicitTextureLod,
                 optimizer: optimizerStats,
+                resourcePrune,
+                shaderId,
+                spirv: capture.spirv,
+                shapeStats: {
+                    tintWgsl: capture.tintWgsl.stats,
+                    normalizedWgsl: capture.normalizedWgsl.stats,
+                    postProcessWgsl: capture.postProcessWgsl.stats,
+                },
             });
             this.runtimeCache.set(runtimeKey, metadata);
             return metadata;

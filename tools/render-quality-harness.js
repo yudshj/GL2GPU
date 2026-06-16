@@ -111,6 +111,55 @@ function safeStaticPath(root, pathname) {
   return fullPath;
 }
 
+function sanitizeName(value) {
+  return String(value).replace(/[^A-Za-z0-9_.-]+/g, "_");
+}
+
+async function installShaderCapture(page, shaderCaptures) {
+  await page.exposeBinding("__hydShaderCapture", (_source, record) => {
+    if (record && typeof record === "object") {
+      shaderCaptures.push(record);
+    }
+  });
+  await page.addInitScript(() => {
+    window.__HYD_SHADER_CAPTURE = (record) => {
+      if (typeof window.__hydShaderCapture === "function") {
+        window.__hydShaderCapture(record);
+      }
+    };
+  });
+}
+
+function summarizeShaderCaptures(shaderCaptures) {
+  const summary = {
+    count: shaderCaptures.length,
+    byKind: {},
+    byStage: {},
+    finalShapeTotals: {},
+  };
+  for (const capture of shaderCaptures) {
+    summary.byKind[capture.kind || "unknown"] = (summary.byKind[capture.kind || "unknown"] || 0) + 1;
+    summary.byStage[capture.stage || "unknown"] = (summary.byStage[capture.stage || "unknown"] || 0) + 1;
+    const stats = capture.finalWgsl?.stats || capture.postProcessWgsl?.stats;
+    if (!stats) continue;
+    for (const [key, value] of Object.entries(stats)) {
+      if (typeof value === "number") {
+        summary.finalShapeTotals[key] = (summary.finalShapeTotals[key] || 0) + value;
+      }
+    }
+  }
+  return summary;
+}
+
+function writeShaderCaptures(benchmark, mode, shaderCaptures) {
+  if (shaderCaptures.length === 0) return null;
+  const dir = path.join(outputRoot, "shader-captures");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${sanitizeName(benchmark.name)}-${sanitizeName(mode)}.json`);
+  fs.writeFileSync(file, JSON.stringify(shaderCaptures, null, 2));
+  return file;
+}
+
 const gitBlobCache = new Map();
 
 function readGitBlob(ref, file) {
@@ -312,6 +361,17 @@ function ssimValue(a, b) {
   return Number.isFinite(distortion) ? 1 - distortion : distortion;
 }
 
+function imageMean(pathname) {
+  if (!pathname || !fs.existsSync(pathname)) return null;
+  const result = spawnSync("magick", ["identify", "-format", "%[fx:mean]", pathname], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.status !== 0) return null;
+  const value = Number(String(result.stdout || result.stderr || "").trim());
+  return Number.isFinite(value) ? value : null;
+}
+
 async function capture(browser, benchmark, mode) {
   const { server, baseURL, state } = await startServer(mode);
   const context = await browser.newContext({ viewport: { width: 1024, height: 1024 }, deviceScaleFactor: 1 });
@@ -320,6 +380,7 @@ async function capture(browser, benchmark, mode) {
   const messages = [];
   const badResponses = [];
   const dialogs = [];
+  const shaderCaptures = [];
   page.on("console", (message) => {
     if (messages.length < 200) messages.push({ type: message.type(), text: message.text().slice(0, 1000) });
   });
@@ -331,6 +392,7 @@ async function capture(browser, benchmark, mode) {
     dialogs.push(dialog.message());
     await dialog.dismiss().catch(() => {});
   });
+  await installShaderCapture(page, shaderCaptures);
   await page.addInitScript(deterministicTimeScript());
   await page.addInitScript(() => {
     window.__QUALITY_CAPTURE = { alerts: [] };
@@ -389,6 +451,18 @@ async function capture(browser, benchmark, mode) {
       pageErrors.push(`canvas screenshot: ${error.message || error}`);
     });
   }
+  const shaderCapturePath = writeShaderCaptures(benchmark, mode, shaderCaptures);
+  const frameCount = Array.isArray(canvasInfo.frameTimes) ? canvasInfo.frameTimes.length : 0;
+  const mean = imageMean(pngPath);
+  const hardFailures = [
+    ...pageErrors,
+    ...(mode !== "webgl" && state.shaderDbRequests > 0 ? [`shaderDbRequests=${state.shaderDbRequests}`] : []),
+    ...(frameCount === 0 ? ["0 frameTimes captured"] : []),
+    ...(mean !== null && mean < 0.001 ? [`black frame mean=${mean}`] : []),
+    ...messages
+      .map((message) => message.text)
+      .filter((text) => /validation error|shader translation failed|Shader not found in shaderDB|Runtime shader translation failed|not implemented|unsupported/i.test(text)),
+  ];
   await page.close().catch(() => {});
   await context.close().catch(() => {});
   await new Promise((resolve) => server.close(resolve));
@@ -399,10 +473,14 @@ async function capture(browser, benchmark, mode) {
     timeout,
     shaderDbRequests: state.shaderDbRequests,
     missing: state.missing.slice(0, 50),
+    shaderCaptures: summarizeShaderCaptures(shaderCaptures),
+    shaderCapturePath,
     badResponses,
     pageErrors,
+    hardFailures: hardFailures.slice(0, 50),
     dialogs,
     messages,
+    imageMean: mean,
     image: canvasInfo,
     pngPath,
   };
@@ -460,7 +538,7 @@ async function main() {
         const result = await capture(browser, benchmark, mode);
         captures.push(result);
         const frameCount = result.image && result.image.frameTimes ? result.image.frameTimes.length : 0;
-        console.log(`  frames=${frameCount} shaderDbRequests=${result.shaderDbRequests} errors=${result.pageErrors.length}`);
+        console.log(`  frames=${frameCount} shaderDbRequests=${result.shaderDbRequests} hardFailures=${result.hardFailures.length}`);
       }
     }
   } finally {
@@ -481,16 +559,18 @@ async function main() {
         psnr: tint && webgl ? metricValue("PSNR", tint.pngPath, webgl.pngPath) : null,
         ssim: tint && webgl ? ssimValue(tint.pngPath, webgl.pngPath) : null,
         shaderDbRequests: tint ? tint.shaderDbRequests : null,
+        shaderCaptures: tint ? tint.shaderCaptures : null,
       },
       manualVsWebgl: {
         psnr: manual && webgl ? metricValue("PSNR", manual.pngPath, webgl.pngPath) : null,
         ssim: manual && webgl ? ssimValue(manual.pngPath, webgl.pngPath) : null,
         shaderDbRequests: manual ? manual.shaderDbRequests : null,
+        shaderCaptures: manual ? manual.shaderCaptures : null,
       },
       errors: {
-        webgl: webgl ? webgl.pageErrors : [],
-        tint: tint ? tint.pageErrors : [],
-        manual: manual ? manual.pageErrors : [],
+        webgl: webgl ? webgl.hardFailures : [],
+        tint: tint ? tint.hardFailures : [],
+        manual: manual ? manual.hardFailures : [],
       },
     });
   }
@@ -511,7 +591,11 @@ async function main() {
       missing: item.missing,
       badResponses: item.badResponses,
       pageErrors: item.pageErrors,
+      hardFailures: item.hardFailures,
       dialogs: item.dialogs,
+      shaderCaptures: item.shaderCaptures,
+      shaderCapturePath: item.shaderCapturePath,
+      imageMean: item.imageMean,
       frameCount: item.image && item.image.frameTimes ? item.image.frameTimes.length : 0,
       imageError: item.image && item.image.error,
       png: item.pngPath,

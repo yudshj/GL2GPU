@@ -131,7 +131,7 @@ export class PolygonState implements HydHashable {
 }
 
 export class ClearState implements HydHashable {
-    color: Iterable<number>;
+    color: [number, number, number, number];
     depth: GLuint;
     stencil: GLenum;
     target: number;
@@ -148,7 +148,7 @@ export class ClearState implements HydHashable {
 
 export class BlendState implements HydHashable {
     enabled: boolean;
-    color: Iterable<number>;
+    color: [number, number, number, number];
     dstRGB: GPUBlendFactor;
     srcRGB: GPUBlendFactor;
     dstAlpha: GPUBlendFactor;
@@ -694,7 +694,7 @@ export class HydGlobalState {
     public getVertexBuffer(): [string[], GPUBuffer[], number[], string, GPUVertexBufferLayout[]] {
         const bufferAttributeMap = new Map<string, [GPUBuffer, number, GPUVertexStepMode, Array<GPUVertexAttribute>]>();
         const vao = this.commonState.vertexArrayBinding;
-        const activeAttributeLocations = new Set(this.commonState.currentProgram.hydAttributes.map((attribute) => attribute.location));
+        const activeAttributeLocations = this.commonState.currentProgram.hydAttributeLocations;
         const buffers: GPUBuffer[] = [];
         const layouts: GPUVertexBufferLayout[] = [];
         const offsets: number[] = [];

@@ -1,5 +1,6 @@
 // import {HydSampler} from "./hydSampler";
 import { ProgramAttribute, ProgramUniformBuffer, ProgramUniformSampler } from "./hydProgram";
+import type { ShaderCaptureRecord } from "./shaderCapture";
 import { hydTrim } from "./shaderSource";
 
 export { hydTrim };
@@ -31,6 +32,7 @@ export interface InitShaderInfoType {
     wgsl: string;
     glsl: string;
     debug_info: string;
+    shader_capture?: ShaderCaptureRecord;
 }
 
 export function samplerFlipYUniformName(samplerName: string): string {

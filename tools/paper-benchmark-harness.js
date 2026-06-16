@@ -43,6 +43,7 @@ const threshold = Number(argv.get("threshold") || 0.90);
 const rmseThreshold = Number(argv.get("rmse-threshold") || 0.02);
 const manualRef = argv.get("manual-ref") || "3dec70b";
 const manualRoot = argv.get("manual-root") || "";
+const assumeLifeRangeClampRedundant = argv.get("assume-life-range-clamp-redundant") === "true";
 
 const textTypes = new Set([
   "text/html; charset=utf-8",
@@ -116,6 +117,55 @@ function safeStaticPath(root, pathname) {
     return null;
   }
   return fullPath;
+}
+
+function sanitizeName(value) {
+  return String(value).replace(/[^A-Za-z0-9_.-]+/g, "_");
+}
+
+async function installShaderCapture(page, shaderCaptures) {
+  await page.exposeBinding("__hydShaderCapture", (_source, record) => {
+    if (record && typeof record === "object") {
+      shaderCaptures.push(record);
+    }
+  });
+  await page.addInitScript(() => {
+    window.__HYD_SHADER_CAPTURE = (record) => {
+      if (typeof window.__hydShaderCapture === "function") {
+        window.__hydShaderCapture(record);
+      }
+    };
+  });
+}
+
+function summarizeShaderCaptures(shaderCaptures) {
+  const summary = {
+    count: shaderCaptures.length,
+    byKind: {},
+    byStage: {},
+    finalShapeTotals: {},
+  };
+  for (const capture of shaderCaptures) {
+    summary.byKind[capture.kind || "unknown"] = (summary.byKind[capture.kind || "unknown"] || 0) + 1;
+    summary.byStage[capture.stage || "unknown"] = (summary.byStage[capture.stage || "unknown"] || 0) + 1;
+    const stats = capture.finalWgsl?.stats || capture.postProcessWgsl?.stats;
+    if (!stats) continue;
+    for (const [key, value] of Object.entries(stats)) {
+      if (typeof value === "number") {
+        summary.finalShapeTotals[key] = (summary.finalShapeTotals[key] || 0) + value;
+      }
+    }
+  }
+  return summary;
+}
+
+function writeShaderCaptures(mode, benchmark, trial, shaderCaptures) {
+  if (shaderCaptures.length === 0) return null;
+  const dir = path.join(outputRoot, "shader-captures");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${sanitizeName(mode)}-${sanitizeName(benchmark.name)}-trial-${trial}.json`);
+  fs.writeFileSync(file, JSON.stringify(shaderCaptures, null, 2));
+  return file;
 }
 
 const gitBlobCache = new Map();
@@ -200,13 +250,15 @@ async function startServer(mode) {
       let buffer = null;
       let type = contentType(pathname);
 
+      const isManualShaderMode = mode === "manual" || mode === "manual-current";
+
       if (pathname === "/js/gl2gpu.js") {
         buffer = mode === "manual"
           ? readManualAsset("dist/js/gl2gpu.js")
           : fs.readFileSync(path.join(releaseRoot, "gl2gpu.js"));
       } else if (pathname === "/js/shaders_info.json") {
         state.shaderDbRequests++;
-        if (mode !== "manual") {
+        if (!isManualShaderMode) {
           state.missing.push(pathname);
           sendBuffer(response, 404, Buffer.from("shader DB disabled for tint mode"), "text/plain; charset=utf-8");
           return;
@@ -241,7 +293,7 @@ async function startServer(mode) {
         return;
       }
 
-      if (mode === "manual" && textTypes.has(type)) {
+      if (isManualShaderMode && textTypes.has(type)) {
         buffer = Buffer.from(rewriteManualShaderDbUrl(buffer.toString("utf8")), "utf8");
       }
       sendBuffer(response, 200, buffer, type);
@@ -318,6 +370,11 @@ function aggregateOptimizerStats(stats) {
   const aggregate = {
     optimizeTintWgsl: stats.some((item) => item && item.optimizeTintWgsl),
     loweredPrivateVars: 0,
+    loweredPointerParams: 0,
+    promotedLocalVars: 0,
+    branchifiedSelects: 0,
+    hoistedModOperands: 0,
+    elidedRangeClamps: 0,
     removedTemporaries: 0,
     foldedConstructors: 0,
     skippedPasses: [],
@@ -326,6 +383,11 @@ function aggregateOptimizerStats(stats) {
   for (const item of stats) {
     if (!item) continue;
     aggregate.loweredPrivateVars += Number(item.loweredPrivateVars || 0);
+    aggregate.loweredPointerParams += Number(item.loweredPointerParams || 0);
+    aggregate.promotedLocalVars += Number(item.promotedLocalVars || 0);
+    aggregate.branchifiedSelects += Number(item.branchifiedSelects || 0);
+    aggregate.hoistedModOperands += Number(item.hoistedModOperands || 0);
+    aggregate.elidedRangeClamps += Number(item.elidedRangeClamps || 0);
     aggregate.removedTemporaries += Number(item.removedTemporaries || 0);
     aggregate.foldedConstructors += Number(item.foldedConstructors || 0);
     for (const reason of item.skippedPasses || []) {
@@ -429,6 +491,7 @@ async function runTrial(browser, benchmark, mode, trial) {
   const badResponses = [];
   const dialogs = [];
   const optimizerStats = [];
+  const shaderCaptures = [];
   const hardFailurePatterns = [
     /validation error/i,
     /shader translation failed/i,
@@ -438,6 +501,8 @@ async function runTrial(browser, benchmark, mode, trial) {
   if (mode === "tint") {
     hardFailurePatterns.push(/not implemented/i, /unsupported/i);
   }
+
+  await installShaderCapture(page, shaderCaptures);
 
   page.on("console", (message) => {
     const text = message.text();
@@ -479,6 +544,11 @@ async function runTrial(browser, benchmark, mode, trial) {
       console.error("[unhandledrejection]", event.reason && (event.reason.stack || event.reason.message || event.reason));
     });
   });
+  if (mode === "tint" && assumeLifeRangeClampRedundant) {
+    await page.addInitScript(() => {
+      window.__HYD_ASSUME_LIFE_RANGE_CLAMP_REDUNDANT = true;
+    });
+  }
 
   const url = benchmarkURL(baseURL, benchmark, mode, trial);
   let timeout = false;
@@ -520,8 +590,17 @@ async function runTrial(browser, benchmark, mode, trial) {
   const frameSummary = summarizeFrameTimes(frameData.frameTimes || []);
   const hardFailures = [
     ...pageErrors,
+    ...(mode === "tint" && state.shaderDbRequests > 0 ? [`shaderDbRequests=${state.shaderDbRequests}`] : []),
+    ...(frameSummary.count === 0 ? ["0 frameTimes captured"] : []),
     ...messages.map((message) => message.text),
   ].filter((text) => hardFailurePatterns.some((pattern) => pattern.test(text)));
+  const strictHardFailures = [
+    ...pageErrors,
+    ...(mode === "tint" && state.shaderDbRequests > 0 ? [`shaderDbRequests=${state.shaderDbRequests}`] : []),
+    ...(frameSummary.count === 0 ? ["0 frameTimes captured"] : []),
+    ...messages.map((message) => message.text).filter((text) => hardFailurePatterns.some((pattern) => pattern.test(text))),
+  ];
+  const shaderCapturePath = writeShaderCaptures(mode, benchmark, trial, shaderCaptures);
 
   return {
     benchmark: benchmark.name,
@@ -536,11 +615,14 @@ async function runTrial(browser, benchmark, mode, trial) {
     uploadCount: state.uploads.length,
     missingRequests: state.missing.slice(0, 50),
     optimizer: aggregateOptimizerStats(optimizerStats),
+    shaderCaptures: summarizeShaderCaptures(shaderCaptures),
+    shaderCapturePath,
     pageErrors,
     requestFailures,
     badResponses,
     dialogs,
-    hardFailures: hardFailures.slice(0, 50),
+    hardFailures: strictHardFailures.slice(0, 50),
+    patternHardFailures: hardFailures.slice(0, 50),
     messages,
     screenshot,
     image,
@@ -556,6 +638,7 @@ function median(values) {
 
 function createSummary(results) {
   const rows = [];
+  const manualBaselineMode = selectedModes.includes("manual-current") ? "manual-current" : "manual";
   for (const benchmark of selectedBenchmarks) {
     const perBenchmark = results.filter((result) => result.benchmark === benchmark.name);
     const row = {
@@ -593,7 +676,7 @@ function createSummary(results) {
     }
 
     const tintFps = row.modes.tint && row.modes.tint.medianFps;
-    const manualFps = row.modes.manual && row.modes.manual.medianFps;
+    const manualFps = row.modes[manualBaselineMode] && row.modes[manualBaselineMode].medianFps;
     if (Number.isFinite(tintFps) && Number.isFinite(manualFps) && manualFps > 0) {
       row.tintVsManualFpsRatio = tintFps / manualFps;
       if (row.tintVsManualFpsRatio < threshold) {
@@ -605,7 +688,7 @@ function createSummary(results) {
     const rmses = [];
     for (let trial = 1; trial <= trials; trial++) {
       const tint = perBenchmark.find((result) => result.mode === "tint" && result.trial === trial);
-      const manual = perBenchmark.find((result) => result.mode === "manual" && result.trial === trial);
+      const manual = perBenchmark.find((result) => result.mode === manualBaselineMode && result.trial === trial);
       if (!tint || !manual) continue;
       const value = normalizedRmse(tint.image, manual.image);
       if (Number.isFinite(value)) {
@@ -613,7 +696,7 @@ function createSummary(results) {
       }
     }
     row.rmse = median(rmses);
-    if (selectedModes.includes("tint") && selectedModes.includes("manual")) {
+    if (selectedModes.includes("tint") && selectedModes.includes(manualBaselineMode)) {
       if (!Number.isFinite(row.rmse)) {
         row.pass = false;
         row.reasons.push("RMSE unavailable");
@@ -663,17 +746,18 @@ async function launchBrowser() {
 }
 
 function printSummary(summary) {
+  const manualBaselineMode = selectedModes.includes("manual-current") ? "manual-current" : "manual";
   for (const row of summary) {
     const tint = row.modes.tint;
-    const manual = row.modes.manual;
+    const manual = row.modes[manualBaselineMode];
     const tintFps = tint && Number.isFinite(tint.medianFps) ? tint.medianFps.toFixed(3) : "n/a";
     const manualFps = manual && Number.isFinite(manual.medianFps) ? manual.medianFps.toFixed(3) : "n/a";
     const ratio = Number.isFinite(row.tintVsManualFpsRatio) ? row.tintVsManualFpsRatio.toFixed(3) : "n/a";
     const rmse = Number.isFinite(row.rmse) ? row.rmse.toFixed(5) : "n/a";
-    console.log(`${row.pass ? "PASS" : "FAIL"} ${row.benchmark}: tint=${tintFps}fps manual=${manualFps}fps ratio=${ratio} rmse=${rmse}`);
+    console.log(`${row.pass ? "PASS" : "FAIL"} ${row.benchmark}: tint=${tintFps}fps ${manualBaselineMode}=${manualFps}fps ratio=${ratio} rmse=${rmse}`);
     if (tint && tint.optimizer) {
       const opt = tint.optimizer;
-      console.log(`  optimizer lowered=${opt.loweredPrivateVars} temps=${opt.removedTemporaries} folds=${opt.foldedConstructors} skipped=${opt.skippedPasses.join("|") || "none"}`);
+      console.log(`  optimizer lowered=${opt.loweredPrivateVars} ptr=${opt.loweredPointerParams || 0} locals=${opt.promotedLocalVars || 0} mod=${opt.hoistedModOperands || 0} clamps=${opt.elidedRangeClamps || 0} branches=${opt.branchifiedSelects || 0} temps=${opt.removedTemporaries} folds=${opt.foldedConstructors} skipped=${opt.skippedPasses.join("|") || "none"}`);
     }
     for (const reason of row.reasons) {
       console.log(`  - ${reason}`);

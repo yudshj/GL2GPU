@@ -144,7 +144,7 @@ export class HydRenderPassCache {
     private viewPortInfo: [number, number, number, number, number, number] = [0, 0, 0, 0, 0, 0];
     private scissorInfo: [number, number, number, number] = [0, 0, 0, 0];
     private stencilReferenceInfo: number = 0;
-    private colorInfo: Iterable<number> = [0, 0, 0, 0];
+    private colorInfo: [number, number, number, number] = [0, 0, 0, 0];
     private __commandEncoderCount = 0;
     private bundleNum: number[];
 
@@ -220,16 +220,17 @@ export class HydRenderPassCache {
         }
     }
 
-    public RpSetBlendConstant(color: Iterable<number>) {
-        const values = Array.from(color) as [number, number, number, number];
-        const previous = Array.from(this.colorInfo);
-        if (previous[0] !== values[0] || previous[1] !== values[1] || previous[2] !== values[2] || previous[3] !== values[3]) {
-            this.colorInfo = values;
-            this.renderPassEncoder.setBlendConstant(values);
+    public RpSetBlendConstant4(r: number, g: number, b: number, a: number) {
+        if (this.colorInfo[0] !== r || this.colorInfo[1] !== g || this.colorInfo[2] !== b || this.colorInfo[3] !== a) {
+            this.colorInfo[0] = r;
+            this.colorInfo[1] = g;
+            this.colorInfo[2] = b;
+            this.colorInfo[3] = a;
+            this.renderPassEncoder.setBlendConstant(this.colorInfo);
         }
     }
 
-    public RpSetDescriptor(hash: string, renderBundleEncoderDescriptor: GPURenderBundleEncoderDescriptor, callback: () => GPURenderPassDescriptor) {
+    public RpSetDescriptor(hash: string, renderBundleEncoderDescriptor: GPURenderBundleEncoderDescriptor, callback: () => GPURenderPassDescriptor): boolean {
         if (this.renderPassDescriptorCacheKey !== hash) {
             this.RpEnd();
             this.renderPassDescriptorCacheKey = hash;
@@ -237,7 +238,9 @@ export class HydRenderPassCache {
             // this.renderPassDescriptor.label += hash;
             this.renderPassEncoder = this.commandEncoder.beginRenderPass(this.renderPassDescriptor);
             this.renderBundleGenerator = new HydRenderPassEncoder(this.device, renderBundleEncoderDescriptor);
+            return true;
         }
+        return false;
     }
 
     public RpClear(callback: () => GPURenderPassDescriptor) {
@@ -245,6 +248,10 @@ export class HydRenderPassCache {
         const renderPassEncoder = this.commandEncoder.beginRenderPass(callback());
         renderPassEncoder.end();
         this.resetCache();
+    }
+
+    public hasActiveRenderPass(): boolean {
+        return this.renderPassEncoder !== null;
     }
 
     public RpSetPipeline(hash: string, pipeline: GPURenderPipeline) {
@@ -283,17 +290,37 @@ export class HydRenderPassCache {
         }
     }
 
-    public RpSetViewport(viewPort: [number, number, number, number, number, number]) {
-        if (this.viewPortInfo.join(',') !== viewPort.join(',')) {
-            this.viewPortInfo = viewPort;
-            this.renderPassEncoder.setViewport(viewPort[0], viewPort[1], viewPort[2], viewPort[3], viewPort[4], viewPort[5]);
+    public RpSetViewportValues(x: number, y: number, width: number, height: number, minDepth: number, maxDepth: number) {
+        if (
+            this.viewPortInfo[0] !== x ||
+            this.viewPortInfo[1] !== y ||
+            this.viewPortInfo[2] !== width ||
+            this.viewPortInfo[3] !== height ||
+            this.viewPortInfo[4] !== minDepth ||
+            this.viewPortInfo[5] !== maxDepth
+        ) {
+            this.viewPortInfo[0] = x;
+            this.viewPortInfo[1] = y;
+            this.viewPortInfo[2] = width;
+            this.viewPortInfo[3] = height;
+            this.viewPortInfo[4] = minDepth;
+            this.viewPortInfo[5] = maxDepth;
+            this.renderPassEncoder.setViewport(x, y, width, height, minDepth, maxDepth);
         }
     }
 
-    public RpSetScissorRect(scissorBox: [number, number, number, number]) {
-        if (this.scissorInfo.join(',') !== scissorBox.join(',')) {
-            this.scissorInfo = scissorBox;
-            this.renderPassEncoder.setScissorRect(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]);
+    public RpSetScissorRectValues(x: number, y: number, width: number, height: number) {
+        if (
+            this.scissorInfo[0] !== x ||
+            this.scissorInfo[1] !== y ||
+            this.scissorInfo[2] !== width ||
+            this.scissorInfo[3] !== height
+        ) {
+            this.scissorInfo[0] = x;
+            this.scissorInfo[1] = y;
+            this.scissorInfo[2] = width;
+            this.scissorInfo[3] = height;
+            this.renderPassEncoder.setScissorRect(x, y, width, height);
         }
     }
 
