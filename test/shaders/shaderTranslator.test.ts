@@ -282,6 +282,42 @@ if (optimizedWrapper.stats.removedTemporaries < 1 || optimizedWrapper.stats.fold
     throw new Error("expected peephole optimizer to remove a temp and fold a constructor");
 }
 
+const multiWriteOutputPrivateWgsl = `
+var<private> a_pos : vec4f;
+var<private> gl_Position : vec4f;
+
+fn main_1() {
+  gl_Position = a_pos;
+  gl_Position = vec4f(gl_Position.xyz, 1.0f);
+  return;
+}
+
+struct main_out {
+  @builtin(position)
+  gl_Position_1 : vec4f,
+}
+
+@vertex
+fn main(@location(0) a_pos_param : vec4f) -> main_out {
+  a_pos = a_pos_param;
+  main_1();
+  return main_out(gl_Position);
+}
+`;
+const multiWriteOutputPrivateOptimized = optimizeTintWgsl(multiWriteOutputPrivateWgsl);
+if (multiWriteOutputPrivateOptimized.wgsl.includes("var<private> gl_Position") || multiWriteOutputPrivateOptimized.wgsl.includes("fn main_1")) {
+    throw new Error("expected multi-write output private wrapper to be lowered");
+}
+if (!multiWriteOutputPrivateOptimized.wgsl.includes("_hyd_output.gl_Position_1 = a_pos_param;")) {
+    throw new Error("expected first output private write to target local output field");
+}
+if (!multiWriteOutputPrivateOptimized.wgsl.includes("_hyd_output.gl_Position_1 = vec4f(_hyd_output.gl_Position_1.xyz, 1.0f);")) {
+    throw new Error("expected later output private reads/writes to use local output field");
+}
+if (multiWriteOutputPrivateOptimized.stats.loweredPrivateVars !== 2) {
+    throw new Error(`expected 2 lowered private vars for multi-write output, got ${multiWriteOutputPrivateOptimized.stats.loweredPrivateVars}`);
+}
+
 const unsafePrivateEscapeWgsl = `
 var<private> a_pos : vec4f;
 var<private> v_color : vec4f;

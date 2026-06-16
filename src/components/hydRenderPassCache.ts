@@ -13,6 +13,8 @@ class GPURenderBundleTransition {
     public onceHash: string | GPUBindGroup = null;
     public onceNext: GPURenderBundleTransition;
     public bindGroupOffset: number | null = null;
+    public onceNumericPrefix: string = null;
+    public onceNumericHash: number = NaN;
 
     constructor(opName: GpuOperators, opArgs: any[], father: GPURenderBundleTransition) {
         this.opName = opName;
@@ -48,6 +50,15 @@ class GPURenderBundleTransition {
             return this.onceNext = newTransition;
         }
         return this.onceNext = transition;
+    }
+
+    public gotoNumeric(prefix: string, numericHash: number, opName: GpuOperators, ...opArgs: any[]): GPURenderBundleTransition {
+        if (this.onceNumericPrefix === prefix && this.onceNumericHash === numericHash) {
+            return this.onceNext;
+        }
+        this.onceNumericPrefix = prefix;
+        this.onceNumericHash = numericHash;
+        return this.goto(prefix + numericHash, opName, ...opArgs);
     }
 }
 
@@ -93,10 +104,10 @@ class HydRenderPassEncoder {
         );
     }
     public draw(vertexCount: number, instanceCount: number, firstVertex: number, firstInstance: number) {
-        this.bundleCache = this.bundleCache.goto('d' + (vertexCount*839 ^ instanceCount*853 ^ firstVertex*857 ^ firstInstance*859), 'draw', vertexCount, instanceCount, firstVertex, firstInstance);
+        this.bundleCache = this.bundleCache.gotoNumeric('d', vertexCount*839 ^ instanceCount*853 ^ firstVertex*857 ^ firstInstance*859, 'draw', vertexCount, instanceCount, firstVertex, firstInstance);
     }
     public drawIndexed(indexCount: number, instanceCount: number, firstIndex: number, baseVertex: number, firstInstance: number) {
-        this.bundleCache = this.bundleCache.goto('i' + (indexCount*977 ^ instanceCount*983 ^ firstIndex*991 ^ baseVertex*997 ^ firstInstance*1009), 'drawIndexed', indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
+        this.bundleCache = this.bundleCache.gotoNumeric('i', indexCount*977 ^ instanceCount*983 ^ firstIndex*991 ^ baseVertex*997 ^ firstInstance*1009, 'drawIndexed', indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
     }
 
     public generateBundle() {

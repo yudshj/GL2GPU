@@ -42,7 +42,11 @@ async function hydGetContext(element: HTMLCanvasElement, _shader_info_url: strin
     contextAttributes = normalizeContextAttributes(contextAttributes || {});
     let [uniform_size, replay_delay] = arg1;
 
-    const shaderTranslator = await ShaderTranslator.create(translatorOptions);
+    const defaultTranslatorOptions = ((globalThis as any).__HYD_TRANSLATOR_OPTIONS || {}) as ShaderTranslatorOptions;
+    const shaderTranslator = await ShaderTranslator.create({
+        ...defaultTranslatorOptions,
+        ...translatorOptions,
+    });
 
     // uniform_size = uniform_size || 1<<18;
     // replay_delay = replay_delay || 5000;

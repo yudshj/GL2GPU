@@ -547,7 +547,7 @@ export class HydGlobalState {
     public getPBV(): PbvInfo {
         const [vertexBufferHashes, vertexBuffers, vertexBufferOffsets, vertexBufferLayoutHash, vertexBufferLayout] = this.getVertexBuffer();
 
-        const [bindGroupHash, bindGroupEntries, bindGroupLayoutHash, bindGroupLayoutEntries] = this.getBindGroup();
+        const [bindGroupHash, bindGroupEntries, bindGroupLayoutHash, bindGroupLayoutEntries, bindGroupTextures] = this.getBindGroup();
         const pipelineLayoutHash = bindGroupLayoutHash;
 
         /* set pipeline */
@@ -589,6 +589,19 @@ export class HydGlobalState {
                 label: "bg" + this.__bindGroupCount++,
             });
             this._bindGroupCache.set(bindGroupHash, bindGroup);
+            for (const textureAttachment of bindGroupTextures) {
+                textureAttachment.onDestroy.push(() => {
+                    const cachedBindGroup = this._bindGroupCache.get(bindGroupHash);
+                    if (cachedBindGroup) {
+                        // @ts-ignore
+                        if (typeof cachedBindGroup.onDestroy === 'function') {
+                            // @ts-ignore
+                            cachedBindGroup.onDestroy();
+                        }
+                        this._bindGroupCache.delete(bindGroupHash);
+                    }
+                });
+            }
         }
         const vertexBuffersHash = fastHashCode(vertexBufferHashes.join('%')).toString();
         return {
@@ -621,10 +634,11 @@ export class HydGlobalState {
         throw new Error("getDepthStencilAttachment failed");
     }
 
-    public getBindGroup(): [string, GPUBindGroupEntry[], string, GPUBindGroupLayoutEntry[]] {
+    public getBindGroup(): [string, GPUBindGroupEntry[], string, GPUBindGroupLayoutEntry[], HydTexture[]] {
         const program = this.commonState.currentProgram;
         const bindGroupEntry: GPUBindGroupEntry[] = [];
         const bindGroupLayoutEntry: GPUBindGroupLayoutEntry[] = [];
+        const textureAttachments: HydTexture[] = [];
         if (program.alignedUniformSize > 0) {
             bindGroupEntry.push({
                 binding: 0,
@@ -650,6 +664,7 @@ export class HydGlobalState {
 
         for (const sampler of program.hydSamplers) {
             const textureAttachment: HydTexture = this.getSamplerTexture(sampler.textureUnit, sampler.viewDimension);
+            textureAttachments.push(textureAttachment);
             bindGroupLayoutEntry.push({
                 binding: bindGroupLayoutEntry.length,
                 visibility: GPUShaderStage.FRAGMENT,
@@ -677,18 +692,7 @@ export class HydGlobalState {
             });
             bindGroupKey += textureAttachment.hash;
         }
-        for (const sampler of program.hydSamplers) {
-            const textureAttachment: HydTexture = this.getSamplerTexture(sampler.textureUnit, sampler.viewDimension);
-            // textureAttachment.bindGroupHashes.push([this._bindGroupCache, bindGroupKey]);
-            textureAttachment.onDestroy.push(() => {
-                if (this._bindGroupCache.has(bindGroupKey)) {
-                    // @ts-ignore
-                    this._bindGroupCache.get(bindGroupKey).onDestroy();
-                    this._bindGroupCache.delete(bindGroupKey);
-                }
-            });
-        }
-        return [fastHashCode(bindGroupKey).toString(), bindGroupEntry, bindGroupLayoutKey, bindGroupLayoutEntry];
+        return [fastHashCode(bindGroupKey).toString(), bindGroupEntry, bindGroupLayoutKey, bindGroupLayoutEntry, textureAttachments];
     }
 
     public getVertexBuffer(): [string[], GPUBuffer[], number[], string, GPUVertexBufferLayout[]] {
@@ -872,15 +876,16 @@ export class HydGlobalStateHashed extends HydGlobalState implements HydHashable 
     }
 
     public getPBV(): PbvInfo {
-        if (!this._hashPbvCur.generated) {
+        const pbv = this._hashPbvCur;
+        if (!pbv.generated) {
             // [this._hashPbvCur.pipelineHash, this._hashPbvCur.pipeline, this._hashPbvCur.bindGroupHash, this._hashPbvCur.bindGroup, this._hashPbvCur.vertexBufferHashes, this._hashPbvCur.vertexBuffers, this._hashPbvCur.renderPassHash] = super.getPBV();
-            Object.assign(this._hashPbvCur, super.getPBV());
-            this._hashPbvCur.generated = true;
+            Object.assign(pbv, super.getPBV());
+            pbv.generated = true;
             // @ts-ignore
-            this._hashPbvCur.bindGroup.onDestroy = () => {
-                this._hashPbvCur.generated = false;
+            pbv.bindGroup.onDestroy = () => {
+                pbv.generated = false;
             };
         }
-        return this._hashPbvCur;
+        return pbv;
     }
 }

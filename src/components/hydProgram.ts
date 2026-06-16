@@ -120,6 +120,31 @@ interface SamplerOriginVariant {
     wgsl: string;
 }
 
+function cloneShaderInfo(info: ReturnType<typeof MergeShaderInfo>): ReturnType<typeof MergeShaderInfo> {
+    return {
+        attributes: info.attributes.map((attribute) => ({ ...attribute })),
+        uniforms: info.uniforms.map((uniform) => ({ ...uniform })),
+        samplers: info.samplers.map((sampler) => ({ ...sampler })),
+    };
+}
+
+function addSamplerFlipUniforms(info: ReturnType<typeof MergeShaderInfo>) {
+    for (const sampler of info.samplers) {
+        if (sampler.glsl_type !== "sampler2D") {
+            continue;
+        }
+        const name = samplerFlipYUniformName(sampler.name);
+        if (!info.uniforms.some((uniform) => uniform.name === name)) {
+            info.uniforms.push({
+                name,
+                glsl_type: "float",
+                wgsl_type: "f32",
+                internal: true,
+            });
+        }
+    }
+}
+
 function findMatchingParen(source: string, openIndex: number): number {
     let depth = 0;
     for (let i = openIndex; i < source.length; i++) {
@@ -293,8 +318,10 @@ export class HydProgram implements HydHashable {
     public hydAttributeLocations: Set<number> = new Set();
     public hydUniforms: Array<ProgramUniformBuffer> = [];
     public hydSamplers: Array<ProgramUniformSampler> = [];
+    public hydSampler2D: Array<ProgramUniformSampler> = [];
     public originUniformStateVersion: number = -1;
     public originVariantStateVersion: number = -1;
+    public staticSamplerOriginVariants: boolean = true;
     public readonly boundAttributeLocations: Map<string, number> = new Map();
     
     // public uniformMergedBuffer: Uint8Array;
@@ -387,22 +414,13 @@ export class HydProgram implements HydHashable {
             // this.fragmentModule = this.device.createShaderModule({code: this.fragmentShader.wgsl_shader, label: fastHashCode(this.fragmentShader.wgsl_shader).toString()});
         }
         console.warn('[HYD] linkProgram:', tmpOutput);
-        const mergedShaderInfo = MergeShaderInfo(shaders);
-        for (const sampler of mergedShaderInfo.samplers) {
-            if (sampler.glsl_type !== "sampler2D") {
-                continue;
-            }
-            const name = samplerFlipYUniformName(sampler.name);
-            if (!mergedShaderInfo.uniforms.some((uniform) => uniform.name === name)) {
-                mergedShaderInfo.uniforms.push({
-                    name,
-                    glsl_type: "float",
-                    wgsl_type: "f32",
-                    internal: true,
-                });
-            }
-        }
-        const code = ShaderInfo2String(mergedShaderInfo);
+        const baseShaderInfo = MergeShaderInfo(shaders);
+        const dynamicShaderInfo = cloneShaderInfo(baseShaderInfo);
+        addSamplerFlipUniforms(dynamicShaderInfo);
+        this.staticSamplerOriginVariants = (globalThis as any).__HYD_STATIC_SAMPLER_ORIGIN_VARIANTS !== false;
+        const runtimeShaderInfo = this.staticSamplerOriginVariants ? baseShaderInfo : dynamicShaderInfo;
+        const code = ShaderInfo2String(runtimeShaderInfo);
+        const dynamicCode = this.staticSamplerOriginVariants ? ShaderInfo2String(dynamicShaderInfo) : code;
         if (this.vertexShader) {
             const vs = code + this.vertexShader.shader_info.wgsl;
             console.debug('[HYD] linkProgram vertex:\n\n', vs);
@@ -418,8 +436,22 @@ export class HydProgram implements HydHashable {
             this._hash += this.vertexModule.label + '|';
         }
         if (this.fragmentShader) {
-            const fs = code + this.fragmentShader.shader_info.wgsl;
-            this.fragmentWgsl = fs;
+            this.fragmentWgsl = code + this.fragmentShader.shader_info.wgsl;
+            let fs = this.fragmentWgsl;
+            if (this.staticSamplerOriginVariants) {
+                const defaultFlips = new Map<string, boolean>();
+                for (const sampler of runtimeShaderInfo.samplers) {
+                    if (sampler.glsl_type === "sampler2D") {
+                        defaultFlips.set(sampler.name, false);
+                    }
+                }
+                fs = specializeSamplerOriginWgsl(this.fragmentWgsl, defaultFlips);
+                if (fs.includes("_hyd_samplerFlipY_")) {
+                    this.staticSamplerOriginVariants = false;
+                    fs = dynamicCode + this.fragmentShader.shader_info.wgsl;
+                    this.fragmentWgsl = fs;
+                }
+            }
             this.samplerOriginVariants.clear();
             this.samplerOriginVariantKey = "";
             console.debug('[HYD] linkProgram fragment:\n\n', fs);
@@ -434,7 +466,7 @@ export class HydProgram implements HydHashable {
             this.fragmentModule = this.device.createShaderModule({code: fs, label: fastHashCode(fs).toString()});
             this._hash += this.fragmentModule.label + '|';
         }
-        const aus = ShaderInfo2HydAus(mergedShaderInfo);
+        const aus = ShaderInfo2HydAus(this.staticSamplerOriginVariants ? runtimeShaderInfo : dynamicShaderInfo);
         this.hydAttributes = aus.attributes;
         for (const attribute of this.hydAttributes) {
             const location = translatedProgram.attributeLocations?.get(attribute.name);
@@ -445,8 +477,10 @@ export class HydProgram implements HydHashable {
         this.hydAttributeLocations = new Set(this.hydAttributes.map((attribute) => attribute.location));
         this.hydUniforms = aus.uniforms;
         this.hydSamplers = aus.samplers;
+        this.hydSampler2D = [];
         for (const sampler of this.hydSamplers) {
             if (sampler.webgl_type === WebGL2RenderingContext.SAMPLER_2D) {
+                this.hydSampler2D.push(sampler);
                 sampler.originFlipUniform = this.hydUniforms.find((uniform) => uniform.name === samplerFlipYUniformName(sampler.name));
             }
         }
@@ -495,13 +529,23 @@ export class HydProgram implements HydHashable {
             this.samplerOriginVariantKey = "";
             return;
         }
-        const key = this.hydSamplers
-            .filter((sampler) => sampler.originFlipUniform)
-            .map((sampler) => `${sampler.name}=${samplerOriginFlips.get(sampler.name) ? 1 : 0}`)
-            .join(",");
-        if (key.length === 0) {
+        if (this.hydSampler2D.length === 0) {
             this.samplerOriginVariantKey = "";
             return;
+        }
+        let key: string;
+        if (this.hydSampler2D.length <= 30) {
+            let bits = 0;
+            for (let i = 0; i < this.hydSampler2D.length; i++) {
+                if (samplerOriginFlips.get(this.hydSampler2D[i].name)) {
+                    bits |= 1 << i;
+                }
+            }
+            key = `b${bits.toString(36)}`;
+        } else {
+            key = this.hydSampler2D
+                .map((sampler) => samplerOriginFlips.get(sampler.name) ? "1" : "0")
+                .join("");
         }
         if (this.samplerOriginVariantKey === key) {
             return;

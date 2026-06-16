@@ -94,6 +94,7 @@ export class HydWebGLStatic {
     private samplerOriginStateVersion: number = 0;
     private gpuViewportDirty: boolean = true;
     private gpuScissorDirty: boolean = true;
+    private lastDrawPbv: any = null;
 
     increaseOk() {
         // // @ts-ignore
@@ -1929,7 +1930,7 @@ ${assignments}
         }
         const samplerOriginFlips = collectFlips ? new Map<string, boolean>() : null;
         for (const sampler of program.hydSamplers) {
-            if (!sampler.originFlipUniform) {
+            if (!collectFlips && !sampler.originFlipUniform) {
                 continue;
             }
             const texture = this.hydGlobalState.getTextureUnitBinding(sampler.textureUnit, sampler.viewDimension);
@@ -1937,7 +1938,7 @@ ${assignments}
             if (samplerOriginFlips) {
                 samplerOriginFlips.set(sampler.name, shouldFlipY);
             }
-            if (sampler.originFlipValue !== shouldFlipY) {
+            if (sampler.originFlipUniform && sampler.originFlipValue !== shouldFlipY) {
                 sampler.originFlipValue = shouldFlipY;
                 program.write_uniform_f1(sampler.originFlipUniform.offset, shouldFlipY ? 1 : 0);
             }
@@ -1957,8 +1958,8 @@ ${assignments}
         // this.renderPassInfo.endPass();
 
         const program = this.hydGlobalState.commonState.currentProgram;
-        const useSamplerOriginVariants = (globalThis as any).__HYD_STATIC_SAMPLER_ORIGIN_VARIANTS !== false;
-        if (program.hydSamplers.length > 0) {
+        const useSamplerOriginVariants = program.staticSamplerOriginVariants;
+        if ((useSamplerOriginVariants ? program.hydSampler2D.length : program.hydSamplers.length) > 0) {
             const samplerOriginFlips = this.updateSamplerOriginUniforms(program, useSamplerOriginVariants);
             if (useSamplerOriginVariants && samplerOriginFlips) {
                 program.applySamplerOriginVariant(samplerOriginFlips);
@@ -1968,28 +1969,38 @@ ${assignments}
         /* set renderPass */
         // const [renderPassHash, renderPassDescriptor] = this.globalState.getRenderPassDescriptor(this._canvasView);
 
-        const {pipelineHash, pipeline, bindGroupHash: _bindGroupHash, bindGroup, vertexBuffersHash, vertexBufferHashes, vertexBuffers, vertexBufferOffsets, renderPassHash, renderBundleEncoderDescriptor} = this.hydGlobalState.getPBV();
-        const passChanged = this.hydRpCache.RpSetDescriptor(renderPassHash, renderBundleEncoderDescriptor, this.bindedGetRenderPassDesc);
-        if (passChanged || this.gpuViewportDirty) {
-            this.setGpuViewport();
-            this.gpuViewportDirty = false;
+        const pbv = this.hydGlobalState.getPBV();
+        const {pipelineHash, pipeline, bindGroup, vertexBuffersHash, vertexBufferHashes, vertexBuffers, vertexBufferOffsets, renderPassHash, renderBundleEncoderDescriptor} = pbv;
+        const canReuseDrawState = pbv === this.lastDrawPbv &&
+            this.hydRpCache.hasActiveRenderPass() &&
+            !this.gpuViewportDirty &&
+            !(this.hydGlobalState.miscState.scissorTest && this.gpuScissorDirty);
+        if (!canReuseDrawState) {
+            const passChanged = this.hydRpCache.RpSetDescriptor(renderPassHash, renderBundleEncoderDescriptor, this.bindedGetRenderPassDesc);
+            if (passChanged || this.gpuViewportDirty) {
+                this.setGpuViewport();
+                this.gpuViewportDirty = false;
+            }
+            if (this.hydGlobalState.miscState.scissorTest && (passChanged || this.gpuScissorDirty)) {
+                this.setGpuScissorRect();
+                this.gpuScissorDirty = false;
+            }
+            if (this.hydGlobalState.stencilState.enabled) {
+                this.hydRpCache.RpSetStencilReference(this.hydGlobalState.stencilState.frontRef);
+            }
+            if (this.hydGlobalState.blendState.enabled && this.blendUsesConstantFactor()) {
+                const color = this.hydGlobalState.blendState.color as ArrayLike<number>;
+                this.hydRpCache.RpSetBlendConstant4(color[0], color[1], color[2], color[3]);
+            }
+            this.hydRpCache.RpSetPipeline(pipelineHash, pipeline);
+            this.hydRpCache.RpSetVertexBuffers(vertexBuffersHash, vertexBufferHashes, vertexBuffers, vertexBufferOffsets);
         }
-        if (this.hydGlobalState.miscState.scissorTest && (passChanged || this.gpuScissorDirty)) {
-            this.setGpuScissorRect();
-            this.gpuScissorDirty = false;
-        }
-        if (this.hydGlobalState.stencilState.enabled) {
-            this.hydRpCache.RpSetStencilReference(this.hydGlobalState.stencilState.frontRef);
-        }
-        if (this.hydGlobalState.blendState.enabled && this.blendUsesConstantFactor()) {
-            const color = this.hydGlobalState.blendState.color as ArrayLike<number>;
-            this.hydRpCache.RpSetBlendConstant4(color[0], color[1], color[2], color[3]);
-        }
-        this.hydRpCache.RpSetPipeline(pipelineHash, pipeline);
         this.hydRpCache.RpSetBindGroup(bindGroup, program.alignedUniformSize > 0 ? this.hydUniOff : null);
-        this.hydRpCache.RpSetVertexBuffers(vertexBuffersHash, vertexBufferHashes, vertexBuffers, vertexBufferOffsets);
+        this.lastDrawPbv = pbv;
 
-        this.hydUniOff = program.setUniform(this.hydUniArr, this.hydUniOff);
+        if (program.alignedUniformSize > 0) {
+            this.hydUniOff = program.setUniform(this.hydUniArr, this.hydUniOff);
+        }
     }
 
     private getTriangleFanIndexBuffer(vertexCount: number): GPUBuffer {

@@ -50,14 +50,19 @@ for (let i = 2; i < process.argv.length; i++) {
 const selectedModes = parseList(argv.get("modes") || "tint,manual");
 const selectedBenchmarks = selectBenchmarks(argv.get("samples") || "aquarium,motionmark,sprites");
 const trials = Number(argv.get("trials") || 3);
+const runOrder = argv.get("order") || "mode-major";
 const maxFrames = Number(argv.get("frames") || 120);
 const warmupFrames = Number(argv.get("warmup-frames") || 30);
 const timeoutMs = Number(argv.get("timeout-ms") || 300000);
 const rmseThreshold = Number(argv.get("rmse-threshold") || 0.02);
 const fpsThreshold = Number(argv.get("threshold") || 0.90);
 const captureScreenshots = argv.get("screenshots") !== "false";
+const captureShaders = argv.get("capture-shaders") === "true";
 const staticSamplerOriginVariants = argv.has("static-sampler-origin-variants")
   ? argv.get("static-sampler-origin-variants") !== "false"
+  : null;
+const optimizeTintWgsl = argv.has("optimize-tint-wgsl")
+  ? argv.get("optimize-tint-wgsl") !== "false"
   : null;
 
 function parseList(value) {
@@ -71,6 +76,46 @@ function selectBenchmarks(value) {
   if (value === "all") return benchmarks;
   const wanted = new Set(parseList(value));
   return benchmarks.filter((benchmark) => wanted.has(benchmark.name));
+}
+
+function makeTrialPlan(benchmark) {
+  const plan = [];
+  if (runOrder === "trial-major" || runOrder === "interleave") {
+    for (let trial = 1; trial <= trials; trial++) {
+      for (const mode of selectedModes) {
+        plan.push({ benchmark, mode, trial });
+      }
+    }
+    return plan;
+  }
+  if (runOrder === "abba") {
+    if (selectedModes.length !== 2) {
+      throw new Error("--order abba requires exactly two modes");
+    }
+    const [a, b] = selectedModes;
+    const sequence = [a, b, b, a];
+    const counts = new Map(selectedModes.map((mode) => [mode, 0]));
+    let step = 0;
+    while (selectedModes.some((mode) => counts.get(mode) < trials)) {
+      const mode = sequence[step++ % sequence.length];
+      const count = counts.get(mode);
+      if (count >= trials) {
+        continue;
+      }
+      counts.set(mode, count + 1);
+      plan.push({ benchmark, mode, trial: count + 1 });
+    }
+    return plan;
+  }
+  if (runOrder !== "mode-major") {
+    throw new Error(`Unsupported --order ${runOrder}`);
+  }
+  for (const mode of selectedModes) {
+    for (let trial = 1; trial <= trials; trial++) {
+      plan.push({ benchmark, mode, trial });
+    }
+  }
+  return plan;
 }
 
 function loadPlaywright() {
@@ -113,6 +158,10 @@ function assertReadable(file) {
   if (!fs.existsSync(file)) {
     throw new Error(`Missing required file: ${file}`);
   }
+}
+
+function sanitizeName(value) {
+  return String(value).replace(/[^A-Za-z0-9_.-]+/g, "_");
 }
 
 function safeStaticPath(root, pathname) {
@@ -277,6 +326,30 @@ function benchmarkInitScript(options) {
 })();`;
 }
 
+async function installShaderCapture(page, shaderCaptures) {
+  await page.exposeBinding("__hydShaderCapture", (_source, record) => {
+    if (record && typeof record === "object") {
+      shaderCaptures.push(record);
+    }
+  });
+  await page.addInitScript(() => {
+    window.__HYD_SHADER_CAPTURE = (record) => {
+      if (typeof window.__hydShaderCapture === "function") {
+        window.__hydShaderCapture(record);
+      }
+    };
+  });
+}
+
+function writeShaderCaptures(mode, benchmark, trial, shaderCaptures) {
+  if (shaderCaptures.length === 0) return null;
+  const dir = path.join(outputRoot, "shader-captures");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${sanitizeName(mode)}-${sanitizeName(benchmark.name)}-trial-${trial}.json`);
+  fs.writeFileSync(file, JSON.stringify(shaderCaptures, null, 2));
+  return file;
+}
+
 function summarizeFrameTimes(frameTimes) {
   const values = frameTimes.filter((value) => Number.isFinite(value) && value > 0);
   if (values.length === 0) {
@@ -366,6 +439,7 @@ async function runTrial(browser, benchmark, mode, trial) {
   const requestFailures = [];
   const badResponses = [];
   const dialogs = [];
+  const shaderCaptures = [];
   const hardFailurePatterns = [
     /validation error/i,
     /shader translation failed/i,
@@ -399,11 +473,22 @@ async function runTrial(browser, benchmark, mode, trial) {
     await dialog.dismiss().catch(() => {});
   });
 
+  if (captureShaders && mode === "tint") {
+    await installShaderCapture(page, shaderCaptures);
+  }
   await page.addInitScript(benchmarkInitScript({ maxFrames, warmupFrames }));
   if (mode === "tint" && staticSamplerOriginVariants !== null) {
     await page.addInitScript((enabled) => {
       window.__HYD_STATIC_SAMPLER_ORIGIN_VARIANTS = enabled;
     }, staticSamplerOriginVariants);
+  }
+  if (mode === "tint" && optimizeTintWgsl !== null) {
+    await page.addInitScript((enabled) => {
+      window.__HYD_TRANSLATOR_OPTIONS = {
+        ...(window.__HYD_TRANSLATOR_OPTIONS || {}),
+        optimizeTintWgsl: enabled,
+      };
+    }, optimizeTintWgsl);
   }
 
   const url = benchmarkURL(baseURL, benchmark, mode, trial);
@@ -428,6 +513,7 @@ async function runTrial(browser, benchmark, mode, trial) {
       pageErrors.push(`screenshot: ${error.message || error}`);
     });
   }
+  const shaderCaptureFile = captureShaders ? writeShaderCaptures(mode, benchmark, trial, shaderCaptures) : null;
 
   await page.close().catch(() => {});
   await context.close().catch(() => {});
@@ -464,6 +550,8 @@ async function runTrial(browser, benchmark, mode, trial) {
     messages,
     screenshot,
     image,
+    shaderCaptureFile,
+    shaderCaptureCount: shaderCaptures.length,
   };
 }
 
@@ -575,7 +663,13 @@ async function launchBrowser() {
   let lastError = null;
   for (const attempt of attempts) {
     try {
-      return await chromium.launch({ ...attempt, args });
+      const browser = await chromium.launch({ ...attempt, args });
+      browser.__gl2gpuLaunchInfo = {
+        executablePath: attempt.executablePath,
+        headless: attempt.headless,
+      };
+      console.log(`[browser] ${attempt.headless ? "headless" : "headed"} ${attempt.executablePath}`);
+      return browser;
     } catch (error) {
       lastError = error;
       console.warn(`[launch] ${attempt.executablePath} ${attempt.headless ? "headless" : "headed"} failed: ${error.message || error}`);
@@ -614,18 +708,17 @@ async function main() {
   fs.mkdirSync(outputRoot, { recursive: true });
 
   const browser = await launchBrowser();
+  const browserInfo = browser.__gl2gpuLaunchInfo || {};
   const results = [];
   try {
     for (const benchmark of selectedBenchmarks) {
-      for (const mode of selectedModes) {
-        for (let trial = 1; trial <= trials; trial++) {
-          console.log(`[${mode}] ${benchmark.name} trial ${trial}/${trials} objects=${benchmarkObjects(benchmark)} frames=${maxFrames} warmup=${warmupFrames}`);
-          const result = await runTrial(browser, benchmark, mode, trial);
-          results.push(result);
-          const fps = Number.isFinite(result.frameSummary.fps) ? result.frameSummary.fps.toFixed(3) : "n/a";
-          const frameMs = Number.isFinite(result.frameSummary.medianMs) ? result.frameSummary.medianMs.toFixed(3) : "n/a";
-          console.log(`  fps=${fps} medianFrameMs=${frameMs} frames=${result.frameSummary.count} shaderDbRequests=${result.shaderDbRequests} hardFailures=${result.hardFailures.length}`);
-        }
+      for (const item of makeTrialPlan(benchmark)) {
+        console.log(`[${item.mode}] ${item.benchmark.name} trial ${item.trial}/${trials} objects=${benchmarkObjects(item.benchmark)} frames=${maxFrames} warmup=${warmupFrames}`);
+        const result = await runTrial(browser, item.benchmark, item.mode, item.trial);
+        results.push(result);
+        const fps = Number.isFinite(result.frameSummary.fps) ? result.frameSummary.fps.toFixed(3) : "n/a";
+        const frameMs = Number.isFinite(result.frameSummary.medianMs) ? result.frameSummary.medianMs.toFixed(3) : "n/a";
+        console.log(`  fps=${fps} medianFrameMs=${frameMs} frames=${result.frameSummary.count} shaderDbRequests=${result.shaderDbRequests} hardFailures=${result.hardFailures.length}`);
       }
     }
   } finally {
@@ -643,10 +736,14 @@ async function main() {
       webglRoute: benchmark.webglRoute,
       webgpuRoute: benchmark.webgpuRoute,
     })),
+    runOrder,
     trials,
     maxFrames,
     warmupFrames,
+    browser: browserInfo,
+    captureShaders,
     staticSamplerOriginVariants,
+    optimizeTintWgsl,
     fpsThreshold,
     rmseThreshold,
     summary,

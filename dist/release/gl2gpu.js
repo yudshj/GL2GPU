@@ -246,6 +246,8 @@ class GPURenderBundleTransition {
     onceHash = null;
     onceNext;
     bindGroupOffset = null;
+    onceNumericPrefix = null;
+    onceNumericHash = NaN;
     constructor(opName, opArgs, father) {
         this.opName = opName;
         this.opArgs = opArgs;
@@ -279,6 +281,14 @@ class GPURenderBundleTransition {
         }
         return this.onceNext = transition;
     }
+    gotoNumeric(prefix, numericHash, opName, ...opArgs) {
+        if (this.onceNumericPrefix === prefix && this.onceNumericHash === numericHash) {
+            return this.onceNext;
+        }
+        this.onceNumericPrefix = prefix;
+        this.onceNumericHash = numericHash;
+        return this.goto(prefix + numericHash, opName, ...opArgs);
+    }
 }
 class HydRenderPassEncoder {
     static initBundleCache = new Map();
@@ -308,10 +318,10 @@ class HydRenderPassEncoder {
         this.bundleCache = this.bundleCache.goto(opHash, 'setIndexBuffer', buffer, format);
     }
     draw(vertexCount, instanceCount, firstVertex, firstInstance) {
-        this.bundleCache = this.bundleCache.goto('d' + (vertexCount * 839 ^ instanceCount * 853 ^ firstVertex * 857 ^ firstInstance * 859), 'draw', vertexCount, instanceCount, firstVertex, firstInstance);
+        this.bundleCache = this.bundleCache.gotoNumeric('d', vertexCount * 839 ^ instanceCount * 853 ^ firstVertex * 857 ^ firstInstance * 859, 'draw', vertexCount, instanceCount, firstVertex, firstInstance);
     }
     drawIndexed(indexCount, instanceCount, firstIndex, baseVertex, firstInstance) {
-        this.bundleCache = this.bundleCache.goto('i' + (indexCount * 977 ^ instanceCount * 983 ^ firstIndex * 991 ^ baseVertex * 997 ^ firstInstance * 1009), 'drawIndexed', indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
+        this.bundleCache = this.bundleCache.gotoNumeric('i', indexCount * 977 ^ instanceCount * 983 ^ firstIndex * 991 ^ baseVertex * 997 ^ firstInstance * 1009, 'drawIndexed', indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
     }
     generateBundle() {
         if (!this.bundleCache.renderBundle) {
@@ -1748,7 +1758,7 @@ class HydGlobalState {
     }
     getPBV() {
         const [vertexBufferHashes, vertexBuffers, vertexBufferOffsets, vertexBufferLayoutHash, vertexBufferLayout] = this.getVertexBuffer();
-        const [bindGroupHash, bindGroupEntries, bindGroupLayoutHash, bindGroupLayoutEntries] = this.getBindGroup();
+        const [bindGroupHash, bindGroupEntries, bindGroupLayoutHash, bindGroupLayoutEntries, bindGroupTextures] = this.getBindGroup();
         const pipelineLayoutHash = bindGroupLayoutHash;
         const [_pipelineHash, pipelineDescriptor] = this.getPipelineDescriptor(this.topology, vertexBufferLayout);
         const pipelineHash = _pipelineHash + '|' + bindGroupLayoutHash + '|' + vertexBufferLayoutHash;
@@ -1783,6 +1793,17 @@ class HydGlobalState {
                 label: "bg" + this.__bindGroupCount++,
             });
             this._bindGroupCache.set(bindGroupHash, bindGroup);
+            for (const textureAttachment of bindGroupTextures) {
+                textureAttachment.onDestroy.push(() => {
+                    const cachedBindGroup = this._bindGroupCache.get(bindGroupHash);
+                    if (cachedBindGroup) {
+                        if (typeof cachedBindGroup.onDestroy === 'function') {
+                            cachedBindGroup.onDestroy();
+                        }
+                        this._bindGroupCache.delete(bindGroupHash);
+                    }
+                });
+            }
         }
         const vertexBuffersHash = (0,dist/* default */.Ay)(vertexBufferHashes.join('%')).toString();
         return {
@@ -1817,6 +1838,7 @@ class HydGlobalState {
         const program = this.commonState.currentProgram;
         const bindGroupEntry = [];
         const bindGroupLayoutEntry = [];
+        const textureAttachments = [];
         if (program.alignedUniformSize > 0) {
             bindGroupEntry.push({
                 binding: 0,
@@ -1840,6 +1862,7 @@ class HydGlobalState {
         let bindGroupLayoutKey = '0-du-' + program.alignedUniformSize;
         for (const sampler of program.hydSamplers) {
             const textureAttachment = this.getSamplerTexture(sampler.textureUnit, sampler.viewDimension);
+            textureAttachments.push(textureAttachment);
             bindGroupLayoutEntry.push({
                 binding: bindGroupLayoutEntry.length,
                 visibility: GPUShaderStage.FRAGMENT,
@@ -1867,16 +1890,7 @@ class HydGlobalState {
             });
             bindGroupKey += textureAttachment.hash;
         }
-        for (const sampler of program.hydSamplers) {
-            const textureAttachment = this.getSamplerTexture(sampler.textureUnit, sampler.viewDimension);
-            textureAttachment.onDestroy.push(() => {
-                if (this._bindGroupCache.has(bindGroupKey)) {
-                    this._bindGroupCache.get(bindGroupKey).onDestroy();
-                    this._bindGroupCache.delete(bindGroupKey);
-                }
-            });
-        }
-        return [(0,dist/* default */.Ay)(bindGroupKey).toString(), bindGroupEntry, bindGroupLayoutKey, bindGroupLayoutEntry];
+        return [(0,dist/* default */.Ay)(bindGroupKey).toString(), bindGroupEntry, bindGroupLayoutKey, bindGroupLayoutEntry, textureAttachments];
     }
     getVertexBuffer() {
         const bufferAttributeMap = new Map();
@@ -2012,14 +2026,15 @@ class HydGlobalStateHashed extends HydGlobalState {
             + this.topology;
     }
     getPBV() {
-        if (!this._hashPbvCur.generated) {
-            Object.assign(this._hashPbvCur, super.getPBV());
-            this._hashPbvCur.generated = true;
-            this._hashPbvCur.bindGroup.onDestroy = () => {
-                this._hashPbvCur.generated = false;
+        const pbv = this._hashPbvCur;
+        if (!pbv.generated) {
+            Object.assign(pbv, super.getPBV());
+            pbv.generated = true;
+            pbv.bindGroup.onDestroy = () => {
+                pbv.generated = false;
             };
         }
-        return this._hashPbvCur;
+        return pbv;
     }
 }
 
@@ -2471,6 +2486,29 @@ class ProgramUniformSampler {
         this.viewDimension = viewDimension;
     }
 }
+function cloneShaderInfo(info) {
+    return {
+        attributes: info.attributes.map((attribute) => ({ ...attribute })),
+        uniforms: info.uniforms.map((uniform) => ({ ...uniform })),
+        samplers: info.samplers.map((sampler) => ({ ...sampler })),
+    };
+}
+function addSamplerFlipUniforms(info) {
+    for (const sampler of info.samplers) {
+        if (sampler.glsl_type !== "sampler2D") {
+            continue;
+        }
+        const name = samplerFlipYUniformName(sampler.name);
+        if (!info.uniforms.some((uniform) => uniform.name === name)) {
+            info.uniforms.push({
+                name,
+                glsl_type: "float",
+                wgsl_type: "f32",
+                internal: true,
+            });
+        }
+    }
+}
 function findMatchingParen(source, openIndex) {
     let depth = 0;
     for (let i = openIndex; i < source.length; i++) {
@@ -2627,8 +2665,10 @@ class HydProgram {
     hydAttributeLocations = new Set();
     hydUniforms = [];
     hydSamplers = [];
+    hydSampler2D = [];
     originUniformStateVersion = -1;
     originVariantStateVersion = -1;
+    staticSamplerOriginVariants = true;
     boundAttributeLocations = new Map();
     activeUniform;
     activeUniformFloat32;
@@ -2697,22 +2737,13 @@ class HydProgram {
             shaders.push(this.fragmentShader.shader_info);
         }
         console.warn('[HYD] linkProgram:', tmpOutput);
-        const mergedShaderInfo = MergeShaderInfo(shaders);
-        for (const sampler of mergedShaderInfo.samplers) {
-            if (sampler.glsl_type !== "sampler2D") {
-                continue;
-            }
-            const name = samplerFlipYUniformName(sampler.name);
-            if (!mergedShaderInfo.uniforms.some((uniform) => uniform.name === name)) {
-                mergedShaderInfo.uniforms.push({
-                    name,
-                    glsl_type: "float",
-                    wgsl_type: "f32",
-                    internal: true,
-                });
-            }
-        }
-        const code = ShaderInfo2String(mergedShaderInfo);
+        const baseShaderInfo = MergeShaderInfo(shaders);
+        const dynamicShaderInfo = cloneShaderInfo(baseShaderInfo);
+        addSamplerFlipUniforms(dynamicShaderInfo);
+        this.staticSamplerOriginVariants = globalThis.__HYD_STATIC_SAMPLER_ORIGIN_VARIANTS !== false;
+        const runtimeShaderInfo = this.staticSamplerOriginVariants ? baseShaderInfo : dynamicShaderInfo;
+        const code = ShaderInfo2String(runtimeShaderInfo);
+        const dynamicCode = this.staticSamplerOriginVariants ? ShaderInfo2String(dynamicShaderInfo) : code;
         if (this.vertexShader) {
             const vs = code + this.vertexShader.shader_info.wgsl;
             console.debug('[HYD] linkProgram vertex:\n\n', vs);
@@ -2728,8 +2759,22 @@ class HydProgram {
             this._hash += this.vertexModule.label + '|';
         }
         if (this.fragmentShader) {
-            const fs = code + this.fragmentShader.shader_info.wgsl;
-            this.fragmentWgsl = fs;
+            this.fragmentWgsl = code + this.fragmentShader.shader_info.wgsl;
+            let fs = this.fragmentWgsl;
+            if (this.staticSamplerOriginVariants) {
+                const defaultFlips = new Map();
+                for (const sampler of runtimeShaderInfo.samplers) {
+                    if (sampler.glsl_type === "sampler2D") {
+                        defaultFlips.set(sampler.name, false);
+                    }
+                }
+                fs = specializeSamplerOriginWgsl(this.fragmentWgsl, defaultFlips);
+                if (fs.includes("_hyd_samplerFlipY_")) {
+                    this.staticSamplerOriginVariants = false;
+                    fs = dynamicCode + this.fragmentShader.shader_info.wgsl;
+                    this.fragmentWgsl = fs;
+                }
+            }
             this.samplerOriginVariants.clear();
             this.samplerOriginVariantKey = "";
             console.debug('[HYD] linkProgram fragment:\n\n', fs);
@@ -2744,7 +2789,7 @@ class HydProgram {
             this.fragmentModule = this.device.createShaderModule({ code: fs, label: (0,dist/* default */.Ay)(fs).toString() });
             this._hash += this.fragmentModule.label + '|';
         }
-        const aus = ShaderInfo2HydAus(mergedShaderInfo);
+        const aus = ShaderInfo2HydAus(this.staticSamplerOriginVariants ? runtimeShaderInfo : dynamicShaderInfo);
         this.hydAttributes = aus.attributes;
         for (const attribute of this.hydAttributes) {
             const location = translatedProgram.attributeLocations?.get(attribute.name);
@@ -2755,8 +2800,10 @@ class HydProgram {
         this.hydAttributeLocations = new Set(this.hydAttributes.map((attribute) => attribute.location));
         this.hydUniforms = aus.uniforms;
         this.hydSamplers = aus.samplers;
+        this.hydSampler2D = [];
         for (const sampler of this.hydSamplers) {
             if (sampler.webgl_type === WebGL2RenderingContext.SAMPLER_2D) {
+                this.hydSampler2D.push(sampler);
                 sampler.originFlipUniform = this.hydUniforms.find((uniform) => uniform.name === samplerFlipYUniformName(sampler.name));
             }
         }
@@ -2789,13 +2836,24 @@ class HydProgram {
             this.samplerOriginVariantKey = "";
             return;
         }
-        const key = this.hydSamplers
-            .filter((sampler) => sampler.originFlipUniform)
-            .map((sampler) => `${sampler.name}=${samplerOriginFlips.get(sampler.name) ? 1 : 0}`)
-            .join(",");
-        if (key.length === 0) {
+        if (this.hydSampler2D.length === 0) {
             this.samplerOriginVariantKey = "";
             return;
+        }
+        let key;
+        if (this.hydSampler2D.length <= 30) {
+            let bits = 0;
+            for (let i = 0; i < this.hydSampler2D.length; i++) {
+                if (samplerOriginFlips.get(this.hydSampler2D[i].name)) {
+                    bits |= 1 << i;
+                }
+            }
+            key = `b${bits.toString(36)}`;
+        }
+        else {
+            key = this.hydSampler2D
+                .map((sampler) => samplerOriginFlips.get(sampler.name) ? "1" : "0")
+                .join("");
         }
         if (this.samplerOriginVariantKey === key) {
             return;
@@ -3503,6 +3561,7 @@ class HydWebGLStatic {
     samplerOriginStateVersion = 0;
     gpuViewportDirty = true;
     gpuScissorDirty = true;
+    lastDrawPbv = null;
     increaseOk() {
     }
     decreaseOk() {
@@ -5160,7 +5219,7 @@ ${assignments}
         }
         const samplerOriginFlips = collectFlips ? new Map() : null;
         for (const sampler of program.hydSamplers) {
-            if (!sampler.originFlipUniform) {
+            if (!collectFlips && !sampler.originFlipUniform) {
                 continue;
             }
             const texture = this.hydGlobalState.getTextureUnitBinding(sampler.textureUnit, sampler.viewDimension);
@@ -5168,7 +5227,7 @@ ${assignments}
             if (samplerOriginFlips) {
                 samplerOriginFlips.set(sampler.name, shouldFlipY);
             }
-            if (sampler.originFlipValue !== shouldFlipY) {
+            if (sampler.originFlipUniform && sampler.originFlipValue !== shouldFlipY) {
                 sampler.originFlipValue = shouldFlipY;
                 program.write_uniform_f1(sampler.originFlipUniform.offset, shouldFlipY ? 1 : 0);
             }
@@ -5186,34 +5245,44 @@ ${assignments}
             ensureAutoFrame();
         }
         const program = this.hydGlobalState.commonState.currentProgram;
-        const useSamplerOriginVariants = globalThis.__HYD_STATIC_SAMPLER_ORIGIN_VARIANTS !== false;
-        if (program.hydSamplers.length > 0) {
+        const useSamplerOriginVariants = program.staticSamplerOriginVariants;
+        if ((useSamplerOriginVariants ? program.hydSampler2D.length : program.hydSamplers.length) > 0) {
             const samplerOriginFlips = this.updateSamplerOriginUniforms(program, useSamplerOriginVariants);
             if (useSamplerOriginVariants && samplerOriginFlips) {
                 program.applySamplerOriginVariant(samplerOriginFlips);
             }
         }
-        const { pipelineHash, pipeline, bindGroupHash: _bindGroupHash, bindGroup, vertexBuffersHash, vertexBufferHashes, vertexBuffers, vertexBufferOffsets, renderPassHash, renderBundleEncoderDescriptor } = this.hydGlobalState.getPBV();
-        const passChanged = this.hydRpCache.RpSetDescriptor(renderPassHash, renderBundleEncoderDescriptor, this.bindedGetRenderPassDesc);
-        if (passChanged || this.gpuViewportDirty) {
-            this.setGpuViewport();
-            this.gpuViewportDirty = false;
+        const pbv = this.hydGlobalState.getPBV();
+        const { pipelineHash, pipeline, bindGroup, vertexBuffersHash, vertexBufferHashes, vertexBuffers, vertexBufferOffsets, renderPassHash, renderBundleEncoderDescriptor } = pbv;
+        const canReuseDrawState = pbv === this.lastDrawPbv &&
+            this.hydRpCache.hasActiveRenderPass() &&
+            !this.gpuViewportDirty &&
+            !(this.hydGlobalState.miscState.scissorTest && this.gpuScissorDirty);
+        if (!canReuseDrawState) {
+            const passChanged = this.hydRpCache.RpSetDescriptor(renderPassHash, renderBundleEncoderDescriptor, this.bindedGetRenderPassDesc);
+            if (passChanged || this.gpuViewportDirty) {
+                this.setGpuViewport();
+                this.gpuViewportDirty = false;
+            }
+            if (this.hydGlobalState.miscState.scissorTest && (passChanged || this.gpuScissorDirty)) {
+                this.setGpuScissorRect();
+                this.gpuScissorDirty = false;
+            }
+            if (this.hydGlobalState.stencilState.enabled) {
+                this.hydRpCache.RpSetStencilReference(this.hydGlobalState.stencilState.frontRef);
+            }
+            if (this.hydGlobalState.blendState.enabled && this.blendUsesConstantFactor()) {
+                const color = this.hydGlobalState.blendState.color;
+                this.hydRpCache.RpSetBlendConstant4(color[0], color[1], color[2], color[3]);
+            }
+            this.hydRpCache.RpSetPipeline(pipelineHash, pipeline);
+            this.hydRpCache.RpSetVertexBuffers(vertexBuffersHash, vertexBufferHashes, vertexBuffers, vertexBufferOffsets);
         }
-        if (this.hydGlobalState.miscState.scissorTest && (passChanged || this.gpuScissorDirty)) {
-            this.setGpuScissorRect();
-            this.gpuScissorDirty = false;
-        }
-        if (this.hydGlobalState.stencilState.enabled) {
-            this.hydRpCache.RpSetStencilReference(this.hydGlobalState.stencilState.frontRef);
-        }
-        if (this.hydGlobalState.blendState.enabled && this.blendUsesConstantFactor()) {
-            const color = this.hydGlobalState.blendState.color;
-            this.hydRpCache.RpSetBlendConstant4(color[0], color[1], color[2], color[3]);
-        }
-        this.hydRpCache.RpSetPipeline(pipelineHash, pipeline);
         this.hydRpCache.RpSetBindGroup(bindGroup, program.alignedUniformSize > 0 ? this.hydUniOff : null);
-        this.hydRpCache.RpSetVertexBuffers(vertexBuffersHash, vertexBufferHashes, vertexBuffers, vertexBufferOffsets);
-        this.hydUniOff = program.setUniform(this.hydUniArr, this.hydUniOff);
+        this.lastDrawPbv = pbv;
+        if (program.alignedUniformSize > 0) {
+            this.hydUniOff = program.setUniform(this.hydUniArr, this.hydUniOff);
+        }
     }
     getTriangleFanIndexBuffer(vertexCount) {
         let buffer = this.triangleFanIndexBuffers.get(vertexCount);
@@ -6046,8 +6115,8 @@ function lowerEntryWrapper(source) {
         }
     }
     for (const name of outputMap.keys()) {
-        if (assignmentCount(helper.body, name) !== 1) {
-            return { wgsl: source, loweredPrivateVars: 0, skipped: "output-private-not-single-writer" };
+        if (assignmentCount(helper.body, name) + fieldOrIndexAssignmentCount(helper.body, name) < 1) {
+            return { wgsl: source, loweredPrivateVars: 0, skipped: "output-private-never-written" };
         }
     }
     const replacements = new Map([...inputMap, ...outputMap]);
@@ -7607,7 +7676,11 @@ async function hydGetContext(element, _shader_info_url, arg0, arg1, translatorOp
     let [contextType, contextAttributes] = arg0;
     contextAttributes = normalizeContextAttributes(contextAttributes || {});
     let [uniform_size, replay_delay] = arg1;
-    const shaderTranslator = await ShaderTranslator.create(translatorOptions);
+    const defaultTranslatorOptions = (globalThis.__HYD_TRANSLATOR_OPTIONS || {});
+    const shaderTranslator = await ShaderTranslator.create({
+        ...defaultTranslatorOptions,
+        ...translatorOptions,
+    });
     if (!hydWebGLTypes.includes(contextType)) {
         throw new Error("Invalid context type");
     }

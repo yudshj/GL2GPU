@@ -380,8 +380,8 @@ function lowerEntryWrapper(source: string): EntryLowering {
         }
     }
     for (const name of outputMap.keys()) {
-        if (assignmentCount(helper.body, name) !== 1) {
-            return { wgsl: source, loweredPrivateVars: 0, skipped: "output-private-not-single-writer" };
+        if (assignmentCount(helper.body, name) + fieldOrIndexAssignmentCount(helper.body, name) < 1) {
+            return { wgsl: source, loweredPrivateVars: 0, skipped: "output-private-never-written" };
         }
     }
 
