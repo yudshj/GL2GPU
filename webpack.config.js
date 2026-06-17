@@ -1,4 +1,5 @@
 const path = require('path');
+const CopyPlugin = require("copy-webpack-plugin");
 // const TerserPlugin = require("terser-webpack-plugin");
 
 const config = {
@@ -36,6 +37,14 @@ const config = {
   resolve: {
     extensions: ['.tsx', '.ts', '.js', '.vs', '.fs', '.glsl', '.wgsl'],
   },
+  plugins: [
+    new CopyPlugin({
+      patterns: [
+        { from: 'src/vendor/glslang/glslang.wasm', to: 'glslang.wasm' },
+        { from: 'src/vendor/tint-wasm/tint_wasm.wasm', to: 'tint_wasm.wasm', noErrorOnMissing: true },
+      ],
+    }),
+  ],
 };
 
 const d_config = Object.assign({}, config, {

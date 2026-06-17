@@ -8,6 +8,7 @@
     "@types/node": "^20.3.0",
     "@typescript/lib-dom": "npm:@types/web@^0.0.99",
     "@webgpu/types": "^0.1.32",
+    "copy-webpack-plugin": "^12.0.2",
     "terser-webpack-plugin": "^5.3.9",
     "ts-loader": "^9.4.3",
     "ts-shader-loader": "^2.0.2",
@@ -16,7 +17,16 @@
     "webpack-cli": "^5.1.4"
   },
   "scripts": {
-    "setup": "yarn install; yarn global add typescript ts-node"
+    "setup": "yarn install; yarn global add typescript ts-node",
+    "build": "webpack --config webpack.config.js",
+    "typecheck": "tsc --noEmit",
+    "test:shader": "ts-node --compiler-options '{\"module\":\"commonjs\"}' test/shaders/shaderTranslator.test.ts",
+    "test:texture": "ts-node --compiler-options '{\"module\":\"commonjs\"}' test/texture/textureUpload.test.ts && ts-node --compiler-options '{\"module\":\"commonjs\"}' test/texture/webglApiState.test.ts",
+    "test:webglsamples": "node tools/webglsamples-harness.js --samples all",
+    "benchmark:paper": "node tools/paper-benchmark-harness.js",
+    "quality:render": "node tools/render-quality-harness.js",
+    "benchmark:gl2gpu-demo": "node tools/gl2gpu-demo-benchmark-harness.js",
+    "report:tint": "node tools/generate-gl2gpu-tint-report.js"
   },
   "dependencies": {
     "@types/chrome": "^0.0.239",
