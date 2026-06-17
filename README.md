@@ -44,9 +44,58 @@ You can integrate GL2GPU into your web application as a standalone JavaScript mo
 
 > Note: WebGPU support requires recent versions of Chrome (v114+) with WebGPU enabled.
 
+## Runtime Shader Translation
+
+GL2GPU now translates shaders at runtime and does not load the legacy shader
+database or fall back to hand-written WGSL shader entries:
+
+1. WebGL GLSL is validated by the native WebGL compiler.
+2. `@webgpu/glslang@0.0.15` compiles GLSL to SPIR-V.
+3. the vendored Tint WASM bridge converts SPIR-V to WGSL.
+4. GL2GPU normalizes the generated WGSL to its existing uniform/sampler layout.
+
+The public API keeps the old second argument position for source compatibility,
+but the shader-info URL is ignored:
+
+```ts
+await hydGetContext(canvas, null, ["webgl2", attrs], [1 << 18, 0]);
+```
+
+To rebuild the Tint bridge, sync a recent Tint checkout and run:
+
+```sh
+PATH="/Users/hanyd/Code/depot_tools:$PATH" \
+TINT_SRC=/Users/hanyd/Code/tint \
+tools/tint-wasm/build.sh
+```
+
+The script expects Emscripten, CMake, Ninja, and `gclient`. It commits generated
+`src/vendor/tint-wasm/tint_wasm.js` and `src/vendor/tint-wasm/tint_wasm.wasm`,
+so normal GL2GPU users do not need a native toolchain.
+
 ------
 
 ## 🧪 Benchmarks
+
+Runtime Tint performance can be compared with the pre-Tint hand-written shader
+baseline without enabling `shaders_info.json` in production:
+
+```sh
+npm run build
+npm run benchmark:paper -- \
+  --modes tint,manual \
+  --samples aquarium,motionmark,sprites,sprites-100k \
+  --trials 3 \
+  --frames 100 \
+  --headless true
+```
+
+The harness serves the current `dist/webgpu` demos, uses current
+`dist/release/gl2gpu.js` for `tint`, and uses `3dec70b:dist/js/gl2gpu.js` plus
+`3dec70b:dist/js/shaders_info.json` for the manual oracle unless
+`--manual-root /path/to/baseline` is supplied. Results, screenshots, RMSE, FPS
+ratios, shader DB request counts, and optimizer stats are written to
+`output/paper-benchmark/results.json`.
 
 | Benchmark   | Avg. Frame Time Reduction |
 | ----------- | ------------------------- |
@@ -98,4 +147,3 @@ If you use GL2GPU in your research, please cite:
    (Peking University)
 
 ------
-
