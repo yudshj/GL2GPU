@@ -49,6 +49,12 @@ export const enumToViewDimension: Map<GLenum, GPUTextureViewDimension> = new Map
     [WebGL2RenderingContext.TEXTURE_2D_ARRAY, '2d-array'],
     [WebGL2RenderingContext.TEXTURE_3D, '3d'],
     [WebGL2RenderingContext.TEXTURE_CUBE_MAP, 'cube'],
+    [WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X, 'cube'],
+    [WebGL2RenderingContext.TEXTURE_CUBE_MAP_NEGATIVE_X, 'cube'],
+    [WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_Y, 'cube'],
+    [WebGL2RenderingContext.TEXTURE_CUBE_MAP_NEGATIVE_Y, 'cube'],
+    [WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_Z, 'cube'],
+    [WebGL2RenderingContext.TEXTURE_CUBE_MAP_NEGATIVE_Z, 'cube'],
 ]);
 export const enumToConstant: Map<number, any> = new Map([
     [WebGL2RenderingContext.MAX_COMBINED_TEXTURE_IMAGE_UNITS, 16],
@@ -113,9 +119,21 @@ export const indexEnumToBytes: Map<GLenum, number> = new Map([
 // ]);
 export const enum2PT: GPUPrimitiveTopology[] = ["point-list", "line-list", undefined, "line-strip", "triangle-list", "triangle-strip", undefined];
 export const enumToBlendFactors: Map<GLenum, GPUBlendFactor> = new Map([
+    [WebGL2RenderingContext.ZERO, 'zero'],
     [WebGL2RenderingContext.ONE, 'one'],
+    [WebGL2RenderingContext.SRC_COLOR, 'src'],
+    [WebGL2RenderingContext.ONE_MINUS_SRC_COLOR, 'one-minus-src'],
+    [WebGL2RenderingContext.DST_COLOR, 'dst'],
+    [WebGL2RenderingContext.ONE_MINUS_DST_COLOR, 'one-minus-dst'],
     [WebGL2RenderingContext.SRC_ALPHA, 'src-alpha'],
     [WebGL2RenderingContext.ONE_MINUS_SRC_ALPHA, 'one-minus-src-alpha'],
+    [WebGL2RenderingContext.DST_ALPHA, 'dst-alpha'],
+    [WebGL2RenderingContext.ONE_MINUS_DST_ALPHA, 'one-minus-dst-alpha'],
+    [WebGL2RenderingContext.CONSTANT_COLOR, 'constant'],
+    [WebGL2RenderingContext.ONE_MINUS_CONSTANT_COLOR, 'one-minus-constant'],
+    [WebGL2RenderingContext.CONSTANT_ALPHA, 'constant'],
+    [WebGL2RenderingContext.ONE_MINUS_CONSTANT_ALPHA, 'one-minus-constant'],
+    [WebGL2RenderingContext.SRC_ALPHA_SATURATE, 'src-alpha-saturated'],
 ]);
 export const enumToCompareFunction: Map<GLenum, GPUCompareFunction> = new Map([
     [WebGL2RenderingContext.NEVER, 'never'],

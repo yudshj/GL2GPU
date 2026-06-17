@@ -12,7 +12,9 @@ class GPURenderBundleTransition {
 
     public onceHash: string | GPUBindGroup = null;
     public onceNext: GPURenderBundleTransition;
-    public bindGroupOffset: number = -1;
+    public bindGroupOffset: number | null = null;
+    public onceNumericPrefix: string = null;
+    public onceNumericHash: number = NaN;
 
     constructor(opName: GpuOperators, opArgs: any[], father: GPURenderBundleTransition) {
         this.opName = opName;
@@ -34,13 +36,13 @@ class GPURenderBundleTransition {
         return this.onceNext = transition;
     }
 
-    public gotoBindGroup(bindGroup: GPUBindGroup, do0: number) {
+    public gotoBindGroup(bindGroup: GPUBindGroup, do0: number | null) {
         if (this.bindGroupOffset === do0 && this.onceHash == bindGroup) {
             return this.onceNext;
         }
         this.onceHash = bindGroup;
         this.bindGroupOffset = do0;
-        const hash = 'b0' + bindGroup.label + do0;
+        const hash = 'b0' + bindGroup.label + (do0 === null ? 'none' : do0);
         const transition = this.jumpTable.get(hash);
         if (!transition) {
             const newTransition = new GPURenderBundleTransition('setBindGroup', [0, bindGroup, do0], this);
@@ -48,6 +50,15 @@ class GPURenderBundleTransition {
             return this.onceNext = newTransition;
         }
         return this.onceNext = transition;
+    }
+
+    public gotoNumeric(prefix: string, numericHash: number, opName: GpuOperators, ...opArgs: any[]): GPURenderBundleTransition {
+        if (this.onceNumericPrefix === prefix && this.onceNumericHash === numericHash) {
+            return this.onceNext;
+        }
+        this.onceNumericPrefix = prefix;
+        this.onceNumericHash = numericHash;
+        return this.goto(prefix + numericHash, opName, ...opArgs);
     }
 }
 
@@ -75,7 +86,7 @@ class HydRenderPassEncoder {
             pipeline
         );
     }
-    public setBindGroup(bindGroup: GPUBindGroup, do0: number) {
+    public setBindGroup(bindGroup: GPUBindGroup, do0: number | null) {
         this.bundleCache = this.bundleCache.gotoBindGroup(bindGroup, do0);
     }
     public setVertexBuffer(opHash: string, slot: number, buffer: GPUBuffer, offset: number) {
@@ -93,10 +104,10 @@ class HydRenderPassEncoder {
         );
     }
     public draw(vertexCount: number, instanceCount: number, firstVertex: number, firstInstance: number) {
-        this.bundleCache = this.bundleCache.goto('d' + (vertexCount*839 ^ instanceCount*853 ^ firstVertex*857 ^ firstInstance*859), 'draw', vertexCount, instanceCount, firstVertex, firstInstance);
+        this.bundleCache = this.bundleCache.gotoNumeric('d', vertexCount*839 ^ instanceCount*853 ^ firstVertex*857 ^ firstInstance*859, 'draw', vertexCount, instanceCount, firstVertex, firstInstance);
     }
     public drawIndexed(indexCount: number, instanceCount: number, firstIndex: number, baseVertex: number, firstInstance: number) {
-        this.bundleCache = this.bundleCache.goto('i' + (indexCount*977 ^ instanceCount*983 ^ firstIndex*991 ^ baseVertex*997 ^ firstInstance*1009), 'drawIndexed', indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
+        this.bundleCache = this.bundleCache.gotoNumeric('i', indexCount*977 ^ instanceCount*983 ^ firstIndex*991 ^ baseVertex*997 ^ firstInstance*1009, 'drawIndexed', indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
     }
 
     public generateBundle() {
@@ -113,8 +124,12 @@ class HydRenderPassEncoder {
             for (let i = operators.length - 2; i >= 0; i--) {
                 const [opName, opArgs] = operators[i];
                 if (opName === 'setBindGroup') {
-                    tmp[0] = opArgs[2];
-                    bundleEncoder.setBindGroup(opArgs[0], opArgs[1], tmp);
+                    if (opArgs[2] === null || opArgs[2] === undefined) {
+                        bundleEncoder.setBindGroup(opArgs[0], opArgs[1]);
+                    } else {
+                        tmp[0] = opArgs[2];
+                        bundleEncoder.setBindGroup(opArgs[0], opArgs[1], tmp);
+                    }
                 } else {
                     bundleEncoder[opName].apply(bundleEncoder, opArgs);
                 }
@@ -140,7 +155,7 @@ export class HydRenderPassCache {
     private viewPortInfo: [number, number, number, number, number, number] = [0, 0, 0, 0, 0, 0];
     private scissorInfo: [number, number, number, number] = [0, 0, 0, 0];
     private stencilReferenceInfo: number = 0;
-    private colorInfo: Iterable<number> = [0, 0, 0, 0];
+    private colorInfo: [number, number, number, number] = [0, 0, 0, 0];
     private __commandEncoderCount = 0;
     private bundleNum: number[];
 
@@ -209,21 +224,24 @@ export class HydRenderPassCache {
     //     }
     // }
 
-    // public RpSetStencilReference(reference: number) {
-    //     if (this.stencilReferenceInfo !== reference) {
-    //         this.stencilReferenceInfo = reference;
-    //         this.renderPassEncoder.setStencilReference(reference);
-    //     }
-    // }
+    public RpSetStencilReference(reference: number) {
+        if (this.stencilReferenceInfo !== reference) {
+            this.stencilReferenceInfo = reference;
+            this.renderPassEncoder.setStencilReference(reference);
+        }
+    }
 
-    // public RpSetBlendConstant(color: Iterable<number>) {
-    //     if (this.colorInfo[0] !== color[0] || this.colorInfo[1] !== color[1] || this.colorInfo[2] !== color[2] || this.colorInfo[3] !== color[3]) {
-    //         this.colorInfo = color;
-    //         this.renderPassEncoder.setBlendConstant(color);
-    //     }
-    // }
+    public RpSetBlendConstant4(r: number, g: number, b: number, a: number) {
+        if (this.colorInfo[0] !== r || this.colorInfo[1] !== g || this.colorInfo[2] !== b || this.colorInfo[3] !== a) {
+            this.colorInfo[0] = r;
+            this.colorInfo[1] = g;
+            this.colorInfo[2] = b;
+            this.colorInfo[3] = a;
+            this.renderPassEncoder.setBlendConstant(this.colorInfo);
+        }
+    }
 
-    public RpSetDescriptor(hash: string, renderBundleEncoderDescriptor: GPURenderBundleEncoderDescriptor, callback: () => GPURenderPassDescriptor) {
+    public RpSetDescriptor(hash: string, renderBundleEncoderDescriptor: GPURenderBundleEncoderDescriptor, callback: () => GPURenderPassDescriptor): boolean {
         if (this.renderPassDescriptorCacheKey !== hash) {
             this.RpEnd();
             this.renderPassDescriptorCacheKey = hash;
@@ -231,7 +249,20 @@ export class HydRenderPassCache {
             // this.renderPassDescriptor.label += hash;
             this.renderPassEncoder = this.commandEncoder.beginRenderPass(this.renderPassDescriptor);
             this.renderBundleGenerator = new HydRenderPassEncoder(this.device, renderBundleEncoderDescriptor);
+            return true;
         }
+        return false;
+    }
+
+    public RpClear(callback: () => GPURenderPassDescriptor) {
+        this.RpEnd();
+        const renderPassEncoder = this.commandEncoder.beginRenderPass(callback());
+        renderPassEncoder.end();
+        this.resetCache();
+    }
+
+    public hasActiveRenderPass(): boolean {
+        return this.renderPassEncoder !== null;
     }
 
     public RpSetPipeline(hash: string, pipeline: GPURenderPipeline) {
@@ -241,7 +272,7 @@ export class HydRenderPassCache {
         }
     }
 
-    public RpSetBindGroup(bindGroup: GPUBindGroup, dynamicOffset0: number) {
+    public RpSetBindGroup(bindGroup: GPUBindGroup, dynamicOffset0: number | null) {
         this.renderBundleGenerator.setBindGroup(bindGroup, dynamicOffset0);
         // this.renderBundleGenerator.setBindGroup(bindGroup.label + dynamicOffset0, index, bindGroup, dynamicOffset0);
     }
@@ -270,10 +301,37 @@ export class HydRenderPassCache {
         }
     }
 
-    public RpSetViewport(viewPort: [number, number, number, number, number, number]) {
-        if (this.viewPortInfo.join(',') !== viewPort.join(',')) {
-            this.viewPortInfo = viewPort;
-            this.renderPassEncoder.setViewport(viewPort[0], viewPort[1], viewPort[2], viewPort[3], viewPort[4], viewPort[5]);
+    public RpSetViewportValues(x: number, y: number, width: number, height: number, minDepth: number, maxDepth: number) {
+        if (
+            this.viewPortInfo[0] !== x ||
+            this.viewPortInfo[1] !== y ||
+            this.viewPortInfo[2] !== width ||
+            this.viewPortInfo[3] !== height ||
+            this.viewPortInfo[4] !== minDepth ||
+            this.viewPortInfo[5] !== maxDepth
+        ) {
+            this.viewPortInfo[0] = x;
+            this.viewPortInfo[1] = y;
+            this.viewPortInfo[2] = width;
+            this.viewPortInfo[3] = height;
+            this.viewPortInfo[4] = minDepth;
+            this.viewPortInfo[5] = maxDepth;
+            this.renderPassEncoder.setViewport(x, y, width, height, minDepth, maxDepth);
+        }
+    }
+
+    public RpSetScissorRectValues(x: number, y: number, width: number, height: number) {
+        if (
+            this.scissorInfo[0] !== x ||
+            this.scissorInfo[1] !== y ||
+            this.scissorInfo[2] !== width ||
+            this.scissorInfo[3] !== height
+        ) {
+            this.scissorInfo[0] = x;
+            this.scissorInfo[1] = y;
+            this.scissorInfo[2] = width;
+            this.scissorInfo[3] = height;
+            this.renderPassEncoder.setScissorRect(x, y, width, height);
         }
     }
 

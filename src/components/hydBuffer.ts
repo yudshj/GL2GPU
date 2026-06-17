@@ -27,15 +27,14 @@ export class HydBuffer implements HydHashable {
         if (data !== null) {
             const secondLength = data.byteLength & 3;
             const firstLength = data.byteLength - secondLength;
-            const dataOffset = 'byteOffset' in data ? data.byteOffset : 0;
-            if (!(data instanceof ArrayBuffer)) {
-                data = data.buffer;
-            }
-            this.device.queue.writeBuffer(this.__buffer__, dstOffset, data, dataOffset, firstLength);
+            const source = data instanceof ArrayBuffer
+                ? new Uint8Array(data)
+                : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+            this.device.queue.writeBuffer(this.__buffer__, dstOffset, source.subarray(0, firstLength) as TypedArray);
             if (secondLength > 0) {
                 const tmpUint8Array = new Uint8Array(4);
-                tmpUint8Array.set(new Uint8Array(data, dataOffset + firstLength, secondLength));
-                this.device.queue.writeBuffer(this.__buffer__, dstOffset + firstLength, tmpUint8Array.buffer);
+                tmpUint8Array.set(source.subarray(firstLength));
+                this.device.queue.writeBuffer(this.__buffer__, dstOffset + firstLength, tmpUint8Array as TypedArray);
             }
         }
     }
