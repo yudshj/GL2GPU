@@ -246,6 +246,8 @@ class GPURenderBundleTransition {
     onceHash = null;
     onceNext;
     bindGroupOffset = null;
+    onceNumericPrefix = null;
+    onceNumericHash = NaN;
     constructor(opName, opArgs, father) {
         this.opName = opName;
         this.opArgs = opArgs;
@@ -279,6 +281,14 @@ class GPURenderBundleTransition {
         }
         return this.onceNext = transition;
     }
+    gotoNumeric(prefix, numericHash, opName, ...opArgs) {
+        if (this.onceNumericPrefix === prefix && this.onceNumericHash === numericHash) {
+            return this.onceNext;
+        }
+        this.onceNumericPrefix = prefix;
+        this.onceNumericHash = numericHash;
+        return this.goto(prefix + numericHash, opName, ...opArgs);
+    }
 }
 class HydRenderPassEncoder {
     static initBundleCache = new Map();
@@ -308,10 +318,10 @@ class HydRenderPassEncoder {
         this.bundleCache = this.bundleCache.goto(opHash, 'setIndexBuffer', buffer, format);
     }
     draw(vertexCount, instanceCount, firstVertex, firstInstance) {
-        this.bundleCache = this.bundleCache.goto('d' + (vertexCount * 839 ^ instanceCount * 853 ^ firstVertex * 857 ^ firstInstance * 859), 'draw', vertexCount, instanceCount, firstVertex, firstInstance);
+        this.bundleCache = this.bundleCache.gotoNumeric('d', vertexCount * 839 ^ instanceCount * 853 ^ firstVertex * 857 ^ firstInstance * 859, 'draw', vertexCount, instanceCount, firstVertex, firstInstance);
     }
     drawIndexed(indexCount, instanceCount, firstIndex, baseVertex, firstInstance) {
-        this.bundleCache = this.bundleCache.goto('i' + (indexCount * 977 ^ instanceCount * 983 ^ firstIndex * 991 ^ baseVertex * 997 ^ firstInstance * 1009), 'drawIndexed', indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
+        this.bundleCache = this.bundleCache.gotoNumeric('i', indexCount * 977 ^ instanceCount * 983 ^ firstIndex * 991 ^ baseVertex * 997 ^ firstInstance * 1009, 'drawIndexed', indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
     }
     generateBundle() {
         if (!this.bundleCache.renderBundle) {
@@ -409,12 +419,13 @@ class HydRenderPassCache {
             this.renderPassEncoder.setStencilReference(reference);
         }
     }
-    RpSetBlendConstant(color) {
-        const values = Array.from(color);
-        const previous = Array.from(this.colorInfo);
-        if (previous[0] !== values[0] || previous[1] !== values[1] || previous[2] !== values[2] || previous[3] !== values[3]) {
-            this.colorInfo = values;
-            this.renderPassEncoder.setBlendConstant(values);
+    RpSetBlendConstant4(r, g, b, a) {
+        if (this.colorInfo[0] !== r || this.colorInfo[1] !== g || this.colorInfo[2] !== b || this.colorInfo[3] !== a) {
+            this.colorInfo[0] = r;
+            this.colorInfo[1] = g;
+            this.colorInfo[2] = b;
+            this.colorInfo[3] = a;
+            this.renderPassEncoder.setBlendConstant(this.colorInfo);
         }
     }
     RpSetDescriptor(hash, renderBundleEncoderDescriptor, callback) {
@@ -424,13 +435,18 @@ class HydRenderPassCache {
             this.renderPassDescriptor = callback();
             this.renderPassEncoder = this.commandEncoder.beginRenderPass(this.renderPassDescriptor);
             this.renderBundleGenerator = new HydRenderPassEncoder(this.device, renderBundleEncoderDescriptor);
+            return true;
         }
+        return false;
     }
     RpClear(callback) {
         this.RpEnd();
         const renderPassEncoder = this.commandEncoder.beginRenderPass(callback());
         renderPassEncoder.end();
         this.resetCache();
+    }
+    hasActiveRenderPass() {
+        return this.renderPassEncoder !== null;
     }
     RpSetPipeline(hash, pipeline) {
         if (this.renderPassPipelineCacheKey !== hash) {
@@ -462,16 +478,32 @@ class HydRenderPassCache {
             this.renderBundleGenerator.setIndexBuffer(indexBuffer.label, indexBuffer, indexFormat);
         }
     }
-    RpSetViewport(viewPort) {
-        if (this.viewPortInfo.join(',') !== viewPort.join(',')) {
-            this.viewPortInfo = viewPort;
-            this.renderPassEncoder.setViewport(viewPort[0], viewPort[1], viewPort[2], viewPort[3], viewPort[4], viewPort[5]);
+    RpSetViewportValues(x, y, width, height, minDepth, maxDepth) {
+        if (this.viewPortInfo[0] !== x ||
+            this.viewPortInfo[1] !== y ||
+            this.viewPortInfo[2] !== width ||
+            this.viewPortInfo[3] !== height ||
+            this.viewPortInfo[4] !== minDepth ||
+            this.viewPortInfo[5] !== maxDepth) {
+            this.viewPortInfo[0] = x;
+            this.viewPortInfo[1] = y;
+            this.viewPortInfo[2] = width;
+            this.viewPortInfo[3] = height;
+            this.viewPortInfo[4] = minDepth;
+            this.viewPortInfo[5] = maxDepth;
+            this.renderPassEncoder.setViewport(x, y, width, height, minDepth, maxDepth);
         }
     }
-    RpSetScissorRect(scissorBox) {
-        if (this.scissorInfo.join(',') !== scissorBox.join(',')) {
-            this.scissorInfo = scissorBox;
-            this.renderPassEncoder.setScissorRect(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]);
+    RpSetScissorRectValues(x, y, width, height) {
+        if (this.scissorInfo[0] !== x ||
+            this.scissorInfo[1] !== y ||
+            this.scissorInfo[2] !== width ||
+            this.scissorInfo[3] !== height) {
+            this.scissorInfo[0] = x;
+            this.scissorInfo[1] = y;
+            this.scissorInfo[2] = width;
+            this.scissorInfo[3] = height;
+            this.renderPassEncoder.setScissorRect(x, y, width, height);
         }
     }
     RpDraw(vertexCount, instanceCount, firstVertex, firstInstance) {
@@ -1726,7 +1758,7 @@ class HydGlobalState {
     }
     getPBV() {
         const [vertexBufferHashes, vertexBuffers, vertexBufferOffsets, vertexBufferLayoutHash, vertexBufferLayout] = this.getVertexBuffer();
-        const [bindGroupHash, bindGroupEntries, bindGroupLayoutHash, bindGroupLayoutEntries] = this.getBindGroup();
+        const [bindGroupHash, bindGroupEntries, bindGroupLayoutHash, bindGroupLayoutEntries, bindGroupTextures] = this.getBindGroup();
         const pipelineLayoutHash = bindGroupLayoutHash;
         const [_pipelineHash, pipelineDescriptor] = this.getPipelineDescriptor(this.topology, vertexBufferLayout);
         const pipelineHash = _pipelineHash + '|' + bindGroupLayoutHash + '|' + vertexBufferLayoutHash;
@@ -1761,6 +1793,17 @@ class HydGlobalState {
                 label: "bg" + this.__bindGroupCount++,
             });
             this._bindGroupCache.set(bindGroupHash, bindGroup);
+            for (const textureAttachment of bindGroupTextures) {
+                textureAttachment.onDestroy.push(() => {
+                    const cachedBindGroup = this._bindGroupCache.get(bindGroupHash);
+                    if (cachedBindGroup) {
+                        if (typeof cachedBindGroup.onDestroy === 'function') {
+                            cachedBindGroup.onDestroy();
+                        }
+                        this._bindGroupCache.delete(bindGroupHash);
+                    }
+                });
+            }
         }
         const vertexBuffersHash = (0,dist/* default */.Ay)(vertexBufferHashes.join('%')).toString();
         return {
@@ -1795,6 +1838,7 @@ class HydGlobalState {
         const program = this.commonState.currentProgram;
         const bindGroupEntry = [];
         const bindGroupLayoutEntry = [];
+        const textureAttachments = [];
         if (program.alignedUniformSize > 0) {
             bindGroupEntry.push({
                 binding: 0,
@@ -1818,6 +1862,7 @@ class HydGlobalState {
         let bindGroupLayoutKey = '0-du-' + program.alignedUniformSize;
         for (const sampler of program.hydSamplers) {
             const textureAttachment = this.getSamplerTexture(sampler.textureUnit, sampler.viewDimension);
+            textureAttachments.push(textureAttachment);
             bindGroupLayoutEntry.push({
                 binding: bindGroupLayoutEntry.length,
                 visibility: GPUShaderStage.FRAGMENT,
@@ -1845,21 +1890,12 @@ class HydGlobalState {
             });
             bindGroupKey += textureAttachment.hash;
         }
-        for (const sampler of program.hydSamplers) {
-            const textureAttachment = this.getSamplerTexture(sampler.textureUnit, sampler.viewDimension);
-            textureAttachment.onDestroy.push(() => {
-                if (this._bindGroupCache.has(bindGroupKey)) {
-                    this._bindGroupCache.get(bindGroupKey).onDestroy();
-                    this._bindGroupCache.delete(bindGroupKey);
-                }
-            });
-        }
-        return [(0,dist/* default */.Ay)(bindGroupKey).toString(), bindGroupEntry, bindGroupLayoutKey, bindGroupLayoutEntry];
+        return [(0,dist/* default */.Ay)(bindGroupKey).toString(), bindGroupEntry, bindGroupLayoutKey, bindGroupLayoutEntry, textureAttachments];
     }
     getVertexBuffer() {
         const bufferAttributeMap = new Map();
         const vao = this.commonState.vertexArrayBinding;
-        const activeAttributeLocations = new Set(this.commonState.currentProgram.hydAttributes.map((attribute) => attribute.location));
+        const activeAttributeLocations = this.commonState.currentProgram.hydAttributeLocations;
         const buffers = [];
         const layouts = [];
         const offsets = [];
@@ -1990,14 +2026,15 @@ class HydGlobalStateHashed extends HydGlobalState {
             + this.topology;
     }
     getPBV() {
-        if (!this._hashPbvCur.generated) {
-            Object.assign(this._hashPbvCur, super.getPBV());
-            this._hashPbvCur.generated = true;
-            this._hashPbvCur.bindGroup.onDestroy = () => {
-                this._hashPbvCur.generated = false;
+        const pbv = this._hashPbvCur;
+        if (!pbv.generated) {
+            Object.assign(pbv, super.getPBV());
+            pbv.generated = true;
+            pbv.bindGroup.onDestroy = () => {
+                pbv.generated = false;
             };
         }
-        return this._hashPbvCur;
+        return pbv;
     }
 }
 
@@ -2275,7 +2312,86 @@ function ShaderInfo2String(shaderInfo) {
     return res;
 }
 
+;// ./src/components/shaderCapture.ts
+
+function countMatches(source, pattern) {
+    pattern.lastIndex = 0;
+    let count = 0;
+    while (pattern.exec(source) !== null) {
+        count++;
+    }
+    return count;
+}
+function stableHashString(source) {
+    return (0,dist/* default */.Ay)(source).toString();
+}
+function stableHashU32(words) {
+    let hash = 2166136261;
+    for (let i = 0; i < words.length; i++) {
+        let word = words[i] >>> 0;
+        for (let j = 0; j < 4; j++) {
+            hash ^= word & 0xff;
+            hash = Math.imul(hash, 16777619) >>> 0;
+            word >>>= 8;
+        }
+    }
+    return hash.toString(16).padStart(8, "0");
+}
+function sourceCapture(code, includeStats = true) {
+    return {
+        code,
+        hash: stableHashString(code),
+        stats: includeStats ? computeShaderShapeStats(code) : undefined,
+    };
+}
+function computeShaderShapeStats(source) {
+    const lines = source.length === 0 ? 0 : source.split(/\r\n|\r|\n/).length;
+    return {
+        bytes: source.length,
+        lines,
+        varPrivate: countMatches(source, /\bvar<\s*private\s*>/g),
+        varFunction: countMatches(source, /\bvar<\s*function\s*>/g),
+        varUniform: countMatches(source, /\bvar<\s*uniform\s*>/g),
+        functions: countMatches(source, /\bfn\s+[A-Za-z_]\w*\s*\(/g),
+        entrypoints: countMatches(source, /@(vertex|fragment|compute)\b/g),
+        structs: countMatches(source, /\bstruct\s+[A-Za-z_]\w*\s*\{/g),
+        bindings: countMatches(source, /@binding\s*\(/g),
+        locations: countMatches(source, /@location\s*\(/g),
+        lets: countMatches(source, /\blet\s+[A-Za-z_]\w*\b/g),
+        tempLets: countMatches(source, /\blet\s+x_\d+\b/g),
+        assignments: countMatches(source, /(?:^|[;\n]\s*)[A-Za-z_]\w*(?:\s*(?:\.|->)\s*[A-Za-z_]\w*|\s*\[[^\]]+\])*\s*=(?!=)/g),
+        storeLikeAssignments: countMatches(source, /(?:^|[;\n]\s*)(?:[A-Za-z_]\w*(?:\s*(?:\.|->)\s*[A-Za-z_]\w*|\s*\[[^\]]+\])*)\s*=(?!=)/g),
+        vectorConstructors: countMatches(source, /\bvec[234](?:[fiu]|<[^>]+>)?\s*\(/g),
+        matrixConstructors: countMatches(source, /\bmat[234](?:x[234])?(?:<[^>]+>)?\s*\(/g),
+        swizzles: countMatches(source, /\.\s*[xyzwrgba]{1,4}\b/g),
+        textureSample: countMatches(source, /\btextureSample\s*\(/g),
+        textureSampleLevel: countMatches(source, /\btextureSampleLevel\s*\(/g),
+        textureSampleBias: countMatches(source, /\btextureSampleBias\s*\(/g),
+        textureSampleGrad: countMatches(source, /\btextureSampleGrad\s*\(/g),
+        textureLoad: countMatches(source, /\btextureLoad\s*\(/g),
+        selects: countMatches(source, /\bselect\s*\(/g),
+        ifs: countMatches(source, /\bif\s*\(/g),
+        loops: countMatches(source, /\b(for|while|loop)\b/g),
+        powCalls: countMatches(source, /\bpow\s*\(/g),
+        sinCalls: countMatches(source, /\bsin\s*\(/g),
+        cosCalls: countMatches(source, /\bcos\s*\(/g),
+        pointerLike: countMatches(source, /\bptr\s*</g) + countMatches(source, /(?:^|[^\w])&\s*[A-Za-z_]\w*/g),
+    };
+}
+function emitShaderCapture(record) {
+    if (typeof window === "undefined" || typeof window.__HYD_SHADER_CAPTURE !== "function") {
+        return;
+    }
+    try {
+        window.__HYD_SHADER_CAPTURE(record);
+    }
+    catch (error) {
+        console.warn("[HYD] shader capture hook failed:", error);
+    }
+}
+
 ;// ./src/components/hydProgram.ts
+
 
 
 const ALIGNMENT_BLOCK_SIZE = 256;
@@ -2341,6 +2457,10 @@ class ProgramUniformBuffer {
     byteLength;
     alignedByteLength;
     internal;
+    dataView;
+    float32View;
+    int32View;
+    wordOffset;
     constructor(name, type, size, internal = false) {
         this.name = name;
         this.size = size;
@@ -2357,6 +2477,7 @@ class ProgramUniformSampler {
     textureUnit;
     viewDimension;
     originFlipUniform;
+    originFlipValue;
     constructor(name, webgl_type, viewDimension) {
         this.name = name;
         this.size = 1;
@@ -2365,40 +2486,214 @@ class ProgramUniformSampler {
         this.viewDimension = viewDimension;
     }
 }
+function cloneShaderInfo(info) {
+    return {
+        attributes: info.attributes.map((attribute) => ({ ...attribute })),
+        uniforms: info.uniforms.map((uniform) => ({ ...uniform })),
+        samplers: info.samplers.map((sampler) => ({ ...sampler })),
+    };
+}
+function addSamplerFlipUniforms(info) {
+    for (const sampler of info.samplers) {
+        if (sampler.glsl_type !== "sampler2D") {
+            continue;
+        }
+        const name = samplerFlipYUniformName(sampler.name);
+        if (!info.uniforms.some((uniform) => uniform.name === name)) {
+            info.uniforms.push({
+                name,
+                glsl_type: "float",
+                wgsl_type: "f32",
+                internal: true,
+            });
+        }
+    }
+}
+function findMatchingParen(source, openIndex) {
+    let depth = 0;
+    for (let i = openIndex; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === "(") {
+            depth++;
+        }
+        else if (ch === ")") {
+            depth--;
+            if (depth === 0) {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+function splitTopLevelCallArguments(source) {
+    const args = [];
+    let start = 0;
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let braceDepth = 0;
+    for (let i = 0; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === "(") {
+            parenDepth++;
+        }
+        else if (ch === ")") {
+            parenDepth--;
+        }
+        else if (ch === "[") {
+            bracketDepth++;
+        }
+        else if (ch === "]") {
+            bracketDepth--;
+        }
+        else if (ch === "{") {
+            braceDepth++;
+        }
+        else if (ch === "}") {
+            braceDepth--;
+        }
+        else if (ch === "," && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
+            args.push(source.slice(start, i).trim());
+            start = i + 1;
+        }
+    }
+    args.push(source.slice(start).trim());
+    return args.filter((arg) => arg.length > 0);
+}
+function replaceSamplerOriginCalls(wgsl, samplerName, flip) {
+    const uniformName = samplerFlipYUniformName(samplerName);
+    const callee = "_hyd_samplerOriginCoord";
+    let replacements = 0;
+    let out = "";
+    let last = 0;
+    let searchStart = 0;
+    while (true) {
+        const index = wgsl.indexOf(callee, searchStart);
+        if (index < 0) {
+            break;
+        }
+        const before = wgsl.slice(Math.max(0, index - 4), index);
+        const openParen = index + callee.length;
+        if (/\bfn\s+$/.test(before) || wgsl[openParen] !== "(") {
+            searchStart = index + callee.length;
+            continue;
+        }
+        const closeParen = findMatchingParen(wgsl, openParen);
+        if (closeParen < 0) {
+            break;
+        }
+        const args = splitTopLevelCallArguments(wgsl.slice(openParen + 1, closeParen));
+        if (args.length === 2 && args[1] === `_hyd_uniforms_.${uniformName}`) {
+            const expression = args[0];
+            out += wgsl.slice(last, index);
+            out += flip ? `_hyd_samplerOriginCoordFlip(${expression})` : `(${expression})`;
+            last = closeParen + 1;
+            replacements++;
+        }
+        searchStart = closeParen + 1;
+    }
+    out += wgsl.slice(last);
+    return { wgsl: out, replacements, needsFlipHelper: flip && replacements > 0 };
+}
+function insertSamplerOriginFlipHelper(wgsl) {
+    if (wgsl.includes("fn _hyd_samplerOriginCoordFlip")) {
+        return wgsl;
+    }
+    const helper = `fn _hyd_samplerOriginCoordFlip(texCoord: vec2<f32>) -> vec2<f32> {\n    return vec2<f32>(texCoord.x, 1.0 - texCoord.y);\n}\n\n`;
+    const fragmentIndex = wgsl.indexOf("@fragment");
+    if (fragmentIndex < 0) {
+        return helper + wgsl;
+    }
+    return wgsl.slice(0, fragmentIndex) + helper + wgsl.slice(fragmentIndex);
+}
+function hasSamplerOriginCall(wgsl) {
+    const callee = "_hyd_samplerOriginCoord";
+    let searchStart = 0;
+    while (true) {
+        const index = wgsl.indexOf(callee, searchStart);
+        if (index < 0) {
+            return false;
+        }
+        const before = wgsl.slice(Math.max(0, index - 4), index);
+        const openParen = index + callee.length;
+        if (!/\bfn\s+$/.test(before) && wgsl[openParen] === "(") {
+            return true;
+        }
+        searchStart = index + callee.length;
+    }
+}
+function stripUnusedSamplerOriginHelper(wgsl) {
+    if (hasSamplerOriginCall(wgsl)) {
+        return wgsl;
+    }
+    return wgsl.replace(/fn\s+_hyd_samplerOriginCoord\s*\([^)]*\)\s*->\s*vec2\s*<\s*f32\s*>\s*\{\s*return\s+vec2\s*<\s*f32\s*>\s*\([^;]+;\s*\}\s*\n*/m, "");
+}
+function specializeSamplerOriginWgsl(wgsl, samplerOriginFlips) {
+    let out = wgsl;
+    let needsFlipHelper = false;
+    for (const [samplerName, flip] of samplerOriginFlips) {
+        const result = replaceSamplerOriginCalls(out, samplerName, flip);
+        out = result.wgsl;
+        needsFlipHelper = needsFlipHelper || result.needsFlipHelper;
+    }
+    if (needsFlipHelper) {
+        out = insertSamplerOriginFlipHelper(out);
+    }
+    return stripUnusedSamplerOriginHelper(out);
+}
 class HydProgram {
     static linkedPrograms = 0;
     _hash;
     uniformArrayBufferTempView;
     get hash() {
-        return this._hash;
+        if (!this.samplerOriginVariantKey) {
+            return this._hash;
+        }
+        return `${this._hash}origin:${this.samplerOriginVariantKey}:${this.fragmentModule?.label || ""}|`;
     }
     vertexShader;
     fragmentShader;
     shaderTranslator;
     vertexModule;
     fragmentModule;
+    fragmentWgsl = "";
+    samplerOriginVariants = new Map();
+    samplerOriginVariantKey = "";
     device;
     deleted = false;
     linked = false;
     hydAttributes = [];
+    hydAttributeLocations = new Set();
     hydUniforms = [];
     hydSamplers = [];
+    hydSampler2D = [];
+    originUniformStateVersion = -1;
+    originVariantStateVersion = -1;
+    staticSamplerOriginVariants = true;
     boundAttributeLocations = new Map();
     activeUniform;
+    activeUniformFloat32;
+    activeUniformInt32;
     alignedUniformSize;
     constructor(device, shaderTranslator) {
         this.device = device;
         this.shaderTranslator = shaderTranslator;
     }
     write_uniform_i(dstOffset, num, value) {
+        const view = this.activeUniformInt32;
+        const wordOffset = dstOffset >> 2;
         for (let i = 0; i < num; i++) {
-            this.uniformArrayBufferTempView.setInt32(dstOffset + i * 4, value[i], true);
+            view[wordOffset + i] = value[i];
         }
     }
     write_uniform_f(dstOffset, num, value) {
+        const view = this.activeUniformFloat32;
+        const wordOffset = dstOffset >> 2;
         for (let i = 0; i < num; i++) {
-            this.uniformArrayBufferTempView.setFloat32(dstOffset + i * 4, value[i], true);
+            view[wordOffset + i] = value[i];
         }
+    }
+    write_uniform_f1(dstOffset, value) {
+        this.activeUniformFloat32[dstOffset >> 2] = value;
     }
     getFragmentState(format, entryPoint = 'main') {
         return {
@@ -2442,35 +2737,59 @@ class HydProgram {
             shaders.push(this.fragmentShader.shader_info);
         }
         console.warn('[HYD] linkProgram:', tmpOutput);
-        const mergedShaderInfo = MergeShaderInfo(shaders);
-        for (const sampler of mergedShaderInfo.samplers) {
-            if (sampler.glsl_type !== "sampler2D") {
-                continue;
-            }
-            const name = samplerFlipYUniformName(sampler.name);
-            if (!mergedShaderInfo.uniforms.some((uniform) => uniform.name === name)) {
-                mergedShaderInfo.uniforms.push({
-                    name,
-                    glsl_type: "float",
-                    wgsl_type: "f32",
-                    internal: true,
-                });
-            }
-        }
-        const code = ShaderInfo2String(mergedShaderInfo);
+        const baseShaderInfo = MergeShaderInfo(shaders);
+        const dynamicShaderInfo = cloneShaderInfo(baseShaderInfo);
+        addSamplerFlipUniforms(dynamicShaderInfo);
+        this.staticSamplerOriginVariants = globalThis.__HYD_STATIC_SAMPLER_ORIGIN_VARIANTS !== false;
+        const runtimeShaderInfo = this.staticSamplerOriginVariants ? baseShaderInfo : dynamicShaderInfo;
+        const code = ShaderInfo2String(runtimeShaderInfo);
+        const dynamicCode = this.staticSamplerOriginVariants ? ShaderInfo2String(dynamicShaderInfo) : code;
         if (this.vertexShader) {
             const vs = code + this.vertexShader.shader_info.wgsl;
             console.debug('[HYD] linkProgram vertex:\n\n', vs);
+            if (this.vertexShader.shader_info.shader_capture) {
+                emitShaderCapture({
+                    ...this.vertexShader.shader_info.shader_capture,
+                    kind: "shader-final",
+                    programId: this._hash,
+                    finalWgsl: sourceCapture(vs),
+                });
+            }
             this.vertexModule = this.device.createShaderModule({ code: vs, label: (0,dist/* default */.Ay)(vs).toString() });
             this._hash += this.vertexModule.label + '|';
         }
         if (this.fragmentShader) {
-            const fs = code + this.fragmentShader.shader_info.wgsl;
+            this.fragmentWgsl = code + this.fragmentShader.shader_info.wgsl;
+            let fs = this.fragmentWgsl;
+            if (this.staticSamplerOriginVariants) {
+                const defaultFlips = new Map();
+                for (const sampler of runtimeShaderInfo.samplers) {
+                    if (sampler.glsl_type === "sampler2D") {
+                        defaultFlips.set(sampler.name, false);
+                    }
+                }
+                fs = specializeSamplerOriginWgsl(this.fragmentWgsl, defaultFlips);
+                if (fs.includes("_hyd_samplerFlipY_")) {
+                    this.staticSamplerOriginVariants = false;
+                    fs = dynamicCode + this.fragmentShader.shader_info.wgsl;
+                    this.fragmentWgsl = fs;
+                }
+            }
+            this.samplerOriginVariants.clear();
+            this.samplerOriginVariantKey = "";
             console.debug('[HYD] linkProgram fragment:\n\n', fs);
+            if (this.fragmentShader.shader_info.shader_capture) {
+                emitShaderCapture({
+                    ...this.fragmentShader.shader_info.shader_capture,
+                    kind: "shader-final",
+                    programId: this._hash,
+                    finalWgsl: sourceCapture(fs),
+                });
+            }
             this.fragmentModule = this.device.createShaderModule({ code: fs, label: (0,dist/* default */.Ay)(fs).toString() });
             this._hash += this.fragmentModule.label + '|';
         }
-        const aus = ShaderInfo2HydAus(mergedShaderInfo);
+        const aus = ShaderInfo2HydAus(this.staticSamplerOriginVariants ? runtimeShaderInfo : dynamicShaderInfo);
         this.hydAttributes = aus.attributes;
         for (const attribute of this.hydAttributes) {
             const location = translatedProgram.attributeLocations?.get(attribute.name);
@@ -2478,10 +2797,13 @@ class HydProgram {
                 attribute.location = location;
             }
         }
+        this.hydAttributeLocations = new Set(this.hydAttributes.map((attribute) => attribute.location));
         this.hydUniforms = aus.uniforms;
         this.hydSamplers = aus.samplers;
+        this.hydSampler2D = [];
         for (const sampler of this.hydSamplers) {
             if (sampler.webgl_type === WebGL2RenderingContext.SAMPLER_2D) {
+                this.hydSampler2D.push(sampler);
                 sampler.originFlipUniform = this.hydUniforms.find((uniform) => uniform.name === samplerFlipYUniformName(sampler.name));
             }
         }
@@ -2495,11 +2817,68 @@ class HydProgram {
         let uniformBufferLength = currentOffset;
         this.alignedUniformSize = (uniformBufferLength + ALIGNMENT_BLOCK_SIZE - 1) & ~(ALIGNMENT_BLOCK_SIZE - 1);
         this.activeUniform = new Uint8Array(uniformBufferLength);
+        this.activeUniformFloat32 = new Float32Array(this.activeUniform.buffer);
+        this.activeUniformInt32 = new Int32Array(this.activeUniform.buffer);
         this.uniformArrayBufferTempView = new DataView(this.activeUniform.buffer);
+        for (const uniform of this.hydUniforms) {
+            uniform.dataView = this.uniformArrayBufferTempView;
+            uniform.float32View = this.activeUniformFloat32;
+            uniform.int32View = this.activeUniformInt32;
+            uniform.wordOffset = uniform.offset >> 2;
+        }
     }
     setUniform(array, offset) {
         array.set(this.activeUniform, offset);
         return offset + this.alignedUniformSize;
+    }
+    applySamplerOriginVariant(samplerOriginFlips) {
+        if (!this.fragmentShader || this.fragmentWgsl.length === 0 || samplerOriginFlips.size === 0) {
+            this.samplerOriginVariantKey = "";
+            return;
+        }
+        if (this.hydSampler2D.length === 0) {
+            this.samplerOriginVariantKey = "";
+            return;
+        }
+        let key;
+        if (this.hydSampler2D.length <= 30) {
+            let bits = 0;
+            for (let i = 0; i < this.hydSampler2D.length; i++) {
+                if (samplerOriginFlips.get(this.hydSampler2D[i].name)) {
+                    bits |= 1 << i;
+                }
+            }
+            key = `b${bits.toString(36)}`;
+        }
+        else {
+            key = this.hydSampler2D
+                .map((sampler) => samplerOriginFlips.get(sampler.name) ? "1" : "0")
+                .join("");
+        }
+        if (this.samplerOriginVariantKey === key) {
+            return;
+        }
+        let variant = this.samplerOriginVariants.get(key);
+        if (!variant) {
+            const wgsl = specializeSamplerOriginWgsl(this.fragmentWgsl, samplerOriginFlips);
+            variant = {
+                wgsl,
+                module: this.device.createShaderModule({ code: wgsl, label: (0,dist/* default */.Ay)(wgsl).toString() }),
+            };
+            this.samplerOriginVariants.set(key, variant);
+            if (this.fragmentShader.shader_info.shader_capture) {
+                emitShaderCapture({
+                    ...this.fragmentShader.shader_info.shader_capture,
+                    kind: "shader-final",
+                    source: "runtime-origin-variant",
+                    programId: this._hash,
+                    shaderId: `${this.fragmentShader.shader_info.shader_capture.shaderId}:origin:${key}`,
+                    finalWgsl: sourceCapture(wgsl),
+                });
+            }
+        }
+        this.fragmentModule = variant.module;
+        this.samplerOriginVariantKey = key;
     }
 }
 
@@ -3179,6 +3558,10 @@ class HydWebGLStatic {
     hydBufferObjects = new WeakMap();
     maskedClearPipelines = new Map();
     maskedClearUniformBuffer = null;
+    samplerOriginStateVersion = 0;
+    gpuViewportDirty = true;
+    gpuScissorDirty = true;
+    lastDrawPbv = null;
     increaseOk() {
     }
     decreaseOk() {
@@ -3209,6 +3592,8 @@ class HydWebGLStatic {
         }
         this.hydGlobalState.miscState.scissorBox = [0, 0, width, height];
         this.hydGlobalState.commonState.viewport = [0, 0, width, height, 0, 1];
+        this.gpuViewportDirty = true;
+        this.gpuScissorDirty = true;
         this['drawingBufferWidth'] = width;
         this['drawingBufferHeight'] = height;
         try {
@@ -3697,84 +4082,94 @@ class HydWebGLStatic {
         shader.glsl_shader = source.trim();
     }
     uniform1f(pub, x0) {
-        this.hydGlobalState.commonState.currentProgram.uniformArrayBufferTempView.setFloat32(pub.offset, x0, true);
+        pub.float32View[pub.wordOffset] = x0;
     }
     uniform2f(pub, x0, x1) {
-        this.hydGlobalState.commonState.currentProgram.uniformArrayBufferTempView.setFloat32(pub.offset, x0, true);
-        this.hydGlobalState.commonState.currentProgram.uniformArrayBufferTempView.setFloat32(pub.offset + 4, x1, true);
+        const a = pub.float32View;
+        const offset = pub.wordOffset;
+        a[offset] = x0;
+        a[offset + 1] = x1;
     }
     uniform3f(pub, x0, x1, x2) {
-        const a = this.hydGlobalState.commonState.currentProgram.uniformArrayBufferTempView;
-        a.setFloat32(pub.offset, x0, true);
-        a.setFloat32(pub.offset + 4, x1, true);
-        a.setFloat32(pub.offset + 8, x2, true);
+        const a = pub.float32View;
+        const offset = pub.wordOffset;
+        a[offset] = x0;
+        a[offset + 1] = x1;
+        a[offset + 2] = x2;
     }
     uniform4f(pub, x0, x1, x2, x3) {
-        const a = this.hydGlobalState.commonState.currentProgram.uniformArrayBufferTempView;
-        a.setFloat32(pub.offset, x0, true);
-        a.setFloat32(pub.offset + 4, x1, true);
-        a.setFloat32(pub.offset + 8, x2, true);
-        a.setFloat32(pub.offset + 12, x3, true);
+        const a = pub.float32View;
+        const offset = pub.wordOffset;
+        a[offset] = x0;
+        a[offset + 1] = x1;
+        a[offset + 2] = x2;
+        a[offset + 3] = x3;
     }
     uniform1i(uniform, x0) {
         if (uniform instanceof ProgramUniformSampler) {
             if (uniform.textureUnit !== x0) {
                 uniform.textureUnit = x0;
+                this.samplerOriginStateVersion++;
                 this.hydGlobalState.recordTransition("uniformSampler", uniform.name, x0);
             }
             return;
         }
-        this.hydGlobalState.commonState.currentProgram.uniformArrayBufferTempView.setInt32(uniform.offset, x0, true);
+        const offset = uniform.wordOffset;
+        uniform.int32View[offset] = x0;
     }
     uniform2i(pub, x0, x1) {
-        this.hydGlobalState.commonState.currentProgram.uniformArrayBufferTempView.setInt32(pub.offset, x0, true);
-        this.hydGlobalState.commonState.currentProgram.uniformArrayBufferTempView.setInt32(pub.offset + 4, x1, true);
+        const a = pub.int32View;
+        const offset = pub.wordOffset;
+        a[offset] = x0;
+        a[offset + 1] = x1;
     }
     uniform3i(pub, x0, x1, x2) {
-        const a = this.hydGlobalState.commonState.currentProgram.uniformArrayBufferTempView;
-        a.setInt32(pub.offset, x0, true);
-        a.setInt32(pub.offset + 4, x1, true);
-        a.setInt32(pub.offset + 8, x2, true);
+        const a = pub.int32View;
+        const offset = pub.wordOffset;
+        a[offset] = x0;
+        a[offset + 1] = x1;
+        a[offset + 2] = x2;
     }
     uniform4i(pub, x0, x1, x2, x3) {
-        const a = this.hydGlobalState.commonState.currentProgram.uniformArrayBufferTempView;
-        a.setInt32(pub.offset, x0, true);
-        a.setInt32(pub.offset + 4, x1, true);
-        a.setInt32(pub.offset + 8, x2, true);
-        a.setInt32(pub.offset + 12, x3, true);
+        const a = pub.int32View;
+        const offset = pub.wordOffset;
+        a[offset] = x0;
+        a[offset + 1] = x1;
+        a[offset + 2] = x2;
+        a[offset + 3] = x3;
     }
     uniform1fv(pub, v) {
-        this.hydGlobalState.commonState.currentProgram.write_uniform_f(pub.offset, v.length, v);
+        pub.float32View.set(v, pub.wordOffset);
     }
     uniform2fv(pub, v) {
-        this.hydGlobalState.commonState.currentProgram.write_uniform_f(pub.offset, v.length, v);
+        pub.float32View.set(v, pub.wordOffset);
     }
     uniform3fv(pub, v) {
-        this.hydGlobalState.commonState.currentProgram.write_uniform_f(pub.offset, v.length, v);
+        pub.float32View.set(v, pub.wordOffset);
     }
     uniform4fv(pub, v) {
-        this.hydGlobalState.commonState.currentProgram.write_uniform_f(pub.offset, v.length, v);
+        pub.float32View.set(v, pub.wordOffset);
     }
     uniform1iv(pub, v) {
-        this.hydGlobalState.commonState.currentProgram.write_uniform_i(pub.offset, v.length, v);
+        pub.int32View.set(v, pub.wordOffset);
     }
     uniform2iv(pub, v) {
-        this.hydGlobalState.commonState.currentProgram.write_uniform_i(pub.offset, v.length, v);
+        pub.int32View.set(v, pub.wordOffset);
     }
     uniform3iv(pub, v) {
-        this.hydGlobalState.commonState.currentProgram.write_uniform_i(pub.offset, v.length, v);
+        pub.int32View.set(v, pub.wordOffset);
     }
     uniform4iv(pub, v) {
-        this.hydGlobalState.commonState.currentProgram.write_uniform_i(pub.offset, v.length, v);
+        pub.int32View.set(v, pub.wordOffset);
     }
     uniformMatrix2fv(pub, transpose, v) {
-        this.hydGlobalState.commonState.currentProgram.write_uniform_f(pub.offset, v.length, v);
+        pub.float32View.set(v, pub.wordOffset);
     }
     uniformMatrix3fv(pub, transpose, v) {
-        this.hydGlobalState.commonState.currentProgram.write_uniform_f(pub.offset, v.length, v);
+        pub.float32View.set(v, pub.wordOffset);
     }
     uniformMatrix4fv(pub, transpose, v) {
-        this.hydGlobalState.commonState.currentProgram.write_uniform_f(pub.offset, v.length, v);
+        pub.float32View.set(v, pub.wordOffset);
     }
     createProgram() {
         return new HydProgram(this.hydDevice, this.shaderTranslator);
@@ -3851,6 +4246,30 @@ class HydWebGLStatic {
         const [x, y, width, height] = this.hydGlobalState.miscState.scissorBox;
         const framebufferHeight = this.getDrawFramebufferHeight();
         return [x, framebufferHeight - y - height, width, height];
+    }
+    setGpuViewport() {
+        const viewport = this.hydGlobalState.commonState.viewport;
+        const framebufferHeight = this.getDrawFramebufferHeight();
+        this.hydRpCache.RpSetViewportValues(viewport[0], framebufferHeight - viewport[1] - viewport[3], viewport[2], viewport[3], viewport[4], viewport[5]);
+    }
+    setGpuScissorRect() {
+        const scissorBox = this.hydGlobalState.miscState.scissorBox;
+        const framebufferHeight = this.getDrawFramebufferHeight();
+        this.hydRpCache.RpSetScissorRectValues(scissorBox[0], framebufferHeight - scissorBox[1] - scissorBox[3], scissorBox[2], scissorBox[3]);
+    }
+    blendUsesConstantFactor() {
+        const blend = this.hydGlobalState.blendState;
+        return blend.srcRGB === "constant" ||
+            blend.dstRGB === "constant" ||
+            blend.srcAlpha === "constant" ||
+            blend.dstAlpha === "constant" ||
+            blend.srcRGB === "one-minus-constant" ||
+            blend.dstRGB === "one-minus-constant" ||
+            blend.srcAlpha === "one-minus-constant" ||
+            blend.dstAlpha === "one-minus-constant";
+    }
+    samplerNeedsOriginFlip(texture) {
+        return !!texture && (texture.sourceOrigin === "render-target" || texture.sourceOrigin === "copy");
     }
     getColorWriteMask() {
         const [r, g, b, a] = this.hydGlobalState.miscState.colorWriteMask;
@@ -4078,8 +4497,6 @@ ${assignments}
     }
     clear(mask) {
         ensureAutoFrame();
-        this.updateCanvasSize();
-        this._der_flush();
         let effectiveMask = mask;
         let needsMaskedColorClear = false;
         if (mask & WebGL2RenderingContext.COLOR_BUFFER_BIT) {
@@ -4096,6 +4513,19 @@ ${assignments}
         if ((mask & WebGL2RenderingContext.DEPTH_BUFFER_BIT) && !this.hydGlobalState.depthState.writeMask) {
             effectiveMask &= ~WebGL2RenderingContext.DEPTH_BUFFER_BIT;
         }
+        const canUseLoadOpClear = effectiveMask !== 0 &&
+            !needsMaskedColorClear &&
+            !this.hydGlobalState.miscState.scissorTest &&
+            !this.hydRpCache.hasActiveRenderPass();
+        if (canUseLoadOpClear) {
+            if (this.hydGlobalState.clearState.target !== effectiveMask) {
+                this.hydGlobalState.clearState.target = effectiveMask;
+                this.hydGlobalState.recordTransition("clear", effectiveMask);
+            }
+            return;
+        }
+        this.updateCanvasSize();
+        this._der_flush();
         if (needsMaskedColorClear) {
             this.clearColorWithMask();
         }
@@ -4147,7 +4577,7 @@ ${assignments}
         }
     }
     bindBuffer(target, buffer) {
-        const hydBuffer = this.normalizeBuffer(buffer);
+        const hydBuffer = buffer instanceof HydBuffer ? buffer : this.normalizeBuffer(buffer);
         if (target === WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER) {
             if (this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding !== hydBuffer) {
                 this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding = hydBuffer;
@@ -4157,7 +4587,6 @@ ${assignments}
         else if (target === WebGL2RenderingContext.ARRAY_BUFFER) {
             if (this.hydGlobalState.commonState.arrayBufferBinding !== hydBuffer) {
                 this.hydGlobalState.commonState.arrayBufferBinding = hydBuffer;
-                this.hydGlobalState.recordTransition("bindBuffer", target, hydBuffer ? hydBuffer.hash : "null");
             }
         }
         else {
@@ -4315,7 +4744,6 @@ ${assignments}
         const target = texture - WebGL2RenderingContext.TEXTURE0;
         if (this.hydGlobalState.commonState.activeTextureUnit !== target) {
             this.hydGlobalState.commonState.activeTextureUnit = target;
-            this.hydGlobalState.recordTransition("activeTexture", target.toString());
         }
     }
     bindTexture(target, texture) {
@@ -4324,14 +4752,28 @@ ${assignments}
             this.hydGlobalState.glError = WebGL2RenderingContext.INVALID_ENUM;
             return;
         }
-        const hydTexture = this.normalizeTexture(texture);
+        const hydTexture = texture instanceof HydTexture ? texture : this.normalizeTexture(texture);
+        const textureUnit = this.hydGlobalState.commonState.activeTextureUnit;
+        const previous = this.hydGlobalState.getTextureUnitBinding(textureUnit, vd);
         if (hydTexture === null) {
-            this.hydGlobalState.setTextureUnitBinding(this.hydGlobalState.commonState.activeTextureUnit, vd, null);
+            if (previous === null) {
+                return;
+            }
+            if (this.samplerNeedsOriginFlip(previous) !== false) {
+                this.samplerOriginStateVersion++;
+            }
+            this.hydGlobalState.setTextureUnitBinding(textureUnit, vd, null);
             this.hydGlobalState.recordTransition("bindTexture", target, "null");
             return;
         }
+        if (previous === hydTexture && hydTexture.viewDimension === vd) {
+            return;
+        }
         hydTexture.viewDimension = vd;
-        this.hydGlobalState.setTextureUnitBinding(this.hydGlobalState.commonState.activeTextureUnit, vd, hydTexture);
+        if (this.samplerNeedsOriginFlip(previous) !== this.samplerNeedsOriginFlip(hydTexture)) {
+            this.samplerOriginStateVersion++;
+        }
+        this.hydGlobalState.setTextureUnitBinding(textureUnit, vd, hydTexture);
         this.hydGlobalState.recordTransitionOne(hydTexture.hash);
     }
     texImage2D(...args) {
@@ -4368,6 +4810,7 @@ ${assignments}
         }
         const unpack = this.hydGlobalState.miscState.unpackState;
         this.currentTexture(target).texImage2D(pixels, target, level, internalformat, width, height, border, format, type, unpack);
+        this.samplerOriginStateVersion++;
         this.hydGlobalState.recordTransition("texImage2D", target, level, internalformat, width, height, border, format, type);
     }
     texSubImage2D(...args) {
@@ -4410,6 +4853,7 @@ ${assignments}
         }
         const unpack = this.hydGlobalState.miscState.unpackState;
         this.currentTexture(target).texSubImage2D(pixels, target, level, xoffset, yoffset, width, height, format, type, unpack);
+        this.samplerOriginStateVersion++;
         this.hydGlobalState.recordTransition("texSubImage2D", target, level, xoffset, yoffset, width, height, format, type);
     }
     texImage3D(...args) {
@@ -4424,6 +4868,7 @@ ${assignments}
             throw new Error("unsupported texImage3D: " + args);
         }
         this.currentTexture(target).texImage3D(pixels, target, level, internalformat, width, height, depth, border, format, type, offset);
+        this.samplerOriginStateVersion++;
         this.hydGlobalState.recordTransition("texImage3D", target, level, internalformat, width, height, depth, border, format, type, offset);
     }
     texParameteri(target, pname, param) {
@@ -4459,6 +4904,7 @@ ${assignments}
         const viewport = this.hydGlobalState.commonState.viewport;
         if (viewport[0] !== x || viewport[1] !== y || viewport[2] !== width || viewport[3] !== height) {
             this._der_flush();
+            this.gpuViewportDirty = true;
         }
         this.hydGlobalState.commonState.viewport[0] = x;
         this.hydGlobalState.commonState.viewport[1] = y;
@@ -4470,6 +4916,7 @@ ${assignments}
         const scissorBox = this.hydGlobalState.miscState.scissorBox;
         if (scissorBox[0] !== x || scissorBox[1] !== y || scissorBox[2] !== width || scissorBox[3] !== height) {
             this._der_flush();
+            this.gpuScissorDirty = true;
         }
         this.hydGlobalState.miscState.scissorBox = [x, y, width, height];
         this.hydGlobalState.recordTransition("scissor", x, y, width, height);
@@ -4478,6 +4925,7 @@ ${assignments}
         const viewport = this.hydGlobalState.commonState.viewport;
         if (viewport[4] !== zNear || viewport[5] !== zFar) {
             this._der_flush();
+            this.gpuViewportDirty = true;
         }
         this.hydGlobalState.commonState.viewport[4] = zNear;
         this.hydGlobalState.commonState.viewport[5] = zFar;
@@ -4496,7 +4944,7 @@ ${assignments}
         const attribute = this.hydGlobalState.commonState.vertexArrayBinding.attributes[index];
         const stride = _stride || size * 4;
         if (attribute.size !== size || attribute.type !== type || attribute.normalized !== normalized || attribute.stride !== stride || attribute.offset !== offset || attribute.buffer !== buffer) {
-            const format = getVertexFormat(type, size, normalized);
+            const formatChanged = attribute.size !== size || attribute.type !== type || attribute.normalized !== normalized;
             attribute.size = size;
             attribute.type = type;
             attribute.normalized = normalized;
@@ -4505,7 +4953,9 @@ ${assignments}
             attribute.offset = offset;
             attribute.buffer = buffer;
             attribute.shaderLocation = index;
-            attribute.format = format;
+            if (formatChanged || !attribute.format) {
+                attribute.format = getVertexFormat(type, size, normalized);
+            }
             attribute.updateHash();
             this.hydGlobalState.recordTransition("vertexAttribPointer", index, size, type, normalized, stride, offset);
         }
@@ -4528,6 +4978,7 @@ ${assignments}
                 if (this.hydGlobalState.miscState.scissorTest !== value) {
                     this._der_flush();
                     this.hydGlobalState.miscState.scissorTest = value;
+                    this.gpuScissorDirty = true;
                 }
                 break;
             case WebGL2RenderingContext.POLYGON_OFFSET_FILL:
@@ -4605,6 +5056,8 @@ ${assignments}
     }
     bindFramebuffer(target, framebuffer) {
         this._der_flush();
+        this.gpuViewportDirty = true;
+        this.gpuScissorDirty = true;
         if (framebuffer === null) {
             framebuffer = this.hydGlobalState.defaultFramebuffer;
         }
@@ -4629,10 +5082,13 @@ ${assignments}
         if (texture === null) {
             framebuffer.attachments.delete(attachment);
             framebuffer.resetHash();
+            this.gpuViewportDirty = true;
+            this.gpuScissorDirty = true;
             this.hydGlobalState.recordTransition("framebufferTexture2D", target, attachment, texTarget, "null", level);
             return;
         }
         texture.markFramebufferRenderTarget();
+        this.samplerOriginStateVersion++;
         const attrib = new FramebufferAttributes(attachment, level, texTarget, texture);
         switch (attachment) {
             case WebGL2RenderingContext.DEPTH_ATTACHMENT:
@@ -4647,6 +5103,8 @@ ${assignments}
         }
         framebuffer.attachments.set(attachment, attrib);
         framebuffer.resetHash();
+        this.gpuViewportDirty = true;
+        this.gpuScissorDirty = true;
         this.hydGlobalState.recordTransition("framebufferTexture2D", target, attachment, texTarget, texture.hash, level);
     }
     framebufferTextureLayer(target, attachment, texture, level, layer) {
@@ -4655,13 +5113,18 @@ ${assignments}
         if (texture === null) {
             framebuffer.attachments.delete(attachment);
             framebuffer.resetHash();
+            this.gpuViewportDirty = true;
+            this.gpuScissorDirty = true;
             this.hydGlobalState.recordTransition("framebufferTextureLayer", target, attachment, "null", level, layer);
             return;
         }
         texture.markFramebufferRenderTarget();
+        this.samplerOriginStateVersion++;
         const attrib = new FramebufferAttributes(attachment, level, undefined, texture, layer);
         framebuffer.attachments.set(attachment, attrib);
         framebuffer.resetHash();
+        this.gpuViewportDirty = true;
+        this.gpuScissorDirty = true;
         this.hydGlobalState.recordTransition("framebufferTextureLayer", target, attachment, texture.hash, level, layer);
     }
     framebufferRenderbuffer(target, attachment, renderbufferTarget, renderbuffer) {
@@ -4671,13 +5134,18 @@ ${assignments}
         if (renderbuffer === null) {
             framebuffer.attachments.delete(attachment);
             framebuffer.resetHash();
+            this.gpuViewportDirty = true;
+            this.gpuScissorDirty = true;
             this.hydGlobalState.recordTransition("framebufferRenderbuffer", target, attachment, renderbufferTarget, "null");
             return;
         }
         renderbuffer.markFramebufferRenderTarget();
+        this.samplerOriginStateVersion++;
         const attrib = new FramebufferAttributes(attachment, undefined, undefined, renderbuffer);
         framebuffer.attachments.set(attachment, attrib);
         framebuffer.resetHash();
+        this.gpuViewportDirty = true;
+        this.gpuScissorDirty = true;
         this.hydGlobalState.recordTransition("framebufferRenderbuffer", target, attachment, renderbufferTarget, renderbuffer.hash);
     }
     blitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter) {
@@ -4689,11 +5157,13 @@ ${assignments}
         const texture = this.currentTexture(target);
         texture.texImage2D(null, target, level, internalformat, width, height, border, WebGL2RenderingContext.RGBA, WebGL2RenderingContext.UNSIGNED_BYTE);
         texture.markCopyDestination();
+        this.samplerOriginStateVersion++;
         this.hydGlobalState.recordTransition("copyTexImage2D", target, level, internalformat, x, y, width, height, border);
     }
     copyTexSubImage2D(target, level, xoffset, yoffset, x, y, width, height) {
         this._der_flush();
         this.currentTexture(target).markCopyDestination();
+        this.samplerOriginStateVersion++;
         this.hydGlobalState.recordTransition("copyTexSubImage2D", target, level, xoffset, yoffset, x, y, width, height);
     }
     readPixels(x, y, width, height, format, type, pixels) {
@@ -4706,6 +5176,8 @@ ${assignments}
     drawBuffers(buffers) {
         this.hydGlobalState.commonState.drawFramebufferBinding.drawBuffers = buffers;
         this.hydGlobalState.commonState.drawFramebufferBinding.resetHash();
+        this.gpuViewportDirty = true;
+        this.gpuScissorDirty = true;
         this.hydGlobalState.recordTransition("drawBuffers", ...buffers);
     }
     pixelStorei(pname, param) {
@@ -4738,37 +5210,79 @@ ${assignments}
     checkFramebufferStatus() {
         return WebGL2RenderingContext.FRAMEBUFFER_COMPLETE;
     }
-    updateSamplerOriginUniforms(program) {
+    updateSamplerOriginUniforms(program, collectFlips) {
+        if (collectFlips && program.originVariantStateVersion === this.samplerOriginStateVersion) {
+            return null;
+        }
+        if (!collectFlips && program.originUniformStateVersion === this.samplerOriginStateVersion) {
+            return null;
+        }
+        const samplerOriginFlips = collectFlips ? new Map() : null;
         for (const sampler of program.hydSamplers) {
-            if (!sampler.originFlipUniform) {
+            if (!collectFlips && !sampler.originFlipUniform) {
                 continue;
             }
             const texture = this.hydGlobalState.getTextureUnitBinding(sampler.textureUnit, sampler.viewDimension);
-            const flipY = texture && (texture.sourceOrigin === "render-target" || texture.sourceOrigin === "copy") ? 1 : 0;
-            program.write_uniform_f(sampler.originFlipUniform.offset, 1, [flipY]);
+            const shouldFlipY = this.samplerNeedsOriginFlip(texture);
+            if (samplerOriginFlips) {
+                samplerOriginFlips.set(sampler.name, shouldFlipY);
+            }
+            if (sampler.originFlipUniform && sampler.originFlipValue !== shouldFlipY) {
+                sampler.originFlipValue = shouldFlipY;
+                program.write_uniform_f1(sampler.originFlipUniform.offset, shouldFlipY ? 1 : 0);
+            }
         }
+        if (collectFlips) {
+            program.originVariantStateVersion = this.samplerOriginStateVersion;
+        }
+        else {
+            program.originUniformStateVersion = this.samplerOriginStateVersion;
+        }
+        return samplerOriginFlips;
     }
     setPBV() {
-        this.updateCanvasSize();
-        ensureAutoFrame();
+        if (frameDepth === 0) {
+            ensureAutoFrame();
+        }
         const program = this.hydGlobalState.commonState.currentProgram;
-        this.updateSamplerOriginUniforms(program);
-        const { pipelineHash, pipeline, bindGroupHash: _bindGroupHash, bindGroup, vertexBuffersHash, vertexBufferHashes, vertexBuffers, vertexBufferOffsets, renderPassHash, renderBundleEncoderDescriptor } = this.hydGlobalState.getPBV();
-        this.hydRpCache.RpSetDescriptor(renderPassHash, renderBundleEncoderDescriptor, this.bindedGetRenderPassDesc);
-        this.hydRpCache.RpSetViewport(this.toGpuViewport());
-        if (this.hydGlobalState.miscState.scissorTest) {
-            this.hydRpCache.RpSetScissorRect(this.toGpuScissorRect());
+        const useSamplerOriginVariants = program.staticSamplerOriginVariants;
+        if ((useSamplerOriginVariants ? program.hydSampler2D.length : program.hydSamplers.length) > 0) {
+            const samplerOriginFlips = this.updateSamplerOriginUniforms(program, useSamplerOriginVariants);
+            if (useSamplerOriginVariants && samplerOriginFlips) {
+                program.applySamplerOriginVariant(samplerOriginFlips);
+            }
         }
-        if (this.hydGlobalState.stencilState.enabled) {
-            this.hydRpCache.RpSetStencilReference(this.hydGlobalState.stencilState.frontRef);
+        const pbv = this.hydGlobalState.getPBV();
+        const { pipelineHash, pipeline, bindGroup, vertexBuffersHash, vertexBufferHashes, vertexBuffers, vertexBufferOffsets, renderPassHash, renderBundleEncoderDescriptor } = pbv;
+        const canReuseDrawState = pbv === this.lastDrawPbv &&
+            this.hydRpCache.hasActiveRenderPass() &&
+            !this.gpuViewportDirty &&
+            !(this.hydGlobalState.miscState.scissorTest && this.gpuScissorDirty);
+        if (!canReuseDrawState) {
+            const passChanged = this.hydRpCache.RpSetDescriptor(renderPassHash, renderBundleEncoderDescriptor, this.bindedGetRenderPassDesc);
+            if (passChanged || this.gpuViewportDirty) {
+                this.setGpuViewport();
+                this.gpuViewportDirty = false;
+            }
+            if (this.hydGlobalState.miscState.scissorTest && (passChanged || this.gpuScissorDirty)) {
+                this.setGpuScissorRect();
+                this.gpuScissorDirty = false;
+            }
+            if (this.hydGlobalState.stencilState.enabled) {
+                this.hydRpCache.RpSetStencilReference(this.hydGlobalState.stencilState.frontRef);
+            }
+            if (this.hydGlobalState.blendState.enabled && this.blendUsesConstantFactor()) {
+                const color = this.hydGlobalState.blendState.color;
+                this.hydRpCache.RpSetBlendConstant4(color[0], color[1], color[2], color[3]);
+            }
+            this.hydRpCache.RpSetPipeline(pipelineHash, pipeline);
+            this.hydRpCache.RpSetVertexBuffers(vertexBuffersHash, vertexBufferHashes, vertexBuffers, vertexBufferOffsets);
         }
-        if (this.hydGlobalState.blendState.enabled) {
-            this.hydRpCache.RpSetBlendConstant(this.hydGlobalState.blendState.color);
-        }
-        this.hydRpCache.RpSetPipeline(pipelineHash, pipeline);
         this.hydRpCache.RpSetBindGroup(bindGroup, program.alignedUniformSize > 0 ? this.hydUniOff : null);
-        this.hydRpCache.RpSetVertexBuffers(vertexBuffersHash, vertexBufferHashes, vertexBuffers, vertexBufferOffsets);
-        this.hydUniOff = program.setUniform(this.hydUniArr, this.hydUniOff);
+        this.lastDrawPbv = pbv;
+        if (program.alignedUniformSize > 0) {
+            this.hydUniOff = program.setUniform(this.hydUniArr, this.hydUniOff);
+        }
     }
     getTriangleFanIndexBuffer(vertexCount) {
         let buffer = this.triangleFanIndexBuffers.get(vertexCount);
@@ -5094,7 +5608,7 @@ function makeShaderMetadata(source, type, wgsl = "") {
 ;// ./src/components/shaderTexCoord.ts
 const TEXCOORD_HELPER = "_hyd_glTexCoordToGpu";
 const TEXTURE_SAMPLE_CALL = /\b(textureSample(?:Level|Bias|Grad)?)\s*\(/g;
-function findMatchingParen(source, openIndex) {
+function shaderTexCoord_findMatchingParen(source, openIndex) {
     let depth = 0;
     for (let i = openIndex; i < source.length; i++) {
         const ch = source[i];
@@ -5228,7 +5742,7 @@ function normalizeFragmentTextureCoordinates(wgsl, metadata, source) {
     TEXTURE_SAMPLE_CALL.lastIndex = 0;
     for (let match = TEXTURE_SAMPLE_CALL.exec(wgsl); match !== null; match = TEXTURE_SAMPLE_CALL.exec(wgsl)) {
         const openParen = TEXTURE_SAMPLE_CALL.lastIndex - 1;
-        const closeParen = findMatchingParen(wgsl, openParen);
+        const closeParen = shaderTexCoord_findMatchingParen(wgsl, openParen);
         if (closeParen < 0) {
             break;
         }
@@ -5307,7 +5821,1360 @@ function normalizeWebGlTextureCoordinates(wgsl, metadata, stage, source) {
     return wgsl;
 }
 
+;// ./src/components/shaderWgslOptimizer.ts
+function shaderWgslOptimizer_escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function wordBoundaryReplace(source, from, to) {
+    return source.replace(new RegExp(`\\b${shaderWgslOptimizer_escapeRegExp(from)}\\b`, "g"), to);
+}
+function countIdentifier(source, name) {
+    return source.match(new RegExp(`\\b${shaderWgslOptimizer_escapeRegExp(name)}\\b`, "g"))?.length ?? 0;
+}
+function findMatching(source, openIndex, openChar, closeChar) {
+    let depth = 0;
+    for (let i = openIndex; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === openChar) {
+            depth++;
+        }
+        else if (ch === closeChar) {
+            depth--;
+            if (depth === 0) {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+function shaderWgslOptimizer_splitTopLevelArguments(source) {
+    const args = [];
+    let start = 0;
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let braceDepth = 0;
+    for (let i = 0; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === "(") {
+            parenDepth++;
+        }
+        else if (ch === ")") {
+            parenDepth--;
+        }
+        else if (ch === "[") {
+            bracketDepth++;
+        }
+        else if (ch === "]") {
+            bracketDepth--;
+        }
+        else if (ch === "{") {
+            braceDepth++;
+        }
+        else if (ch === "}") {
+            braceDepth--;
+        }
+        else if (ch === "," && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
+            args.push(source.slice(start, i));
+            start = i + 1;
+        }
+    }
+    args.push(source.slice(start));
+    return args.map((arg) => arg.trim()).filter((arg) => arg.length > 0);
+}
+function splitTopLevelParameters(source) {
+    const params = [];
+    let start = 0;
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let braceDepth = 0;
+    let angleDepth = 0;
+    for (let i = 0; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === "(") {
+            parenDepth++;
+        }
+        else if (ch === ")") {
+            parenDepth--;
+        }
+        else if (ch === "[") {
+            bracketDepth++;
+        }
+        else if (ch === "]") {
+            bracketDepth--;
+        }
+        else if (ch === "{") {
+            braceDepth++;
+        }
+        else if (ch === "}") {
+            braceDepth--;
+        }
+        else if (ch === "<") {
+            angleDepth++;
+        }
+        else if (ch === ">" && angleDepth > 0) {
+            angleDepth--;
+        }
+        else if (ch === "," && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0 && angleDepth === 0) {
+            params.push(source.slice(start, i));
+            start = i + 1;
+        }
+    }
+    params.push(source.slice(start));
+    return params.map((param) => param.trim()).filter((param) => param.length > 0);
+}
+function parseFunctions(source) {
+    const functions = [];
+    const regex = /((?:@[A-Za-z_]\w*(?:\([^)]*\))?\s*)*)fn\s+([A-Za-z_]\w*)\s*\(/g;
+    for (let match = regex.exec(source); match !== null; match = regex.exec(source)) {
+        const openParen = regex.lastIndex - 1;
+        const closeParen = findMatching(source, openParen, "(", ")");
+        if (closeParen < 0) {
+            continue;
+        }
+        const bodyOpen = source.indexOf("{", closeParen + 1);
+        if (bodyOpen < 0) {
+            continue;
+        }
+        const bodyClose = findMatching(source, bodyOpen, "{", "}");
+        if (bodyClose < 0) {
+            continue;
+        }
+        const attributes = match[1] || "";
+        const fnStart = match.index + attributes.length;
+        functions.push({
+            name: match[2],
+            start: match.index,
+            end: bodyClose + 1,
+            fnStart,
+            openParen,
+            closeParen,
+            bodyOpen,
+            bodyClose,
+            attributes,
+            params: source.slice(openParen + 1, closeParen),
+            returnType: source.slice(closeParen + 1, bodyOpen).trimEnd(),
+            body: source.slice(bodyOpen + 1, bodyClose),
+        });
+        regex.lastIndex = bodyClose + 1;
+    }
+    return functions;
+}
+function parsePrivateDeclarations(source) {
+    const declarations = [];
+    const regex = /\bvar<private>\s+([A-Za-z_]\w*)\s*:\s*[^;]+;\s*/g;
+    for (let match = regex.exec(source); match !== null; match = regex.exec(source)) {
+        declarations.push({
+            name: match[1],
+            start: match.index,
+            end: regex.lastIndex,
+        });
+    }
+    return declarations;
+}
+function parseStructs(source) {
+    const structs = [];
+    const regex = /\bstruct\s+([A-Za-z_]\w*)\s*\{/g;
+    for (let match = regex.exec(source); match !== null; match = regex.exec(source)) {
+        const bodyOpen = regex.lastIndex - 1;
+        const bodyClose = findMatching(source, bodyOpen, "{", "}");
+        if (bodyClose < 0) {
+            continue;
+        }
+        const body = source.slice(bodyOpen + 1, bodyClose);
+        const fields = [];
+        const fieldDetails = [];
+        const fieldRegex = /((?:@[A-Za-z_]\w*(?:\([^)]*\))?\s*)*)([A-Za-z_]\w*)\s*:\s*([^,]+),/g;
+        for (let field = fieldRegex.exec(body); field !== null; field = fieldRegex.exec(body)) {
+            const attributes = (field[1] || "").replace(/\s+/g, " ").trim();
+            const name = field[2];
+            fields.push(name);
+            fieldDetails.push({
+                attributes,
+                name,
+                type: field[3].trim(),
+            });
+        }
+        structs.push({ name: match[1], fields, fieldDetails, start: match.index, end: bodyClose + 1 });
+        regex.lastIndex = bodyClose + 1;
+    }
+    return structs;
+}
+function parseParamNames(params) {
+    const names = new Set();
+    for (const param of shaderWgslOptimizer_splitTopLevelArguments(params)) {
+        const cleaned = param.replace(/@[A-Za-z_]\w*(?:\([^)]*\))?/g, " ").trim();
+        const match = cleaned.match(/\b([A-Za-z_]\w*)\s*:\s*[^:]+$/);
+        if (match) {
+            names.add(match[1]);
+        }
+    }
+    return names;
+}
+function stripRecognizedEntryStatements(body, assignments, helperName, returnStatement) {
+    let out = body;
+    for (const assignment of assignments) {
+        out = out.replace(new RegExp(`^\\s*${shaderWgslOptimizer_escapeRegExp(assignment.target)}\\s*=\\s*${shaderWgslOptimizer_escapeRegExp(assignment.value)}\\s*;\\s*$`, "m"), "");
+    }
+    out = out.replace(new RegExp(`^\\s*${shaderWgslOptimizer_escapeRegExp(helperName)}\\s*\\(\\s*\\)\\s*;\\s*$`, "m"), "");
+    out = out.replace(new RegExp(`^\\s*${shaderWgslOptimizer_escapeRegExp(returnStatement)}\\s*$`, "m"), "");
+    return out.replace(/\/\/.*$/gm, "").trim();
+}
+function removeRanges(source, ranges) {
+    let out = source;
+    const sorted = ranges.slice().sort((a, b) => b.start - a.start);
+    for (const range of sorted) {
+        out = out.slice(0, range.start) + range.replacement + out.slice(range.end);
+    }
+    return out;
+}
+function assignmentCount(source, name) {
+    const regex = new RegExp(`\\b${shaderWgslOptimizer_escapeRegExp(name)}\\s*(?:[+\\-*/%&|^]?=)`, "g");
+    return source.match(regex)?.length ?? 0;
+}
+function directAssignmentCount(source, name) {
+    const regex = new RegExp(`(?:^|[;\\n]\\s*)${shaderWgslOptimizer_escapeRegExp(name)}\\s*=`, "g");
+    return source.match(regex)?.length ?? 0;
+}
+function fieldOrIndexAssignmentCount(source, name) {
+    const regex = new RegExp(`(?:^|[;\\n]\\s*)${shaderWgslOptimizer_escapeRegExp(name)}\\s*(?:\\.|\\[[^\\]]+\\])[^=;\\n]*=`, "g");
+    return source.match(regex)?.length ?? 0;
+}
+function applyIdentifierMap(source, replacements) {
+    let out = source;
+    const names = Array.from(replacements.keys()).sort((a, b) => b.length - a.length);
+    for (const name of names) {
+        out = wordBoundaryReplace(out, name, replacements.get(name));
+    }
+    return out;
+}
+function lowerEntryWrapper(source) {
+    const functions = parseFunctions(source);
+    const entries = functions.filter((fn) => /@(vertex|fragment)\b/.test(fn.attributes));
+    if (entries.length !== 1) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: entries.length === 0 ? "no-entry-wrapper" : "multiple-entrypoints" };
+    }
+    const entry = entries[0];
+    const privateDeclarations = parsePrivateDeclarations(source);
+    if (privateDeclarations.length === 0) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "no-private-io" };
+    }
+    const privateNames = new Set(privateDeclarations.map((declaration) => declaration.name));
+    const params = parseParamNames(entry.params);
+    const entryAssignments = [];
+    const assignmentRegex = /^\s*([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)\s*;\s*$/gm;
+    for (let match = assignmentRegex.exec(entry.body); match !== null; match = assignmentRegex.exec(entry.body)) {
+        if (privateNames.has(match[1]) && params.has(match[2])) {
+            entryAssignments.push({ target: match[1], value: match[2] });
+        }
+    }
+    const helperCallMatch = /^\s*([A-Za-z_]\w*)\s*\(\s*\)\s*;\s*$/m.exec(entry.body);
+    if (!helperCallMatch) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "entry-helper-call-not-found" };
+    }
+    const helper = functions.find((fn) => fn.name === helperCallMatch[1] && fn !== entry && !/@(vertex|fragment)\b/.test(fn.attributes));
+    if (!helper) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "helper-function-not-found" };
+    }
+    const returnMatch = /^\s*return\s+([A-Za-z_]\w*)\s*\(([\s\S]*?)\)\s*;\s*$/m.exec(entry.body);
+    if (!returnMatch) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "entry-return-constructor-not-found" };
+    }
+    const outputStructName = returnMatch[1];
+    const outputStruct = parseStructs(source).find((item) => item.name === outputStructName);
+    if (!outputStruct) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "entry-output-struct-not-found" };
+    }
+    const returnArgs = shaderWgslOptimizer_splitTopLevelArguments(returnMatch[2]);
+    if (returnArgs.length !== outputStruct.fields.length) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "entry-output-arity-mismatch" };
+    }
+    const inputMap = new Map();
+    for (const assignment of entryAssignments) {
+        inputMap.set(assignment.target, assignment.value);
+    }
+    const outputMap = new Map();
+    for (let i = 0; i < returnArgs.length; i++) {
+        const arg = returnArgs[i].trim();
+        if (/^[A-Za-z_]\w*$/.test(arg) && privateNames.has(arg)) {
+            outputMap.set(arg, `_hyd_output.${outputStruct.fields[i]}`);
+        }
+    }
+    const mappedPrivateNames = new Set([...inputMap.keys(), ...outputMap.keys()]);
+    if (mappedPrivateNames.size === 0) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "no-mapped-private-io" };
+    }
+    const recognizedRemainder = stripRecognizedEntryStatements(entry.body, entryAssignments, helper.name, returnMatch[0]);
+    if (recognizedRemainder.length > 0) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "entry-body-has-extra-statements" };
+    }
+    const outsideHelperAndEntry = removeRanges(source, [
+        { start: helper.start, end: helper.end, replacement: "" },
+        { start: entry.start, end: entry.end, replacement: "" },
+        ...privateDeclarations.map((declaration) => ({ start: declaration.start, end: declaration.end, replacement: "" })),
+    ]);
+    for (const name of mappedPrivateNames) {
+        if (countIdentifier(outsideHelperAndEntry, name) > 0) {
+            return { wgsl: source, loweredPrivateVars: 0, skipped: "private-io-escapes-wrapper" };
+        }
+    }
+    for (const name of inputMap.keys()) {
+        if (assignmentCount(helper.body, name) > 0) {
+            return { wgsl: source, loweredPrivateVars: 0, skipped: "input-private-written-in-helper" };
+        }
+    }
+    for (const name of outputMap.keys()) {
+        if (assignmentCount(helper.body, name) + fieldOrIndexAssignmentCount(helper.body, name) < 1) {
+            return { wgsl: source, loweredPrivateVars: 0, skipped: "output-private-never-written" };
+        }
+    }
+    const replacements = new Map([...inputMap, ...outputMap]);
+    let loweredBody = applyIdentifierMap(helper.body, replacements)
+        .replace(/^\s*return\s*;\s*$/gm, "")
+        .trim();
+    loweredBody = loweredBody.split("\n").map((line) => `  ${line}`).join("\n");
+    const newEntry = `${entry.attributes}fn ${entry.name}(${entry.params})${entry.returnType} {\n  var _hyd_output: ${outputStructName};\n${loweredBody}\n  return _hyd_output;\n}`;
+    const mappedDeclarations = privateDeclarations
+        .filter((declaration) => mappedPrivateNames.has(declaration.name))
+        .map((declaration) => ({ start: declaration.start, end: declaration.end, replacement: "" }));
+    const wgsl = removeRanges(source, [
+        { start: entry.start, end: entry.end, replacement: newEntry },
+        { start: helper.start, end: helper.end, replacement: "" },
+        ...mappedDeclarations,
+    ]).replace(/\n{3,}/g, "\n\n");
+    return {
+        wgsl,
+        loweredPrivateVars: mappedPrivateNames.size,
+    };
+}
+function parsePointerParams(params) {
+    const pointerParams = [];
+    const parsed = splitTopLevelParameters(params);
+    parsed.forEach((param, index) => {
+        const match = /^\s*([A-Za-z_]\w*)\s*:\s*([\s\S]+?)\s*$/.exec(param);
+        if (!match) {
+            return;
+        }
+        const pointerType = /^ptr\s*<\s*function\s*,\s*([\s\S]+?)(?:,\s*(?:read|read_write|write))?\s*>\s*$/.exec(match[2].trim());
+        if (!pointerType) {
+            return;
+        }
+        pointerParams.push({
+            index,
+            name: match[1],
+            valueType: pointerType[1].trim(),
+        });
+    });
+    return pointerParams;
+}
+function dereferenceCount(source, name) {
+    return source.match(new RegExp(`\\*\\s*\\(\\s*${shaderWgslOptimizer_escapeRegExp(name)}\\s*\\)`, "g"))?.length ?? 0;
+}
+function replacePointerDereferences(source, name) {
+    return source.replace(new RegExp(`\\*\\s*\\(\\s*${shaderWgslOptimizer_escapeRegExp(name)}\\s*\\)`, "g"), name);
+}
+function unwrapAddressOfArgument(arg) {
+    const paren = /^&\s*\(\s*([\s\S]+?)\s*\)$/.exec(arg);
+    if (paren) {
+        return paren[1].trim();
+    }
+    const bare = /^&\s*([A-Za-z_]\w*(?:\s*(?:\.|->)\s*[A-Za-z_]\w*|\s*\[[^\]]+\])*)\s*$/.exec(arg);
+    return bare ? bare[1].trim() : undefined;
+}
+function findCallArgumentRanges(source, name, exclude) {
+    const ranges = [];
+    const regex = new RegExp(`\\b${shaderWgslOptimizer_escapeRegExp(name)}\\s*\\(`, "g");
+    for (let match = regex.exec(source); match !== null; match = regex.exec(source)) {
+        const before = source.slice(Math.max(0, match.index - 4), match.index);
+        if (/\bfn\s*$/.test(before)) {
+            continue;
+        }
+        if (match.index >= exclude.start && match.index < exclude.end) {
+            continue;
+        }
+        const openParen = regex.lastIndex - 1;
+        const closeParen = findMatching(source, openParen, "(", ")");
+        if (closeParen < 0) {
+            continue;
+        }
+        ranges.push({
+            start: openParen + 1,
+            end: closeParen,
+            args: shaderWgslOptimizer_splitTopLevelArguments(source.slice(openParen + 1, closeParen)),
+        });
+        regex.lastIndex = closeParen + 1;
+    }
+    return ranges;
+}
+function lowerReadOnlyPointerParamsOnce(source) {
+    const functions = parseFunctions(source);
+    for (const fn of functions) {
+        const pointerParams = parsePointerParams(fn.params);
+        if (pointerParams.length === 0) {
+            continue;
+        }
+        let safe = true;
+        for (const param of pointerParams) {
+            if (countIdentifier(fn.body, param.name) !== dereferenceCount(fn.body, param.name)) {
+                safe = false;
+                break;
+            }
+            if (assignmentCount(fn.body, param.name) > 0 || assignmentCount(fn.body, `*(${param.name})`) > 0) {
+                safe = false;
+                break;
+            }
+        }
+        if (!safe) {
+            continue;
+        }
+        const calls = findCallArgumentRanges(source, fn.name, { start: fn.start, end: fn.end });
+        if (calls.length === 0) {
+            continue;
+        }
+        const pointerByIndex = new Map(pointerParams.map((param) => [param.index, param]));
+        const callReplacements = [];
+        for (const call of calls) {
+            if (call.args.length < splitTopLevelParameters(fn.params).length) {
+                safe = false;
+                break;
+            }
+            const args = call.args.slice();
+            for (const param of pointerParams) {
+                const replacement = unwrapAddressOfArgument(args[param.index]);
+                if (replacement === undefined) {
+                    safe = false;
+                    break;
+                }
+                args[param.index] = replacement;
+            }
+            if (!safe) {
+                break;
+            }
+            callReplacements.push({
+                start: call.start,
+                end: call.end,
+                replacement: args.join(", "),
+            });
+        }
+        if (!safe) {
+            continue;
+        }
+        let newBody = fn.body;
+        for (const param of pointerParams) {
+            newBody = replacePointerDereferences(newBody, param.name);
+        }
+        const newParams = splitTopLevelParameters(fn.params).map((param, index) => {
+            const pointerParam = pointerByIndex.get(index);
+            return pointerParam ? `${pointerParam.name} : ${pointerParam.valueType}` : param;
+        }).join(", ");
+        const wgsl = removeRanges(source, [
+            ...callReplacements,
+            { start: fn.bodyOpen + 1, end: fn.bodyClose, replacement: newBody },
+            { start: fn.openParen + 1, end: fn.closeParen, replacement: newParams },
+        ]);
+        return {
+            wgsl,
+            loweredPointerParams: pointerParams.length,
+        };
+    }
+    return { wgsl: source, loweredPointerParams: 0, skipped: "no-readonly-pointer-params" };
+}
+function lowerReadOnlyPointerParams(source) {
+    let out = source;
+    let loweredPointerParams = 0;
+    for (let i = 0; i < 32; i++) {
+        const lowered = lowerReadOnlyPointerParamsOnce(out);
+        if (lowered.loweredPointerParams === 0) {
+            return { wgsl: out, loweredPointerParams, skipped: lowered.skipped };
+        }
+        out = lowered.wgsl;
+        loweredPointerParams += lowered.loweredPointerParams;
+    }
+    return { wgsl: out, loweredPointerParams, skipped: "pointer-param-iteration-limit" };
+}
+function foldVectorConstructors(source) {
+    let folded = 0;
+    let out = source.replace(/\bvec2f\s*\(\s*([A-Za-z_]\w*)\.x\s*,\s*\1\.y\s*\)/g, (_match, value) => {
+        folded++;
+        return value;
+    });
+    out = out.replace(/\bvec3f\s*\(\s*([A-Za-z_]\w*)\.x\s*,\s*\1\.y\s*,\s*\1\.z\s*\)/g, (_match, value) => {
+        folded++;
+        return value;
+    });
+    out = out.replace(/\bvec4f\s*\(\s*([A-Za-z_]\w*)\.x\s*,\s*\1\.y\s*,\s*\1\.z\s*,\s*\1\.w\s*\)/g, (_match, value) => {
+        folded++;
+        return value;
+    });
+    out = out.replace(/\bvec4f\s*\(\s*([A-Za-z_]\w*)\.x\s*,\s*\1\.y\s*,\s*\1\.z\s*,\s*([^,)]+?)\s*\)/g, (_match, value, scalar) => {
+        folded++;
+        return `vec4f(${value}, ${scalar.trim()})`;
+    });
+    return { wgsl: out, folded };
+}
+function foldSimpleIfElseSelect(source) {
+    let folded = 0;
+    const out = source.replace(/if\s*\(\s*([\s\S]*?)\s*\)\s*\{\s*([A-Za-z_]\w*)\s*=\s*([^;{}]+?)\s*;\s*\}\s*else\s*\{\s*\2\s*=\s*([^;{}]+?)\s*;\s*\}/g, (_match, condition, target, whenTrue, whenFalse) => {
+        folded++;
+        return `${target} = select(${whenFalse.trim()}, ${whenTrue.trim()}, ${condition.trim()});`;
+    });
+    return { wgsl: out, folded };
+}
+function removeSingleUseLets(source) {
+    let out = source;
+    let removed = 0;
+    let changed = true;
+    while (changed) {
+        changed = false;
+        const regex = /^([ \t]*)let\s+(x_\d+)(?:\s*:\s*[^=]+?)?\s*=\s*([^;{}]+);\s*\n/gm;
+        for (let match = regex.exec(out); match !== null; match = regex.exec(out)) {
+            const full = match[0];
+            const name = match[2];
+            const expression = match[3].trim();
+            const after = out.slice(match.index + full.length);
+            const useCount = countIdentifier(after, name);
+            const isSimpleAlias = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?$/.test(expression);
+            if (useCount === 0 || (!isSimpleAlias && useCount !== 1)) {
+                continue;
+            }
+            out = out.slice(0, match.index) + out.slice(match.index + full.length);
+            const replacement = isSimpleAlias ? expression : `(${expression})`;
+            out = out.slice(0, match.index) + wordBoundaryReplace(out.slice(match.index), name, replacement);
+            removed++;
+            changed = true;
+            break;
+        }
+    }
+    return { wgsl: out, removed };
+}
+function expressionContainsExpensivePureCall(expression) {
+    return /\bpow\s*\(/.test(expression);
+}
+function isZeroLiteralExpression(expression) {
+    return /^\(?\s*0(?:\.0+)?f?\s*\)?$/.test(stripBalancedOuterParens(expression));
+}
+function findMatchingInLine(source, openIndex) {
+    let depth = 0;
+    for (let i = openIndex; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === "(") {
+            depth++;
+        }
+        else if (ch === ")") {
+            depth--;
+            if (depth === 0) {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+function findLazyPowSelect(line) {
+    let searchFrom = 0;
+    while (searchFrom < line.length) {
+        const selectStart = line.indexOf("select", searchFrom);
+        if (selectStart < 0) {
+            return undefined;
+        }
+        const before = selectStart === 0 ? "" : line[selectStart - 1];
+        const after = line[selectStart + "select".length] || "";
+        if ((before && /[A-Za-z0-9_]/.test(before)) || after !== "(") {
+            searchFrom = selectStart + "select".length;
+            continue;
+        }
+        const selectOpen = selectStart + "select".length;
+        const selectClose = findMatchingInLine(line, selectOpen);
+        if (selectClose < 0) {
+            return undefined;
+        }
+        const args = shaderWgslOptimizer_splitTopLevelArguments(line.slice(selectOpen + 1, selectClose));
+        if (args.length !== 3) {
+            searchFrom = selectClose + 1;
+            continue;
+        }
+        const [whenFalse, whenTrue, condition] = args;
+        if (isZeroLiteralExpression(whenFalse) && expressionContainsExpensivePureCall(whenTrue)) {
+            return { start: selectStart, end: selectClose + 1, powExpression: whenTrue.trim(), zeroWhenTrue: false, condition: condition.trim() };
+        }
+        if (isZeroLiteralExpression(whenTrue) && expressionContainsExpensivePureCall(whenFalse)) {
+            return { start: selectStart, end: selectClose + 1, powExpression: whenFalse.trim(), zeroWhenTrue: true, condition: condition.trim() };
+        }
+        searchFrom = selectClose + 1;
+    }
+    return undefined;
+}
+function branchifyLazyPowSelects(source) {
+    const lines = source.split("\n");
+    let branchified = 0;
+    let tempCounter = 0;
+    for (let i = 0; i < lines.length; i++) {
+        let line = lines[i];
+        if (!/\bselect\s*\(/.test(line) || !/\bpow\s*\(/.test(line) || !/;\s*$/.test(line)) {
+            continue;
+        }
+        const indent = /^(\s*)/.exec(line)?.[1] ?? "";
+        const prelude = [];
+        let select;
+        while ((select = findLazyPowSelect(line)) !== undefined) {
+            const tempName = `_hyd_lazy_pow_select_${tempCounter++}`;
+            const condition = select.zeroWhenTrue ? `!(${select.condition})` : select.condition;
+            prelude.push(`${indent}var ${tempName} : f32 = 0.0f;`, `${indent}if (${condition}) {`, `${indent}  ${tempName} = ${select.powExpression};`, `${indent}}`);
+            line = line.slice(0, select.start) + tempName + line.slice(select.end);
+            branchified++;
+        }
+        if (prelude.length > 0) {
+            lines[i] = `${prelude.join("\n")}\n${line}`;
+        }
+    }
+    return { wgsl: lines.join("\n"), branchified };
+}
+function branchifyExpensiveSelects(source) {
+    const lines = source.split("\n");
+    let branchified = 0;
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const letMatch = /^(\s*)let\s+([A-Za-z_]\w*)\s*:\s*([^=]+?)\s*=\s*select\s*\(/.exec(line);
+        const assignMatch = letMatch ? null : /^(\s*)([A-Za-z_]\w*)\s*=\s*select\s*\(/.exec(line);
+        const match = letMatch || assignMatch;
+        if (!match) {
+            continue;
+        }
+        const selectStart = line.indexOf("select", Math.max(0, match[0].length - 16));
+        if (selectStart < 0) {
+            continue;
+        }
+        const selectOpen = line.indexOf("(", selectStart + "select".length);
+        if (selectOpen < 0) {
+            continue;
+        }
+        const selectClose = findMatchingInLine(line, selectOpen);
+        if (selectClose < 0 || !/^\s*;\s*$/.test(line.slice(selectClose + 1))) {
+            continue;
+        }
+        const args = shaderWgslOptimizer_splitTopLevelArguments(line.slice(selectOpen + 1, selectClose));
+        if (args.length !== 3) {
+            continue;
+        }
+        const [whenFalse, whenTrue, condition] = args;
+        if (!expressionContainsExpensivePureCall(whenFalse) && !expressionContainsExpensivePureCall(whenTrue)) {
+            continue;
+        }
+        const indent = match[1];
+        const name = match[2];
+        if (letMatch) {
+            const type = letMatch[3].trim();
+            lines[i] = [
+                `${indent}var ${name} : ${type};`,
+                `${indent}if (${condition}) {`,
+                `${indent}  ${name} = ${whenTrue};`,
+                `${indent}} else {`,
+                `${indent}  ${name} = ${whenFalse};`,
+                `${indent}}`,
+            ].join("\n");
+        }
+        else {
+            lines[i] = [
+                `${indent}if (${condition}) {`,
+                `${indent}  ${name} = ${whenTrue};`,
+                `${indent}} else {`,
+                `${indent}  ${name} = ${whenFalse};`,
+                `${indent}}`,
+            ].join("\n");
+        }
+        branchified++;
+    }
+    return { wgsl: lines.join("\n"), branchified };
+}
+function stripBalancedOuterParens(expression) {
+    let out = expression.trim();
+    while (out.startsWith("(") && out.endsWith(")")) {
+        const close = findMatching(out, 0, "(", ")");
+        if (close !== out.length - 1) {
+            break;
+        }
+        out = out.slice(1, -1).trim();
+    }
+    return out;
+}
+function normalizeExpressionForCompare(expression) {
+    return stripBalancedOuterParens(expression).replace(/\s+/g, "");
+}
+function returnStructName(returnType) {
+    const match = /^\s*->\s*([A-Za-z_]\w*)\s*$/.exec(returnType);
+    return match ? match[1] : undefined;
+}
+function replaceOutputSwizzle(expression, outputName, fieldName, swizzle, replacement) {
+    const pattern = new RegExp(`${shaderWgslOptimizer_escapeRegExp(outputName)}\\.${shaderWgslOptimizer_escapeRegExp(fieldName)}\\.${shaderWgslOptimizer_escapeRegExp(swizzle)}`, "g");
+    return expression.replace(pattern, () => replacement);
+}
+function foldOutputComponentStoresInBody(body, outputName) {
+    const lines = body.split("\n");
+    let folded = 0;
+    for (let i = 0; i <= lines.length - 5; i++) {
+        const xMatch = new RegExp(`^([ \\t]*)${shaderWgslOptimizer_escapeRegExp(outputName)}\\.([A-Za-z_]\\w*)\\.x\\s*=\\s*([\\s\\S]+);\\s*$`).exec(lines[i]);
+        if (!xMatch) {
+            continue;
+        }
+        const indent = xMatch[1];
+        const field = xMatch[2];
+        const yMatch = new RegExp(`^[ \\t]*${shaderWgslOptimizer_escapeRegExp(outputName)}\\.${shaderWgslOptimizer_escapeRegExp(field)}\\.y\\s*=\\s*([\\s\\S]+);\\s*$`).exec(lines[i + 1]);
+        const wholeMatch = new RegExp(`^[ \\t]*${shaderWgslOptimizer_escapeRegExp(outputName)}\\.${shaderWgslOptimizer_escapeRegExp(field)}\\s*=\\s*([\\s\\S]+);\\s*$`).exec(lines[i + 2]);
+        const zMatch = new RegExp(`^[ \\t]*${shaderWgslOptimizer_escapeRegExp(outputName)}\\.${shaderWgslOptimizer_escapeRegExp(field)}\\.z\\s*=\\s*([\\s\\S]+);\\s*$`).exec(lines[i + 3]);
+        const wMatch = new RegExp(`^[ \\t]*${shaderWgslOptimizer_escapeRegExp(outputName)}\\.${shaderWgslOptimizer_escapeRegExp(field)}\\.w\\s*=\\s*([\\s\\S]+);\\s*$`).exec(lines[i + 4]);
+        if (!yMatch || !wholeMatch || !zMatch || !wMatch) {
+            continue;
+        }
+        const constructorArgs = unwrapFunctionCall(wholeMatch[1].trim(), "vec4f") ?? unwrapFunctionCall(wholeMatch[1].trim(), "vec4<f32>");
+        if (!constructorArgs) {
+            continue;
+        }
+        const args = shaderWgslOptimizer_splitTopLevelArguments(constructorArgs);
+        if (args.length !== 2 || normalizeExpressionForCompare(args[1]) !== `${outputName}.${field}.zw`) {
+            continue;
+        }
+        const xyReplacement = `vec2f(${xMatch[3].trim()}, ${yMatch[1].trim()})`;
+        const xyExpression = replaceOutputSwizzle(args[0].trim(), outputName, field, "xy", xyReplacement);
+        const xyComponents = splitVec2AffineComponents(xyExpression);
+        const constructor = xyComponents
+            ? `vec4f(${xyComponents[0]}, ${xyComponents[1]}, ${zMatch[1].trim()}, ${wMatch[1].trim()})`
+            : `vec4f(${xyExpression}, ${zMatch[1].trim()}, ${wMatch[1].trim()})`;
+        lines.splice(i, 5, `${indent}${outputName}.${field} = ${constructor};`);
+        folded++;
+    }
+    for (let i = 0; i <= lines.length - 4; i++) {
+        const xMatch = new RegExp(`^([ \\t]*)${shaderWgslOptimizer_escapeRegExp(outputName)}\\.([A-Za-z_]\\w*)\\.x\\s*=\\s*([\\s\\S]+);\\s*$`).exec(lines[i]);
+        if (!xMatch) {
+            continue;
+        }
+        const indent = xMatch[1];
+        const field = xMatch[2];
+        const yMatch = new RegExp(`^[ \\t]*${shaderWgslOptimizer_escapeRegExp(outputName)}\\.${shaderWgslOptimizer_escapeRegExp(field)}\\.y\\s*=\\s*([\\s\\S]+);\\s*$`).exec(lines[i + 1]);
+        const zMatch = new RegExp(`^[ \\t]*${shaderWgslOptimizer_escapeRegExp(outputName)}\\.${shaderWgslOptimizer_escapeRegExp(field)}\\.z\\s*=\\s*([\\s\\S]+);\\s*$`).exec(lines[i + 2]);
+        const wMatch = new RegExp(`^[ \\t]*${shaderWgslOptimizer_escapeRegExp(outputName)}\\.${shaderWgslOptimizer_escapeRegExp(field)}\\.w\\s*=\\s*([\\s\\S]+);\\s*$`).exec(lines[i + 3]);
+        if (!yMatch || !zMatch || !wMatch) {
+            continue;
+        }
+        lines.splice(i, 4, `${indent}${outputName}.${field} = vec4f(${xMatch[3].trim()}, ${yMatch[1].trim()}, ${zMatch[1].trim()}, ${wMatch[1].trim()});`);
+        folded++;
+    }
+    return { body: lines.join("\n"), folded };
+}
+function scalarizeVec2OutputAssignmentsInBody(body, outputName, fieldTypes, vectorNames) {
+    const lines = body.split("\n");
+    let scalarized = 0;
+    for (let i = 0; i < lines.length; i++) {
+        const assignment = new RegExp(`^([ \\t]*)${shaderWgslOptimizer_escapeRegExp(outputName)}\\.([A-Za-z_]\\w*)\\s*=\\s*([\\s\\S]+);\\s*$`).exec(lines[i]);
+        if (!assignment || !isVec2Type(fieldTypes.get(assignment[2]) || "")) {
+            continue;
+        }
+        const components = splitVec2AffineComponents(assignment[3].trim(), vectorNames);
+        if (!components) {
+            continue;
+        }
+        const replacement = `${assignment[1]}${outputName}.${assignment[2]} = vec2f(${components[0]}, ${components[1]});`;
+        if (replacement === lines[i]) {
+            continue;
+        }
+        lines[i] = replacement;
+        scalarized++;
+    }
+    return { body: lines.join("\n"), scalarized };
+}
+function foldOutputComponentStores(source) {
+    let out = source;
+    let folded = 0;
+    let changed = true;
+    while (changed) {
+        changed = false;
+        const functions = parseFunctions(out);
+        const structs = parseStructs(out);
+        for (const fn of functions) {
+            if (!/@(vertex|fragment)\b/.test(fn.attributes)) {
+                continue;
+            }
+            const structName = returnStructName(fn.returnType);
+            if (!structName) {
+                continue;
+            }
+            const outputStruct = structs.find((item) => item.name === structName);
+            if (!outputStruct) {
+                continue;
+            }
+            const vectorNames = collectVec2ValueNames(fn);
+            const fieldTypes = new Map(outputStruct.fieldDetails.map((field) => [field.name, field.type]));
+            const varMatch = new RegExp(`^\\s*var\\s+([A-Za-z_]\\w*)\\s*:\\s*${shaderWgslOptimizer_escapeRegExp(structName)}\\s*;`).exec(fn.body);
+            if (!varMatch) {
+                continue;
+            }
+            if (/\b(if|for|while|loop|switch|discard|break|continue|return)\b/.test(fn.body.replace(new RegExp(`return\\s+${shaderWgslOptimizer_escapeRegExp(varMatch[1])}\\s*;\\s*$`), ""))) {
+                continue;
+            }
+            const componentResult = foldOutputComponentStoresInBody(fn.body, varMatch[1]);
+            const scalarResult = scalarizeVec2OutputAssignmentsInBody(componentResult.body, varMatch[1], fieldTypes, vectorNames);
+            const changedCount = componentResult.folded + scalarResult.scalarized;
+            if (changedCount === 0) {
+                continue;
+            }
+            out = out.slice(0, fn.bodyOpen + 1) + scalarResult.body + out.slice(fn.bodyClose);
+            folded += changedCount;
+            changed = true;
+            break;
+        }
+    }
+    return { wgsl: out, folded };
+}
+function isVec2Type(type) {
+    return /^(?:vec2f|vec2\s*<\s*f32\s*>)$/.test(type.trim().replace(/\s+/g, ""));
+}
+function collectVec2ValueNames(fn) {
+    const names = new Set();
+    for (const param of splitTopLevelParameters(fn.params)) {
+        const cleaned = param.replace(/@[A-Za-z_]\w*(?:\([^)]*\))?/g, " ").trim();
+        const match = /^([A-Za-z_]\w*)\s*:\s*([\s\S]+)$/.exec(cleaned);
+        if (match && isVec2Type(match[2])) {
+            names.add(match[1]);
+        }
+    }
+    const declarationRegex = /\b(?:let|var)\s+([A-Za-z_]\w*)\s*:\s*([^=;]+)(?:[=;])/g;
+    for (let declaration = declarationRegex.exec(fn.body); declaration !== null; declaration = declarationRegex.exec(fn.body)) {
+        if (isVec2Type(declaration[2])) {
+            names.add(declaration[1]);
+        }
+    }
+    return names;
+}
+function constructOutputStructReturnsOnce(source) {
+    const functions = parseFunctions(source);
+    const structs = parseStructs(source);
+    for (const fn of functions) {
+        if (!/@(vertex|fragment)\b/.test(fn.attributes)) {
+            continue;
+        }
+        const structName = returnStructName(fn.returnType);
+        if (!structName) {
+            continue;
+        }
+        const outputStruct = structs.find((item) => item.name === structName);
+        if (!outputStruct || outputStruct.fields.length === 0) {
+            continue;
+        }
+        if (outputStruct.fields.length !== 1) {
+            continue;
+        }
+        const vectorNames = collectVec2ValueNames(fn);
+        const fieldTypes = new Map(outputStruct.fieldDetails.map((field) => [field.name, field.type]));
+        const varMatch = new RegExp(`^\\s*var\\s+([A-Za-z_]\\w*)\\s*:\\s*${shaderWgslOptimizer_escapeRegExp(structName)}\\s*;[ \\t]*(?:\\r?\\n)?`).exec(fn.body);
+        if (!varMatch) {
+            continue;
+        }
+        const outputName = varMatch[1];
+        const afterVar = fn.body.slice(varMatch[0].length);
+        const returnMatch = new RegExp(`\\s*return\\s+${shaderWgslOptimizer_escapeRegExp(outputName)}\\s*;\\s*$`).exec(afterVar);
+        if (!returnMatch) {
+            continue;
+        }
+        const middle = afterVar.slice(0, returnMatch.index);
+        if (/\b(if|for|while|loop|switch|return|discard|break|continue)\b/.test(middle)) {
+            continue;
+        }
+        const assigned = new Map();
+        const prelude = [];
+        let outputAssignmentsStarted = false;
+        let safe = true;
+        for (const line of middle.split("\n")) {
+            const trimmed = line.trim();
+            if (trimmed.length === 0) {
+                if (!outputAssignmentsStarted) {
+                    prelude.push(line);
+                }
+                continue;
+            }
+            const assignment = new RegExp(`^[ \\t]*${shaderWgslOptimizer_escapeRegExp(outputName)}\\.([A-Za-z_]\\w*)\\s*=\\s*([\\s\\S]+);\\s*$`).exec(line);
+            if (assignment) {
+                outputAssignmentsStarted = true;
+                const field = assignment[1];
+                let value = assignment[2].trim();
+                if (assigned.has(field) || value.includes(`${outputName}.`)) {
+                    safe = false;
+                    break;
+                }
+                if (isVec2Type(fieldTypes.get(field) || "")) {
+                    const components = splitVec2AffineComponents(value, vectorNames);
+                    if (components) {
+                        value = `vec2f(${components[0]}, ${components[1]})`;
+                    }
+                }
+                assigned.set(field, value);
+                continue;
+            }
+            if (outputAssignmentsStarted || new RegExp(`\\b${shaderWgslOptimizer_escapeRegExp(outputName)}\\b`).test(line)) {
+                safe = false;
+                break;
+            }
+            if (!/^\s*(let|var)\s+[A-Za-z_]\w*\b/.test(line)) {
+                safe = false;
+                break;
+            }
+            prelude.push(line);
+        }
+        if (!safe) {
+            continue;
+        }
+        if (assigned.size !== outputStruct.fields.length || outputStruct.fields.some((field) => !assigned.has(field))) {
+            continue;
+        }
+        const args = outputStruct.fields.map((field) => assigned.get(field));
+        const preludeBody = prelude.join("\n").replace(/\s+$/g, "");
+        const newBody = preludeBody.length > 0
+            ? `\n${preludeBody}\n  return ${structName}(${args.join(", ")});\n`
+            : `\n  return ${structName}(${args.join(", ")});\n`;
+        return {
+            wgsl: source.slice(0, fn.bodyOpen + 1) + newBody + source.slice(fn.bodyClose),
+            constructed: 1,
+        };
+    }
+    return { wgsl: source, constructed: 0 };
+}
+function constructOutputStructReturns(source) {
+    let out = source;
+    let constructed = 0;
+    for (let i = 0; i < 32; i++) {
+        const result = constructOutputStructReturnsOnce(out);
+        if (result.constructed === 0) {
+            return { wgsl: out, constructed };
+        }
+        out = result.wgsl;
+        constructed += result.constructed;
+    }
+    return { wgsl: out, constructed };
+}
+function collapseSingleFieldOutputStructsOnce(source) {
+    const functions = parseFunctions(source);
+    const structs = parseStructs(source);
+    for (const fn of functions) {
+        if (!/@(vertex|fragment)\b/.test(fn.attributes)) {
+            continue;
+        }
+        const structName = returnStructName(fn.returnType);
+        if (!structName) {
+            continue;
+        }
+        const outputStruct = structs.find((item) => item.name === structName);
+        if (!outputStruct || outputStruct.fieldDetails.length !== 1) {
+            continue;
+        }
+        const field = outputStruct.fieldDetails[0];
+        if (!field.attributes) {
+            continue;
+        }
+        const returnRegex = new RegExp(`return\\s+${shaderWgslOptimizer_escapeRegExp(structName)}\\s*\\(`, "g");
+        let returnMatch = null;
+        for (let match = returnRegex.exec(fn.body); match !== null; match = returnRegex.exec(fn.body)) {
+            returnMatch = match;
+        }
+        if (!returnMatch) {
+            continue;
+        }
+        const bodyReturnStart = returnMatch.index;
+        const openParen = fn.body.indexOf("(", bodyReturnStart);
+        if (openParen < 0) {
+            continue;
+        }
+        const closeParen = findMatching(fn.body, openParen, "(", ")");
+        if (closeParen < 0 || !/^\s*;\s*$/.test(fn.body.slice(closeParen + 1))) {
+            continue;
+        }
+        const args = shaderWgslOptimizer_splitTopLevelArguments(fn.body.slice(openParen + 1, closeParen));
+        if (args.length !== 1) {
+            continue;
+        }
+        const absoluteReturnStart = fn.bodyOpen + 1 + bodyReturnStart;
+        const absoluteReturnEnd = fn.bodyOpen + 1 + closeParen + 2;
+        const replacementReturnType = ` -> ${field.attributes} ${field.type} `;
+        let out = removeRanges(source, [
+            { start: absoluteReturnStart, end: absoluteReturnEnd, replacement: `return ${args[0]};` },
+            { start: fn.closeParen + 1, end: fn.bodyOpen, replacement: replacementReturnType },
+        ]);
+        out = out.replace(/\n{3,}/g, "\n\n");
+        return { wgsl: out, collapsed: 1 };
+    }
+    return { wgsl: source, collapsed: 0 };
+}
+function collapseSingleFieldOutputStructs(source) {
+    let out = source;
+    let collapsed = 0;
+    for (let i = 0; i < 32; i++) {
+        const result = collapseSingleFieldOutputStructsOnce(out);
+        if (result.collapsed === 0) {
+            return { wgsl: out, collapsed };
+        }
+        out = result.wgsl;
+        collapsed += result.collapsed;
+    }
+    return { wgsl: out, collapsed };
+}
+function splitTopLevelOperator(expression, operator) {
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    for (let i = expression.length - 1; i >= 0; i--) {
+        const ch = expression[i];
+        if (ch === ")") {
+            parenDepth++;
+        }
+        else if (ch === "(") {
+            parenDepth--;
+        }
+        else if (ch === "]") {
+            bracketDepth++;
+        }
+        else if (ch === "[") {
+            bracketDepth--;
+        }
+        else if (ch === operator && parenDepth === 0 && bracketDepth === 0) {
+            if (operator === "-" && (i === 0 || /[+\-*/(<>=,]/.test(expression[i - 1]))) {
+                continue;
+            }
+            return [expression.slice(0, i).trim(), expression.slice(i + 1).trim()];
+        }
+    }
+    return undefined;
+}
+function unwrapTrailingSwizzle(expression, swizzle) {
+    const trimmed = expression.trim();
+    if (!trimmed.endsWith(`.${swizzle}`)) {
+        return undefined;
+    }
+    return stripBalancedOuterParens(trimmed.slice(0, -(swizzle.length + 1)).trim());
+}
+function splitVec2ConstructorComponents(expression) {
+    const argsSource = unwrapFunctionCall(stripBalancedOuterParens(expression), "vec2f")
+        ?? unwrapFunctionCall(stripBalancedOuterParens(expression), "vec2<f32>");
+    if (!argsSource) {
+        return undefined;
+    }
+    const args = shaderWgslOptimizer_splitTopLevelArguments(argsSource);
+    return args.length === 2 ? [args[0], args[1]] : undefined;
+}
+function vectorComponent(expression, index, vectorNames) {
+    const expr = stripBalancedOuterParens(expression);
+    const constructor = splitVec2ConstructorComponents(expr);
+    if (constructor) {
+        return constructor[index];
+    }
+    if (vectorNames?.has(expr)) {
+        return `${expr}.${index === 0 ? "x" : "y"}`;
+    }
+    const swizzle = /^([\s\S]+)\.([xyzw]{2,4})$/.exec(expr);
+    if (!swizzle || swizzle[2].length <= index) {
+        return undefined;
+    }
+    return `${stripBalancedOuterParens(swizzle[1].trim())}.${swizzle[2][index]}`;
+}
+function splitVec2AffineComponents(expression, vectorNames) {
+    const expr = unwrapTrailingSwizzle(expression, "xy") ?? stripBalancedOuterParens(expression);
+    const addOffset = splitTopLevelOperator(expr, "+");
+    if (!addOffset) {
+        return splitVec2ConstructorComponents(expr);
+    }
+    const multiply = splitTopLevelOperator(stripBalancedOuterParens(addOffset[0]), "*");
+    if (!multiply) {
+        return undefined;
+    }
+    const addBase = splitTopLevelOperator(stripBalancedOuterParens(multiply[0]), "+");
+    if (!addBase) {
+        const baseX = vectorComponent(multiply[0], 0, vectorNames);
+        const baseY = vectorComponent(multiply[0], 1, vectorNames);
+        const scaleX = vectorComponent(multiply[1], 0, vectorNames);
+        const scaleY = vectorComponent(multiply[1], 1, vectorNames);
+        const offsetX = vectorComponent(addOffset[1], 0, vectorNames);
+        const offsetY = vectorComponent(addOffset[1], 1, vectorNames);
+        if (!baseX || !baseY || !scaleX || !scaleY || !offsetX || !offsetY) {
+            return undefined;
+        }
+        return [
+            `(((${baseX}) * ${scaleX}) + ${offsetX})`,
+            `(((${baseY}) * ${scaleY}) + ${offsetY})`,
+        ];
+    }
+    const baseX = vectorComponent(addBase[0], 0, vectorNames);
+    const baseY = vectorComponent(addBase[0], 1, vectorNames);
+    const addX = vectorComponent(addBase[1], 0, vectorNames);
+    const addY = vectorComponent(addBase[1], 1, vectorNames);
+    const scaleX = vectorComponent(multiply[1], 0, vectorNames);
+    const scaleY = vectorComponent(multiply[1], 1, vectorNames);
+    const offsetX = vectorComponent(addOffset[1], 0, vectorNames);
+    const offsetY = vectorComponent(addOffset[1], 1, vectorNames);
+    if (!baseX || !baseY || !addX || !addY || !scaleX || !scaleY || !offsetX || !offsetY) {
+        return undefined;
+    }
+    return [
+        `(((${baseX} + ${addX}) * ${scaleX}) + ${offsetX})`,
+        `(((${baseY} + ${addY}) * ${scaleY}) + ${offsetY})`,
+    ];
+}
+function unwrapFunctionCall(expression, name) {
+    const trimmed = expression.trim();
+    if (!trimmed.startsWith(`${name}(`) || !trimmed.endsWith(")")) {
+        return undefined;
+    }
+    const open = name.length;
+    const close = findMatching(trimmed, open, "(", ")");
+    if (close !== trimmed.length - 1) {
+        return undefined;
+    }
+    return trimmed.slice(open + 1, close).trim();
+}
+function matchGlslModExpansion(expression) {
+    const expr = stripBalancedOuterParens(expression);
+    const topMinus = splitTopLevelOperator(expr, "-");
+    if (!topMinus) {
+        return undefined;
+    }
+    const value = stripBalancedOuterParens(topMinus[0]);
+    const right = stripBalancedOuterParens(topMinus[1]);
+    const multiply = splitTopLevelOperator(right, "*");
+    if (!multiply) {
+        return undefined;
+    }
+    const divisor = stripBalancedOuterParens(multiply[0]);
+    const floorArg = unwrapFunctionCall(stripBalancedOuterParens(multiply[1]), "floor");
+    if (!floorArg) {
+        return undefined;
+    }
+    const division = splitTopLevelOperator(stripBalancedOuterParens(floorArg), "/");
+    if (!division) {
+        return undefined;
+    }
+    if (normalizeExpressionForCompare(division[0]) !== normalizeExpressionForCompare(value)) {
+        return undefined;
+    }
+    if (normalizeExpressionForCompare(division[1]) !== normalizeExpressionForCompare(divisor)) {
+        return undefined;
+    }
+    return { value, divisor };
+}
+function hoistRepeatedModOperands(source) {
+    const lines = source.split("\n");
+    let hoisted = 0;
+    let counter = 0;
+    for (let i = 0; i < lines.length; i++) {
+        const match = /^(\s*)let\s+([A-Za-z_]\w*)\s*:\s*([^=]+?)\s*=\s*([\s\S]+);\s*$/.exec(lines[i]);
+        if (!match) {
+            continue;
+        }
+        const mod = matchGlslModExpansion(match[4]);
+        if (!mod) {
+            continue;
+        }
+        if (/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?$/.test(stripBalancedOuterParens(mod.value))) {
+            continue;
+        }
+        const indent = match[1];
+        const type = match[3].trim();
+        const tempName = `_hyd_mod_${counter++}`;
+        lines[i] = [
+            `${indent}let ${tempName} : ${type} = ${mod.value};`,
+            `${indent}let ${match[2]} : ${type} = (${tempName} - (${mod.divisor} * floor((${tempName} / ${mod.divisor}))));`,
+        ].join("\n");
+        hoisted++;
+    }
+    return { wgsl: lines.join("\n"), hoisted };
+}
+function isOneLiteralExpression(expression) {
+    return /^\(?\s*1(?:\.0+)?f?\s*\)?$/.test(stripBalancedOuterParens(expression));
+}
+function foldModByOneToFract(source) {
+    const lines = source.split("\n");
+    let folded = 0;
+    for (let i = 0; i < lines.length; i++) {
+        const match = /^(\s*(?:(?:let|var)\s+[A-Za-z_]\w*\s*:\s*[^=]+?=|[A-Za-z_]\w*\s*=)\s*)([\s\S]+?)(;\s*)$/.exec(lines[i]);
+        if (!match) {
+            continue;
+        }
+        const mod = matchGlslModExpansion(match[2]);
+        if (!mod || !isOneLiteralExpression(mod.divisor)) {
+            continue;
+        }
+        lines[i] = `${match[1]}fract(${stripBalancedOuterParens(mod.value)})${match[3]}`;
+        folded++;
+    }
+    return { wgsl: lines.join("\n"), folded };
+}
+function elideRedundantRangeClamps(source) {
+    let elided = 0;
+    const out = source.replace(/^([ \t]*)([A-Za-z_]\w*)\s*=\s*select\s*\(\s*\2\s*,\s*0\.0f?\s*,\s*\(\(?\s*([A-Za-z_]\w*)\s*<\s*0\.0f?\s*\)?\s*\|\s*\(?\s*\3\s*>\s*1\.0f?\s*\)?\)\s*\)\s*;\s*$/gm, () => {
+        elided++;
+        return "";
+    });
+    return { wgsl: out, elided };
+}
+function shouldElideRangeClamps() {
+    return typeof globalThis !== "undefined" && globalThis.__HYD_ASSUME_LIFE_RANGE_CLAMP_REDUNDANT === true;
+}
+function promoteSingleAssignmentVarsInBody(body) {
+    let out = body;
+    let promoted = 0;
+    let changed = true;
+    while (changed) {
+        changed = false;
+        const declarationRegex = /^([ \t]*)var\s+([A-Za-z_]\w*)\s*:\s*([^;=]+);\s*\n/gm;
+        for (let declaration = declarationRegex.exec(out); declaration !== null; declaration = declarationRegex.exec(out)) {
+            const fullDeclaration = declaration[0];
+            const name = declaration[2];
+            const type = declaration[3].trim();
+            if (name === "_hyd_output") {
+                continue;
+            }
+            if (directAssignmentCount(out, name) !== 1 || fieldOrIndexAssignmentCount(out, name) !== 0) {
+                continue;
+            }
+            if (new RegExp(`&\\s*\\(?\\s*${shaderWgslOptimizer_escapeRegExp(name)}\\b`).test(out)) {
+                continue;
+            }
+            const assignmentRegex = new RegExp(`^([ \\t]*)${shaderWgslOptimizer_escapeRegExp(name)}\\s*=\\s*([^;{}]+);\\s*$`, "m");
+            const assignment = assignmentRegex.exec(out);
+            if (!assignment) {
+                continue;
+            }
+            if (assignment.index < declaration.index) {
+                continue;
+            }
+            const between = out.slice(declaration.index + fullDeclaration.length, assignment.index);
+            if (countIdentifier(between, name) > 0) {
+                continue;
+            }
+            const replacement = `${assignment[1]}let ${name} : ${type} = ${assignment[2].trim()};`;
+            out = out.slice(0, declaration.index) + out.slice(declaration.index + fullDeclaration.length);
+            const adjustedAssignmentIndex = assignment.index - fullDeclaration.length;
+            out = out.slice(0, adjustedAssignmentIndex) + replacement + out.slice(adjustedAssignmentIndex + assignment[0].length);
+            promoted++;
+            changed = true;
+            break;
+        }
+    }
+    return { body: out, promoted };
+}
+function promoteSingleAssignmentVars(source) {
+    let out = source;
+    let promoted = 0;
+    let changed = true;
+    while (changed) {
+        changed = false;
+        const functions = parseFunctions(out);
+        for (const fn of functions) {
+            const result = promoteSingleAssignmentVarsInBody(fn.body);
+            if (result.promoted === 0) {
+                continue;
+            }
+            out = out.slice(0, fn.bodyOpen + 1) + result.body + out.slice(fn.bodyClose);
+            promoted += result.promoted;
+            changed = true;
+            break;
+        }
+    }
+    return { wgsl: out, promoted };
+}
+function runPeepholes(source) {
+    let out = source;
+    let promotedLocalVars = 0;
+    let branchifiedSelects = 0;
+    let hoistedModOperands = 0;
+    let foldedModByOne = 0;
+    let elidedRangeClamps = 0;
+    let foldedOutputStores = 0;
+    let collapsedOutputStructs = 0;
+    let removedTemporaries = 0;
+    let foldedConstructors = 0;
+    const constructors = foldVectorConstructors(out);
+    out = constructors.wgsl;
+    foldedConstructors += constructors.folded;
+    const promoted = promoteSingleAssignmentVars(out);
+    out = promoted.wgsl;
+    promotedLocalVars += promoted.promoted;
+    const modOperands = hoistRepeatedModOperands(out);
+    out = modOperands.wgsl;
+    hoistedModOperands += modOperands.hoisted;
+    const modByOne = foldModByOneToFract(out);
+    out = modByOne.wgsl;
+    foldedModByOne += modByOne.folded;
+    if (shouldElideRangeClamps()) {
+        const clamps = elideRedundantRangeClamps(out);
+        out = clamps.wgsl;
+        elidedRangeClamps += clamps.elided;
+    }
+    const lazyPowSelects = branchifyLazyPowSelects(out);
+    out = lazyPowSelects.wgsl;
+    branchifiedSelects += lazyPowSelects.branchified;
+    const enableExpensiveSelectBranchification = false;
+    if (enableExpensiveSelectBranchification) {
+        const branchified = branchifyExpensiveSelects(out);
+        out = branchified.wgsl;
+        branchifiedSelects += branchified.branchified;
+    }
+    const lets = removeSingleUseLets(out);
+    out = lets.wgsl;
+    removedTemporaries += lets.removed;
+    const constructorsAfterLets = foldVectorConstructors(out);
+    out = constructorsAfterLets.wgsl;
+    foldedConstructors += constructorsAfterLets.folded;
+    const outputComponents = foldOutputComponentStores(out);
+    out = outputComponents.wgsl;
+    foldedOutputStores += outputComponents.folded;
+    const outputReturns = constructOutputStructReturns(out);
+    out = outputReturns.wgsl;
+    foldedOutputStores += outputReturns.constructed;
+    const singleFieldOutputs = collapseSingleFieldOutputStructs(out);
+    out = singleFieldOutputs.wgsl;
+    collapsedOutputStructs += singleFieldOutputs.collapsed;
+    return { wgsl: out, promotedLocalVars, branchifiedSelects, hoistedModOperands, foldedModByOne, elidedRangeClamps, foldedOutputStores, collapsedOutputStructs, removedTemporaries, foldedConstructors };
+}
+function optimizeTintWgsl(wgsl) {
+    const stats = {
+        optimizeTintWgsl: true,
+        loweredPrivateVars: 0,
+        loweredPointerParams: 0,
+        promotedLocalVars: 0,
+        branchifiedSelects: 0,
+        hoistedModOperands: 0,
+        foldedModByOne: 0,
+        elidedRangeClamps: 0,
+        foldedOutputStores: 0,
+        collapsedOutputStructs: 0,
+        removedTemporaries: 0,
+        foldedConstructors: 0,
+        skippedPasses: [],
+    };
+    const lowered = lowerEntryWrapper(wgsl);
+    let out = lowered.wgsl;
+    stats.loweredPrivateVars = lowered.loweredPrivateVars;
+    if (lowered.skipped && !["no-entry-wrapper", "no-private-io"].includes(lowered.skipped)) {
+        stats.skippedPasses.push(`entry-wrapper:${lowered.skipped}`);
+    }
+    const pointerParams = lowerReadOnlyPointerParams(out);
+    out = pointerParams.wgsl;
+    stats.loweredPointerParams = pointerParams.loweredPointerParams;
+    if (pointerParams.skipped && !["no-readonly-pointer-params"].includes(pointerParams.skipped)) {
+        stats.skippedPasses.push(`pointer-params:${pointerParams.skipped}`);
+    }
+    const peepholes = runPeepholes(out);
+    out = peepholes.wgsl;
+    stats.promotedLocalVars = peepholes.promotedLocalVars;
+    stats.branchifiedSelects = peepholes.branchifiedSelects;
+    stats.hoistedModOperands = peepholes.hoistedModOperands;
+    stats.foldedModByOne = peepholes.foldedModByOne;
+    stats.elidedRangeClamps = peepholes.elidedRangeClamps;
+    stats.foldedOutputStores = peepholes.foldedOutputStores;
+    stats.collapsedOutputStructs = peepholes.collapsedOutputStructs;
+    stats.removedTemporaries = peepholes.removedTemporaries;
+    stats.foldedConstructors = peepholes.foldedConstructors;
+    return {
+        wgsl: out.trim() + "\n",
+        stats,
+    };
+}
+
 ;// ./src/components/shaderTranslator.ts
+
+
 
 
 
@@ -5349,8 +7216,36 @@ const SPV_DECORATION_RELAXED_PRECISION = 0;
 function shaderTranslator_escapeRegExp(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-function wordBoundaryReplace(source, from, to) {
+function nowMs() {
+    if (typeof performance !== "undefined" && typeof performance.now === "function") {
+        return performance.now();
+    }
+    return Date.now();
+}
+function shaderTranslator_wordBoundaryReplace(source, from, to) {
     return source.replace(new RegExp(`\\b${shaderTranslator_escapeRegExp(from)}\\b`, "g"), to);
+}
+function referencesIdentifier(source, name) {
+    return new RegExp(`\\b${shaderTranslator_escapeRegExp(name)}\\b`).test(source);
+}
+function pruneUnusedShaderResources(metadata, wgsl) {
+    const removedUniforms = [];
+    const removedSamplers = [];
+    metadata.uniforms = metadata.uniforms.filter((uniform) => {
+        const keep = referencesIdentifier(wgsl, `_hyd_uniforms_.${uniform.name}`) || referencesIdentifier(wgsl, uniform.name);
+        if (!keep) {
+            removedUniforms.push(uniform.name);
+        }
+        return keep;
+    });
+    metadata.samplers = metadata.samplers.filter((sampler) => {
+        const keep = referencesIdentifier(wgsl, `${sampler.name}S`) || referencesIdentifier(wgsl, `${sampler.name}T`);
+        if (!keep) {
+            removedSamplers.push(sampler.name);
+        }
+        return keep;
+    });
+    return { removedUniforms, removedSamplers };
 }
 function uniqueByName(items) {
     const seen = new Set();
@@ -5442,13 +7337,13 @@ function prepareSourceAndDeclarations(source) {
 function normalizeLegacyFragmentBuiltins(source) {
     let out = source;
     const usesFragColor = /\bgl_FragColor\b/.test(out);
-    out = wordBoundaryReplace(out, "gl_FragColor", "_hyd_fragColor");
-    out = wordBoundaryReplace(out, "texture2D", "texture");
-    out = wordBoundaryReplace(out, "textureCube", "texture");
-    out = wordBoundaryReplace(out, "texture2DProj", "textureProj");
-    out = wordBoundaryReplace(out, "texture2DProjLodEXT", "textureProjLod");
-    out = wordBoundaryReplace(out, "texture2DLodEXT", "textureLod");
-    out = wordBoundaryReplace(out, "textureCubeLodEXT", "textureLod");
+    out = shaderTranslator_wordBoundaryReplace(out, "gl_FragColor", "_hyd_fragColor");
+    out = shaderTranslator_wordBoundaryReplace(out, "texture2D", "texture");
+    out = shaderTranslator_wordBoundaryReplace(out, "textureCube", "texture");
+    out = shaderTranslator_wordBoundaryReplace(out, "texture2DProj", "textureProj");
+    out = shaderTranslator_wordBoundaryReplace(out, "texture2DProjLodEXT", "textureProjLod");
+    out = shaderTranslator_wordBoundaryReplace(out, "texture2DLodEXT", "textureLod");
+    out = shaderTranslator_wordBoundaryReplace(out, "textureCubeLodEXT", "textureLod");
     return { source: out, usesFragColor };
 }
 function makeSamplerBindingDeclarations(metadata, layout) {
@@ -5832,7 +7727,7 @@ function patchGlslangSampledTextureVariables(spirv, samplers) {
     }
     return patched;
 }
-function buildGlslangSource(source, stage, metadata, layout) {
+function buildGlslangSource(source, stage, metadata, layout, options = {}) {
     const prepared = prepareSourceAndDeclarations(source);
     const lines = [prepared.source.trimEnd()];
     const declarations = prepared.declarations;
@@ -5863,7 +7758,7 @@ function buildGlslangSource(source, stage, metadata, layout) {
     const normalized = stage === "fragment" ? normalizeLegacyFragmentBuiltins(body) : { source: body, usesFragColor: false };
     body = lowerSamplerFunctionParameters(normalized.source);
     body = rewriteSamplerExpressions(body, metadata);
-    if (stage === "fragment") {
+    if (stage === "fragment" && options.preserveImplicitTextureLod === false) {
         body = rewriteFragmentImplicitTextureLod(body);
     }
     if (stage === "fragment" && normalized.usesFragColor) {
@@ -5888,15 +7783,15 @@ function normalizeTintWgsl(wgsl, metadata) {
         const placeholder = `__HYD_UNIFORM_${uniformPlaceholders.length}__`;
         uniformPlaceholders.push([placeholder, `_hyd_uniforms_.${uniform.name}`]);
         out = out.replace(new RegExp(`\\b[A-Za-z_]\\w*\\s*\\.\\s*${shaderTranslator_escapeRegExp(uniform.name)}\\b`, "g"), placeholder);
-        out = wordBoundaryReplace(out, uniform.name, placeholder);
+        out = shaderTranslator_wordBoundaryReplace(out, uniform.name, placeholder);
     }
     for (const sampler of metadata.samplers) {
         out = out.replace(new RegExp(`textureSample\\s*\\(\\s*${sampler.name}\\s*,`, "g"), `textureSample(${sampler.name}T, ${sampler.name}S,`);
-        out = wordBoundaryReplace(out, `${sampler.name}_sampler`, `${sampler.name}S`);
-        out = wordBoundaryReplace(out, `${sampler.name}_texture`, `${sampler.name}T`);
+        out = shaderTranslator_wordBoundaryReplace(out, `${sampler.name}_sampler`, `${sampler.name}S`);
+        out = shaderTranslator_wordBoundaryReplace(out, `${sampler.name}_texture`, `${sampler.name}T`);
     }
     for (const [placeholder, value] of uniformPlaceholders) {
-        out = wordBoundaryReplace(out, placeholder, value);
+        out = shaderTranslator_wordBoundaryReplace(out, placeholder, value);
     }
     out = out.replace(/\barr_to_mat\d+x\d+_stride_\d+\s*\(\s*(_hyd_uniforms_\.[A-Za-z_]\w*)\s*\)/g, "$1");
     return normalizeSamplerOriginCoordinates(out.trim() + "\n", metadata);
@@ -6039,7 +7934,16 @@ class ShaderTranslator {
     }
     translateShader(shader, stage, layout) {
         const key = shader.glsl_shader;
-        const runtimeKey = `${stage}:${layout.cacheKey}:${key}`;
+        const preserveImplicitTextureLod = this.options.preserveImplicitTextureLod !== false;
+        const shouldOptimizeTintWgsl = this.options.optimizeTintWgsl !== false;
+        const runtimeKey = [
+            stage,
+            layout.cacheKey,
+            `lod=${preserveImplicitTextureLod ? 1 : 0}`,
+            `opt=${shouldOptimizeTintWgsl ? 1 : 0}`,
+            `legacyTexCoord=${this.options.legacyTextureCoordinateFixups ? 1 : 0}`,
+            key,
+        ].join(":");
         const cachedRuntime = this.runtimeCache.get(runtimeKey);
         if (cachedRuntime) {
             return cachedRuntime;
@@ -6049,19 +7953,90 @@ class ShaderTranslator {
             throw new Error(`Runtime shader translator is unavailable (${stage}).`);
         }
         let glslangSource = "";
+        const timingsMs = {};
         try {
-            glslangSource = buildGlslangSource(shader.glsl_shader, stage, metadata, layout);
+            const buildStart = nowMs();
+            glslangSource = buildGlslangSource(shader.glsl_shader, stage, metadata, layout, {
+                preserveImplicitTextureLod,
+            });
+            timingsMs.glslPreprocess = nowMs() - buildStart;
+            const compileStart = nowMs();
             const spirv = patchGlslangSampledTextureVariables(this.glslang.compileGLSL(glslangSource, stage, false), metadata.samplers);
-            const wgsl = normalizeTintWgsl(this.tint.spirvToWgsl(spirv), metadata);
-            metadata.wgsl = this.options.legacyTextureCoordinateFixups
-                ? normalizeWebGlTextureCoordinates(wgsl, metadata, stage, shader.glsl_shader)
-                : wgsl;
+            timingsMs.glslang = nowMs() - compileStart;
+            const tintStart = nowMs();
+            const tintWgsl = this.tint.spirvToWgsl(spirv);
+            timingsMs.tint = nowMs() - tintStart;
+            const normalizeStart = nowMs();
+            let wgsl = normalizeTintWgsl(tintWgsl, metadata);
+            const normalizedWgsl = wgsl;
+            timingsMs.wgslNormalize = nowMs() - normalizeStart;
+            let optimizerStats = {
+                optimizeTintWgsl: shouldOptimizeTintWgsl,
+                loweredPrivateVars: 0,
+                loweredPointerParams: 0,
+                promotedLocalVars: 0,
+                branchifiedSelects: 0,
+                hoistedModOperands: 0,
+                foldedModByOne: 0,
+                elidedRangeClamps: 0,
+                foldedOutputStores: 0,
+                collapsedOutputStructs: 0,
+                removedTemporaries: 0,
+                foldedConstructors: 0,
+                skippedPasses: [],
+            };
+            if (shouldOptimizeTintWgsl) {
+                const optimizeStart = nowMs();
+                const optimized = optimizeTintWgsl(wgsl);
+                wgsl = optimized.wgsl;
+                optimizerStats = optimized.stats;
+                timingsMs.wgslOptimize = nowMs() - optimizeStart;
+            }
+            if (this.options.legacyTextureCoordinateFixups) {
+                const legacyFixupStart = nowMs();
+                metadata.wgsl = normalizeWebGlTextureCoordinates(wgsl, metadata, stage, shader.glsl_shader);
+                timingsMs.legacyTextureCoordinateFixups = nowMs() - legacyFixupStart;
+            }
+            else {
+                metadata.wgsl = wgsl;
+            }
+            const resourcePrune = pruneUnusedShaderResources(metadata, metadata.wgsl);
+            const shaderId = `${stage}:${stableHashString(shader.glsl_shader)}:${layout.cacheKey}`;
+            const capture = {
+                kind: "shader-stage",
+                stage,
+                shaderId,
+                source: "runtime",
+                optimizer: optimizerStats,
+                timingsMs,
+                glsl: sourceCapture(shader.glsl_shader),
+                normalizedGlsl: sourceCapture(glslangSource),
+                spirv: {
+                    hash: stableHashU32(spirv),
+                    wordCount: spirv.length,
+                    byteLength: spirv.byteLength,
+                },
+                tintWgsl: sourceCapture(tintWgsl),
+                normalizedWgsl: sourceCapture(normalizedWgsl),
+                postProcessWgsl: sourceCapture(metadata.wgsl),
+            };
+            metadata.shader_capture = capture;
             metadata.debug_info = JSON.stringify({
                 source: "runtime",
                 stage,
                 translated: true,
                 glsl: "310es",
                 legacyTextureCoordinateFixups: !!this.options.legacyTextureCoordinateFixups,
+                preserveImplicitTextureLod,
+                optimizer: optimizerStats,
+                resourcePrune,
+                shaderId,
+                spirv: capture.spirv,
+                shapeStats: {
+                    tintWgsl: capture.tintWgsl.stats,
+                    normalizedWgsl: capture.normalizedWgsl.stats,
+                    postProcessWgsl: capture.postProcessWgsl.stats,
+                },
             });
             this.runtimeCache.set(runtimeKey, metadata);
             return metadata;
@@ -6113,7 +8088,11 @@ async function hydGetContext(element, _shader_info_url, arg0, arg1, translatorOp
     let [contextType, contextAttributes] = arg0;
     contextAttributes = normalizeContextAttributes(contextAttributes || {});
     let [uniform_size, replay_delay] = arg1;
-    const shaderTranslator = await ShaderTranslator.create(translatorOptions);
+    const defaultTranslatorOptions = (globalThis.__HYD_TRANSLATOR_OPTIONS || {});
+    const shaderTranslator = await ShaderTranslator.create({
+        ...defaultTranslatorOptions,
+        ...translatorOptions,
+    });
     if (!hydWebGLTypes.includes(contextType)) {
         throw new Error("Invalid context type");
     }

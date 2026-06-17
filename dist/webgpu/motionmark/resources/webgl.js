@@ -39,7 +39,7 @@ WebGLStage = Utilities.createSubclass(Stage,
             this._bufferSize = 0;
 
             // this._gl = this.element.getContext("webgl", { antialias: false, preserveDrawingBuffer: true });
-            this._gl = await GL2GPU.gl2gpuGetContext(this.element, "/js/shaders_info.json", ["webgl", { preserveDrawingBuffer: true }], [1<<21, window.replayDelay]);
+            this._gl = await GL2GPU.gl2gpuGetContext(this.element, null, ["webgl", { preserveDrawingBuffer: true }], [1<<21, window.replayDelay]);
             var gl = this._gl;
 
             gl.clearColor(0, 0, 0, 1);
