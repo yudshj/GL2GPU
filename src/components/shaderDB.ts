@@ -10,6 +10,8 @@ export interface NameAndType {
     glsl_type: string;
     wgsl_type: string;
     internal?: boolean;
+    interpolation?: string;
+    source_name?: string;
 }
 
 export interface TextureNameAndType {
@@ -17,6 +19,7 @@ export interface TextureNameAndType {
     glsl_type: string;
     wgsl_texture_type: string;
     wgsl_sampler_type: string;
+    source_name?: string;
 }
 
 export interface ShaderInfoType {
@@ -69,7 +72,45 @@ const Type2Constant: Map<string, number> = new Map([
     ["samplerCube", WebGL2RenderingContext.SAMPLER_CUBE],
     ["sampler2DArray", WebGL2RenderingContext.SAMPLER_2D_ARRAY],
     ["sampler3D", WebGL2RenderingContext.SAMPLER_3D],
+    ["isampler2D", WebGL2RenderingContext.INT_SAMPLER_2D],
+    ["isamplerCube", WebGL2RenderingContext.INT_SAMPLER_CUBE],
+    ["isampler2DArray", WebGL2RenderingContext.INT_SAMPLER_2D_ARRAY],
+    ["isampler3D", WebGL2RenderingContext.INT_SAMPLER_3D],
+    ["usampler2D", WebGL2RenderingContext.UNSIGNED_INT_SAMPLER_2D],
+    ["usamplerCube", WebGL2RenderingContext.UNSIGNED_INT_SAMPLER_CUBE],
+    ["usampler2DArray", WebGL2RenderingContext.UNSIGNED_INT_SAMPLER_2D_ARRAY],
+    ["usampler3D", WebGL2RenderingContext.UNSIGNED_INT_SAMPLER_3D],
 ]);
+
+function samplerSampleType(wgslTextureType: string): GPUTextureSampleType {
+    if (/<u32>\s*$/.test(wgslTextureType)) {
+        return "uint";
+    }
+    if (/<i32>\s*$/.test(wgslTextureType)) {
+        return "sint";
+    }
+    return "float";
+}
+
+function samplerBindingType(sampleType: GPUTextureSampleType): GPUSamplerBindingType {
+    return sampleType === "float" ? "filtering" : "non-filtering";
+}
+
+function samplerViewDimension(wgslTextureType: string): GPUTextureViewDimension {
+    if (/^texture_2d<.+>$/.test(wgslTextureType)) {
+        return "2d";
+    }
+    if (/^texture_cube<.+>$/.test(wgslTextureType)) {
+        return "cube";
+    }
+    if (/^texture_2d_array<.+>$/.test(wgslTextureType)) {
+        return "2d-array";
+    }
+    if (/^texture_3d<.+>$/.test(wgslTextureType)) {
+        return "3d";
+    }
+    throw new Error(`unknown sampler type ${wgslTextureType}`);
+}
 
 export function MergeShaderInfo(shaderInfo: Array<ShaderInfoType | InitShaderInfoType>): ShaderInfoType {
     let uniformMap: Map<string, NameAndType> = new Map();    // (name: type), throw error when type conflict
@@ -127,29 +168,22 @@ export function ShaderInfo2HydAus(shaderInfo: ShaderInfoType): { attributes: Arr
             };
         }),
         uniforms: shaderInfo.uniforms.map((uniform) => {
-            return new ProgramUniformBuffer(uniform.name, Type2Constant.get(uniform.glsl_type), 1, !!uniform.internal);
+            return new ProgramUniformBuffer(uniform.name, Type2Constant.get(uniform.glsl_type), 1, !!uniform.internal, uniform.source_name);
         }),
         samplers: shaderInfo.samplers.map((sampler) => {
-            // switch (sampler.glsl_type) {
-            //     case "sampler2D":
-            //         return new ProgramUniformSampler(sampler.name, WebGL2RenderingContext.SAMPLER_2D, false, "float", "2d");
-            //     case "samplerCube":
-            //         return new ProgramUniformSampler(sampler.name, WebGL2RenderingContext.SAMPLER_CUBE, false, "float", "cube");
-            //     default:
-            //         throw new Error(`unknown sampler type ${sampler.glsl_type}`);
-            // }
-            switch (sampler.wgsl_texture_type) {
-                case "texture_2d<f32>":
-                    return new ProgramUniformSampler(sampler.name, WebGL2RenderingContext.SAMPLER_2D, "2d");
-                case "texture_cube<f32>":
-                    return new ProgramUniformSampler(sampler.name, WebGL2RenderingContext.SAMPLER_CUBE, "cube");
-                case "texture_2d_array<f32>":
-                    return new ProgramUniformSampler(sampler.name, WebGL2RenderingContext.SAMPLER_2D_ARRAY, "2d-array");
-                case "texture_3d<f32>":
-                    return new ProgramUniformSampler(sampler.name, WebGL2RenderingContext.SAMPLER_3D, "3d");
-                default:
-                    throw new Error(`unknown sampler type ${sampler.wgsl_texture_type}`);
+            const webglType = Type2Constant.get(sampler.glsl_type);
+            if (webglType === undefined) {
+                throw new Error(`unknown sampler type ${sampler.glsl_type}`);
             }
+            const sampleType = samplerSampleType(sampler.wgsl_texture_type);
+            return new ProgramUniformSampler(
+                sampler.name,
+                webglType,
+                samplerViewDimension(sampler.wgsl_texture_type),
+                sampleType,
+                samplerBindingType(sampleType),
+                sampler.source_name,
+            );
         }),
     };
 }

@@ -9,6 +9,7 @@ export class HydBuffer implements HydHashable {
         size: undefined,
         usage: GPUBufferUsage.COPY_DST,
     };
+    public shadowData: Uint8Array = new Uint8Array(0);
 
     constructor(device: GPUDevice) {
         this.device = device;
@@ -24,12 +25,16 @@ export class HydBuffer implements HydHashable {
             this.descriptor.label += this.descriptor.size.toString() + this.descriptor.usage.toString();
             this.__buffer__ = this.device.createBuffer(this.descriptor);
         }
+        if (this.shadowData.byteLength !== this.descriptor.size) {
+            this.shadowData = new Uint8Array(this.descriptor.size);
+        }
         if (data !== null) {
             const secondLength = data.byteLength & 3;
             const firstLength = data.byteLength - secondLength;
             const source = data instanceof ArrayBuffer
                 ? new Uint8Array(data)
                 : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+            this.shadowData.set(source, dstOffset);
             this.device.queue.writeBuffer(this.__buffer__, dstOffset, source.subarray(0, firstLength) as TypedArray);
             if (secondLength > 0) {
                 const tmpUint8Array = new Uint8Array(4);

@@ -28,14 +28,14 @@ const glSizeToBytes: Map<GLenum, number> = new Map([
     [WebGL2RenderingContext.BOOL_VEC4, 4 * 4],
 
     [WebGL2RenderingContext.FLOAT_MAT2, 2 * 2 * 4],
-    [WebGL2RenderingContext.FLOAT_MAT3, 3 * 3 * 4],
+    [WebGL2RenderingContext.FLOAT_MAT3, 3 * 4 * 4],
     [WebGL2RenderingContext.FLOAT_MAT4, 4 * 4 * 4],
-    [WebGL2RenderingContext.FLOAT_MAT2x3, 2 * 3 * 4],
+    [WebGL2RenderingContext.FLOAT_MAT2x3, 2 * 4 * 4],
     [WebGL2RenderingContext.FLOAT_MAT2x4, 2 * 4 * 4],
     [WebGL2RenderingContext.FLOAT_MAT3x2, 3 * 2 * 4],
     [WebGL2RenderingContext.FLOAT_MAT3x4, 3 * 4 * 4],
     [WebGL2RenderingContext.FLOAT_MAT4x2, 4 * 2 * 4],
-    [WebGL2RenderingContext.FLOAT_MAT4x3, 4 * 3 * 4],
+    [WebGL2RenderingContext.FLOAT_MAT4x3, 4 * 4 * 4],
 ]);
 const glSizeToAlignedBytes: Map<GLenum, number> = new Map([
     [WebGL2RenderingContext.FLOAT, 4],
@@ -76,16 +76,19 @@ export class ProgramUniformBuffer {
     public byteLength: number;
     public alignedByteLength: number;
     public internal: boolean;
+    public sourceName?: string;
     public dataView: DataView;
     public float32View: Float32Array;
     public int32View: Int32Array;
+    public uint32View: Uint32Array;
     public wordOffset: number;
 
-    constructor(name: string, type: GLenum, size: GLsizei, internal: boolean = false) {
+    constructor(name: string, type: GLenum, size: GLsizei, internal: boolean = false, sourceName?: string) {
         this.name = name;
         this.size = size;
         this.webgl_type = type;
         this.internal = internal;
+        this.sourceName = sourceName;
         // TODO: 考虑size
         this.byteLength = glSizeToBytes.get(type);
         this.alignedByteLength = glSizeToAlignedBytes.get(type);
@@ -98,20 +101,29 @@ export class ProgramUniformSampler {
     webgl_type: GLenum;
     textureUnit: number;   // TODO: 这个变量的设置可能出错了。
 
-    // isCompare: boolean;    // TODO: is compare 应该跟着texture的format走?
-    // sampleType: GPUTextureSampleType;
+    sampleType: GPUTextureSampleType;
+    samplerBindingType: GPUSamplerBindingType;
     viewDimension: GPUTextureViewDimension;
+    sourceName?: string;
     originFlipUniform?: ProgramUniformBuffer;
     originFlipValue?: boolean;
-    constructor(name: string, webgl_type: GLenum, viewDimension: GPUTextureViewDimension) {
+    constructor(
+        name: string,
+        webgl_type: GLenum,
+        viewDimension: GPUTextureViewDimension,
+        sampleType: GPUTextureSampleType = "float",
+        samplerBindingType: GPUSamplerBindingType = "filtering",
+        sourceName?: string,
+    ) {
         this.name = name;
         this.size = 1;
         this.webgl_type = webgl_type;
         this.textureUnit = 0;
 
-        // this.isCompare = isCompare;
-        // this.sampleType = sampleType;
+        this.sampleType = sampleType;
+        this.samplerBindingType = samplerBindingType;
         this.viewDimension = viewDimension;
+        this.sourceName = sourceName;
     }
 }
 
@@ -330,6 +342,7 @@ export class HydProgram implements HydHashable {
     public activeUniform: Uint8Array;
     public activeUniformFloat32: Float32Array;
     public activeUniformInt32: Int32Array;
+    public activeUniformUint32: Uint32Array;
     // // public uniformTempBufferFloat32: Float32Array;
     // // public uniformTempBufferUint32: Uint32Array;
     // // public uniformTempBufferInt32: Int32Array;
@@ -501,6 +514,7 @@ export class HydProgram implements HydHashable {
         this.activeUniform = new Uint8Array(uniformBufferLength);
         this.activeUniformFloat32 = new Float32Array(this.activeUniform.buffer);
         this.activeUniformInt32 = new Int32Array(this.activeUniform.buffer);
+        this.activeUniformUint32 = new Uint32Array(this.activeUniform.buffer);
         // this.uniformTempBufferFloat32 = new Float32Array(this.uniformTempBufferUint8.buffer);
         // this.uniformTempBufferUint32 = new Uint32Array(this.uniformTempBufferUint8.buffer);
         // this.uniformTempBufferInt32 = new Int32Array(this.uniformTempBufferUint8.buffer);
@@ -510,6 +524,7 @@ export class HydProgram implements HydHashable {
             uniform.dataView = this.uniformArrayBufferTempView;
             uniform.float32View = this.activeUniformFloat32;
             uniform.int32View = this.activeUniformInt32;
+            uniform.uint32View = this.activeUniformUint32;
             uniform.wordOffset = uniform.offset >> 2;
         }
         // this.uniformArrayBufferView = new DataView(this.uniformArrayBuffer.buffer);

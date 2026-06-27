@@ -42,7 +42,7 @@ export class HydFramebuffer implements HydHashable {
     public drawBuffers: GLenum[] = [
         WebGL2RenderingContext.COLOR_ATTACHMENT0
     ];
-    // public readBuffer: GLenum = WebGL2RenderingContext.COLOR_ATTACHMENT0;
+    public readBuffer: GLenum = WebGL2RenderingContext.COLOR_ATTACHMENT0;
 
     private _hash: string = null;
 
@@ -59,7 +59,7 @@ export class HydFramebuffer implements HydHashable {
             for (const drawBuffer of this.drawBuffers) {
                 this._hash += drawBuffer.toString() + '|';
             }
-            // this._hash += this.readBuffer.toString();
+            this._hash += this.readBuffer.toString();
         }
         return this._hash;
     }

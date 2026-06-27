@@ -32,15 +32,20 @@ void main() {
 const vertexDecls = scanGlslDeclarations(vertex, "vertex");
 deepEqual(vertexDecls.attributes.map((item) => item.name), ["aPos", "aUv"]);
 deepEqual(vertexDecls.attributes.map((item) => item.wgsl_type), ["vec3<f32>", "vec2<f32>"]);
-deepEqual(vertexDecls.uniforms.map((item) => item.name), ["uModel", "uTint"]);
+deepEqual(vertexDecls.uniforms.map((item) => item.name), ["uModel"]);
+if (vertexDecls.uniforms.some((item) => item.name === "uTint")) {
+    throw new Error("expected unused uniforms to be filtered from active metadata");
+}
 deepEqual(vertexDecls.varyings.map((item) => item.name), ["vUv"]);
 
 const fragmentDecls = scanGlslDeclarations(fragment, "fragment");
 deepEqual(fragmentDecls.uniforms.map((item) => item.name), ["exposure"]);
 deepEqual(fragmentDecls.samplers.map((item) => [item.name, item.wgsl_texture_type]), [
     ["diffuse", "texture_2d<f32>"],
-    ["skybox", "texture_cube<f32>"],
 ]);
+if (fragmentDecls.samplers.some((item) => item.name === "skybox")) {
+    throw new Error("expected unused samplers to be filtered from active metadata");
+}
 deepEqual(fragmentDecls.varyings.map((item) => item.name), ["vUv"]);
 
 const aquariumMetadata: InitShaderInfoType = {

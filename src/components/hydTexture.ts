@@ -27,6 +27,8 @@ export type HydTextureSourceOrigin = "uninitialized" | "typed-upload" | "externa
 const DEFAULT_PIXEL_UNPACK_STATE: HydPixelUnpackState = {
     flipY: false,
     alignment: 4,
+    premultiplyAlpha: false,
+    colorspaceConversion: WebGL2RenderingContext.BROWSER_DEFAULT_WEBGL,
 };
 
 export interface PreparedTextureUpload {
@@ -80,6 +82,33 @@ function textureFormatLookup(internalFormat: GLenum, format: GLenum, type: GLenu
     if ((internalFormat === WebGL2RenderingContext.RGBA || internalFormat === WebGL2RenderingContext.RGBA8) && format === WebGL2RenderingContext.RGBA && type === WebGL2RenderingContext.UNSIGNED_BYTE) {
         return "rgba8unorm";
     }
+    if (internalFormat === WebGL2RenderingContext.RGBA8UI && format === WebGL2RenderingContext.RGBA_INTEGER && type === WebGL2RenderingContext.UNSIGNED_BYTE) {
+        return "rgba8uint";
+    }
+    if (internalFormat === WebGL2RenderingContext.RGBA16UI && format === WebGL2RenderingContext.RGBA_INTEGER && type === WebGL2RenderingContext.UNSIGNED_SHORT) {
+        return "rgba16uint";
+    }
+    if (internalFormat === WebGL2RenderingContext.RGBA32UI && format === WebGL2RenderingContext.RGBA_INTEGER && type === WebGL2RenderingContext.UNSIGNED_INT) {
+        return "rgba32uint";
+    }
+    if (internalFormat === WebGL2RenderingContext.RGBA32I && format === WebGL2RenderingContext.RGBA_INTEGER && type === WebGL2RenderingContext.INT) {
+        return "rgba32sint";
+    }
+    if (internalFormat === WebGL2RenderingContext.RGBA32F && format === WebGL2RenderingContext.RGBA && type === WebGL2RenderingContext.FLOAT) {
+        return "rgba32float";
+    }
+    if (internalFormat === WebGL2RenderingContext.RG32UI && format === WebGL2RenderingContext.RG_INTEGER && type === WebGL2RenderingContext.UNSIGNED_INT) {
+        return "rg32uint";
+    }
+    if (internalFormat === WebGL2RenderingContext.R32UI && format === WebGL2RenderingContext.RED_INTEGER && type === WebGL2RenderingContext.UNSIGNED_INT) {
+        return "r32uint";
+    }
+    if (internalFormat === WebGL2RenderingContext.RG32F && format === WebGL2RenderingContext.RG && type === WebGL2RenderingContext.FLOAT) {
+        return "rg32float";
+    }
+    if (internalFormat === WebGL2RenderingContext.R32F && format === WebGL2RenderingContext.RED && type === WebGL2RenderingContext.FLOAT) {
+        return "r32float";
+    }
     if (internalFormat === WebGL2RenderingContext.RGBA && format === WebGL2RenderingContext.RGBA && type === WebGL2RenderingContext.FLOAT) {
         return "rgba32float";
     }
@@ -114,7 +143,7 @@ function byteView(data: TypedArray): Uint8Array {
     return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
 }
 
-function bytesPerPixel(format: GLenum, type: GLenum): number {
+export function textureUploadBytesPerPixel(format: GLenum, type: GLenum): number {
     if (type === WebGL2RenderingContext.UNSIGNED_BYTE) {
         switch (format) {
             case WebGL2RenderingContext.RGBA:
@@ -128,8 +157,32 @@ function bytesPerPixel(format: GLenum, type: GLenum): number {
                 return 2;
         }
     }
-    if (format === WebGL2RenderingContext.RGBA && type === WebGL2RenderingContext.FLOAT) {
-        return 16;
+    if (type === WebGL2RenderingContext.FLOAT) {
+        switch (format) {
+            case WebGL2RenderingContext.RGBA:
+                return 16;
+            case WebGL2RenderingContext.RG:
+                return 8;
+            case WebGL2RenderingContext.RED:
+                return 4;
+        }
+    }
+    if (format === WebGL2RenderingContext.RGBA_INTEGER) {
+        switch (type) {
+            case WebGL2RenderingContext.UNSIGNED_BYTE:
+                return 4;
+            case WebGL2RenderingContext.UNSIGNED_SHORT:
+                return 8;
+            case WebGL2RenderingContext.UNSIGNED_INT:
+            case WebGL2RenderingContext.INT:
+                return 16;
+        }
+    }
+    if (format === WebGL2RenderingContext.RG_INTEGER && type === WebGL2RenderingContext.UNSIGNED_INT) {
+        return 8;
+    }
+    if (format === WebGL2RenderingContext.RED_INTEGER && type === WebGL2RenderingContext.UNSIGNED_INT) {
+        return 4;
     }
     if (format === WebGL2RenderingContext.DEPTH_COMPONENT && type === WebGL2RenderingContext.FLOAT) {
         return 4;
@@ -168,7 +221,7 @@ export function prepareTypedTextureUpload(
     unpack: HydPixelUnpackState,
 ): PreparedTextureUpload {
     const sourceBytes = byteView(data);
-    const sourceBytesPerPixel = bytesPerPixel(format, type);
+    const sourceBytesPerPixel = textureUploadBytesPerPixel(format, type);
     const sourceBytesPerRow = getSourceBytesPerRow(sourceBytes.byteLength, width, height, sourceBytesPerPixel, unpack.alignment);
     const needsRgbaExpansion =
         type === WebGL2RenderingContext.UNSIGNED_BYTE &&
@@ -278,6 +331,7 @@ export class HydTexture implements HydHashable {
         isDepthStencil: false,
     };
     private _sampler: GPUSampler = null;
+    private _nonFilteringSampler: GPUSampler = null;
     private _view: GPUTextureView = null;
     private _attachmentViews: Map<string, GPUTextureView> = new Map();
     private _hash: any;
@@ -382,6 +436,24 @@ export class HydTexture implements HydHashable {
         return this._sampler;
     }
 
+    public samplerForBinding(bindingType: GPUSamplerBindingType): GPUSampler {
+        if (bindingType !== "non-filtering") {
+            return this.sampler;
+        }
+        if (!this._nonFilteringSampler) {
+            this._nonFilteringSampler = this.device.createSampler({
+                minFilter: "nearest",
+                magFilter: "nearest",
+                mipmapFilter: "nearest",
+                addressModeU: this.state.wrapS,
+                addressModeV: this.state.wrapT,
+                addressModeW: this.state.wrapR,
+                label: "sampler-nonfilter-" + (HydTexture.__samplerCount++),
+            });
+        }
+        return this._nonFilteringSampler;
+    }
+
     public get hash(): string {
         if (!this._view) {
             // 此时还未创建texture
@@ -423,6 +495,7 @@ export class HydTexture implements HydHashable {
         this._view = null;
         this._attachmentViews.clear();
         this._sampler = null;
+        this._nonFilteringSampler = null;
         this._hash = null;
         HydTexture.isDestroyedTexture = true;
         // for (const [map, key] of this.bindGroupHashes) {
@@ -463,7 +536,7 @@ export class HydTexture implements HydHashable {
         this.label = `HydTexture${HydTexture.__total__++}`;
     }
 
-    public ensureSampleable(viewDimension: GPUTextureViewDimension = "2d") {
+    public ensureSampleable(viewDimension: GPUTextureViewDimension = "2d", sampleType: GPUTextureSampleType = "float") {
         if (this.isConfigured) {
             if (!this._viewDimension) {
                 this._viewDimension = viewDimension;
@@ -471,22 +544,29 @@ export class HydTexture implements HydHashable {
             return;
         }
         this._viewDimension = viewDimension;
+        const isUint = sampleType === "uint";
+        const isSint = sampleType === "sint";
         this.configureTexture({
             size: {
                 width: 1,
                 height: 1,
                 depthOrArrayLayers: viewDimension === "cube" ? 6 : 1,
             },
-            format: "rgba8unorm",
+            format: isUint ? "rgba32uint" : isSint ? "rgba32sint" : "rgba8unorm",
             dimension: "2d",
             usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
             isDepthStencil: false,
         });
         const layers = viewDimension === "cube" ? 6 : 1;
+        const data = isUint
+            ? new Uint32Array([0, 0, 0, 1])
+            : isSint
+                ? new Int32Array([0, 0, 0, 1])
+                : new Uint8Array([0, 0, 0, 255]);
         for (let layer = 0; layer < layers; layer++) {
             this.device.queue.writeTexture(
                 { texture: this.texture, origin: { x: 0, y: 0, z: layer } },
-                new Uint8Array([0, 0, 0, 255]),
+                data,
                 { offset: 0 },
                 [1, 1],
             );
@@ -611,7 +691,7 @@ export class HydTexture implements HydHashable {
     }
 
     public texSubImage2D(
-        data: ImageData | HTMLImageElement | HTMLCanvasElement | HTMLVideoElement | ImageBitmap | TypedArray,
+        data: ImageData | HTMLImageElement | HTMLCanvasElement | HTMLVideoElement | ImageBitmap | TypedArray | null,
         target: GLenum,
         mipLevel: GLint,
         xoffset: GLint,
@@ -685,10 +765,11 @@ export class HydTexture implements HydHashable {
         offset: GLintptr,
     ) {
         this.label += ' 3D';
+        const textureDimension: GPUTextureDimension = target === WebGL2RenderingContext.TEXTURE_3D ? "3d" : "2d";
         this.configureTexture({
             size: { width, height, depthOrArrayLayers: depth },
             format: textureFormatLookup(internalformat, format, type),
-            dimension: "3d",
+            dimension: textureDimension,
             usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
             isDepthStencil: format === WebGL2RenderingContext.DEPTH_COMPONENT,
             // sampleType: sampleTypeLookup(internalformat, format, type),
@@ -729,12 +810,13 @@ export class HydTexture implements HydHashable {
             );
             this.sourceOrigin = "external-upload";
         } else if ("byteLength" in data) {
+            const bytesPerRow = width * textureUploadBytesPerPixel(format, type);
             this.device.queue.writeTexture(
                 { texture: this.texture },
                 data,
                 {
                     offset: 0,
-                    bytesPerRow: data.byteLength / height,
+                    bytesPerRow,
                     rowsPerImage: height,
                 },
                 [width, height, depth],
@@ -745,10 +827,77 @@ export class HydTexture implements HydHashable {
         }
     }
 
+    public texSubImage3D(
+        data: ImageData | HTMLImageElement | HTMLCanvasElement | HTMLVideoElement | ImageBitmap | TypedArray,
+        target: GLenum,
+        mipLevel: GLint,
+        xoffset: GLint,
+        yoffset: GLint,
+        zoffset: GLint,
+        width: GLsizei,
+        height: GLsizei,
+        depth: GLsizei,
+        format: GLenum,
+        type: GLenum,
+        unpack: HydPixelUnpackState = DEFAULT_PIXEL_UNPACK_STATE,
+    ) {
+        const origin = { x: xoffset, y: yoffset, z: zoffset };
+        const destination: GPUImageCopyTexture = {
+            texture: this.texture,
+            mipLevel,
+            origin,
+        };
+
+        if (data instanceof ImageData) {
+            this.device.queue.writeTexture(
+                destination,
+                data.data,
+                {
+                    offset: 0,
+                    bytesPerRow: data.data.length / height,
+                    rowsPerImage: height,
+                },
+                [width, height, depth],
+            );
+            this.sourceOrigin = "external-upload";
+            return;
+        }
+
+        if (data instanceof HTMLImageElement ||
+            (typeof ImageBitmap !== "undefined" && data instanceof ImageBitmap) ||
+            data instanceof HTMLCanvasElement ||
+            data instanceof HTMLVideoElement ||
+            (typeof OffscreenCanvas !== "undefined" && data instanceof OffscreenCanvas)) {
+            this.device.queue.copyExternalImageToTexture(
+                { source: data, flipY: shouldApplyExternalFlipY(data, unpack) },
+                destination,
+                [width, height, depth],
+            );
+            this.sourceOrigin = "external-upload";
+            return;
+        }
+
+        if (data && "byteLength" in data) {
+            const bytesPerRow = width * textureUploadBytesPerPixel(format, type);
+            this.device.queue.writeTexture(
+                destination,
+                data,
+                {
+                    offset: 0,
+                    bytesPerRow,
+                    rowsPerImage: height,
+                },
+                [width, height, depth],
+            );
+            this.sourceOrigin = "typed-upload";
+        }
+    }
+
     public texParameteri(pname: GLenum, param: GLenum) {
         console.assert(pnameToString.has(pname) && parameterToString.has(param));
         this.state[pnameToString.get(pname)] = parameterToString.get(param);
         this._sampler = null;
+        this._nonFilteringSampler = null;
         this._hash = null;
     }
 

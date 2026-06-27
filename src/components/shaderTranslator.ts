@@ -77,6 +77,7 @@ interface ProgramTranslationLayout {
 
 interface ParsedGlslDeclaration {
     qualifier: "attribute" | "uniform" | "varying" | "in" | "out";
+    interpolation: string;
     glslType: string;
     name: string;
     arraySuffix: string;
@@ -96,7 +97,7 @@ interface ResourcePruneStats {
     removedSamplers: string[];
 }
 
-const GLOBAL_DECLARATION_REGEX = /(^|[;\n])(\s*(?:layout\s*\([^)]*\)\s*)?(?:(?:lowp|mediump|highp)\s+)?(?:(?:flat|smooth|noperspective|centroid|sample)\s+)*(attribute|uniform|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([^;]+)\s*;)/g;
+const GLOBAL_DECLARATION_REGEX = /(^|[;\n])(\s*(?:layout\s*\([^)]*\)\s*)?(?:(?:lowp|mediump|highp)\s+)?((?:(?:flat|smooth|noperspective|centroid|sample)\s+)*)(attribute|uniform|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([^;]+)\s*;)/g;
 const SPV_OP_NAME = 5;
 const SPV_OP_TYPE_SAMPLED_IMAGE = 27;
 const SPV_OP_TYPE_POINTER = 32;
@@ -105,6 +106,7 @@ const SPV_OP_VARIABLE = 59;
 const SPV_OP_LOAD = 61;
 const SPV_OP_DECORATE = 71;
 const SPV_OP_MEMBER_DECORATE = 72;
+const SPV_OP_IMAGE = 100;
 const SPV_STORAGE_CLASS_UNIFORM_CONSTANT = 0;
 const SPV_DECORATION_RELAXED_PRECISION = 0;
 
@@ -123,8 +125,37 @@ function wordBoundaryReplace(source: string, from: string, to: string): string {
     return source.replace(new RegExp(`\\b${escapeRegExp(from)}\\b`, "g"), to);
 }
 
+function sourceNameReplace(source: string, from: string, to: string): string {
+    const parts = from.split(".");
+    if (parts.length === 1) {
+        return wordBoundaryReplace(source, from, to);
+    }
+    const pattern = parts
+        .map((part) => escapeRegExp(part))
+        .join("\\s*\\.\\s*");
+    return source.replace(new RegExp(`\\b${pattern}\\b`, "g"), to);
+}
+
 function referencesIdentifier(source: string, name: string): boolean {
     return new RegExp(`\\b${escapeRegExp(name)}\\b`).test(source);
+}
+
+function isTopLevelAt(source: string, index: number): boolean {
+    let braceDepth = 0;
+    let parenDepth = 0;
+    for (let i = 0; i < index; i++) {
+        const ch = source[i];
+        if (ch === "{") {
+            braceDepth++;
+        } else if (ch === "}") {
+            braceDepth = Math.max(0, braceDepth - 1);
+        } else if (ch === "(") {
+            parenDepth++;
+        } else if (ch === ")") {
+            parenDepth = Math.max(0, parenDepth - 1);
+        }
+    }
+    return braceDepth === 0 && parenDepth === 0;
 }
 
 function pruneUnusedShaderResources(metadata: InitShaderInfoType, wgsl: string): ResourcePruneStats {
@@ -224,10 +255,14 @@ function prepareSourceAndDeclarations(source: string): PreparedGlslSource {
     }
 
     const declarations: ParsedGlslDeclaration[] = [];
-    body = body.replace(GLOBAL_DECLARATION_REGEX, (full, prefix, _declaration, qualifier, glslType, rawNames) => {
+    body = body.replace(GLOBAL_DECLARATION_REGEX, (full, prefix, _declaration, interpolation, qualifier, glslType, rawNames, offset) => {
+        if (!isTopLevelAt(body, offset)) {
+            return full;
+        }
         for (const parsed of parseDeclarationNames(rawNames)) {
             declarations.push({
                 qualifier,
+                interpolation: interpolation.trim(),
                 glslType,
                 name: parsed.name,
                 arraySuffix: parsed.arraySuffix,
@@ -255,6 +290,15 @@ function normalizeLegacyFragmentBuiltins(source: string): { source: string, uses
     return { source: out, usesFragColor };
 }
 
+function normalizeWebGlBuiltinsForVulkanGlsl(source: string): string {
+    let out = source;
+    out = wordBoundaryReplace(out, "gl_VertexID", "gl_VertexIndex");
+    out = wordBoundaryReplace(out, "gl_InstanceID", "gl_InstanceIndex");
+    out = out.replace(/\b1(?:\.0)?\s*\/\s*0(?:\.0)?\b/g, "3.4028234663852886e38");
+    out = out.replace(/-\s*3\.4028234663852886e38/g, "-3.4028234663852886e38");
+    return out;
+}
+
 function makeSamplerBindingDeclarations(metadata: InitShaderInfoType, layout: ProgramTranslationLayout): string[] {
     const lines: string[] = [];
     metadata.samplers.forEach((sampler, fallback) => {
@@ -262,7 +306,7 @@ function makeSamplerBindingDeclarations(metadata: InitShaderInfoType, layout: Pr
         const textureType = samplerGlslTextureType(sampler.glsl_type);
         const baseBinding = binding === undefined ? fallback * 2 : binding;
         lines.push(`layout(set = 0, binding = ${baseBinding}) uniform highp sampler ${sampler.name}S;`);
-        lines.push(`layout(set = 0, binding = ${baseBinding + 1}) uniform highp ${textureType} ${sampler.name}T;`);
+        lines.push(`layout(set = 0, binding = ${baseBinding + 1}) uniform ${textureType} ${sampler.name}T;`);
     });
     return lines;
 }
@@ -290,6 +334,22 @@ function samplerGlslTextureType(glslType: string): string {
             return "texture2DArray";
         case "sampler3D":
             return "texture3D";
+        case "isampler2D":
+            return "itexture2D";
+        case "isamplerCube":
+            return "itextureCube";
+        case "isampler2DArray":
+            return "itexture2DArray";
+        case "isampler3D":
+            return "itexture3D";
+        case "usampler2D":
+            return "utexture2D";
+        case "usamplerCube":
+            return "utextureCube";
+        case "usampler2DArray":
+            return "utexture2DArray";
+        case "usampler3D":
+            return "utexture3D";
         default:
             throw new Error(`unsupported sampler type: ${glslType}`);
     }
@@ -300,7 +360,6 @@ function addSamplerPrecisionDeclarations(lines: string[], metadata: InitShaderIn
     for (const sampler of metadata.samplers) {
         const separateSamplerPrecision = "precision highp sampler;";
         const samplerPrecision = `precision highp ${sampler.glsl_type};`;
-        const texturePrecision = `precision highp ${samplerGlslTextureType(sampler.glsl_type)};`;
         if (!seen.has(separateSamplerPrecision)) {
             seen.add(separateSamplerPrecision);
             lines.push(separateSamplerPrecision);
@@ -309,11 +368,22 @@ function addSamplerPrecisionDeclarations(lines: string[], metadata: InitShaderIn
             seen.add(samplerPrecision);
             lines.push(samplerPrecision);
         }
-        if (!seen.has(texturePrecision)) {
-            seen.add(texturePrecision);
-            lines.push(texturePrecision);
+    }
+}
+
+function rewriteMetadataSourceNames(source: string, metadata: InitShaderInfoType): string {
+    let out = source;
+    for (const uniform of metadata.uniforms) {
+        if (uniform.source_name && uniform.source_name !== uniform.name) {
+            out = sourceNameReplace(out, uniform.source_name, uniform.name);
         }
     }
+    for (const sampler of metadata.samplers) {
+        if (sampler.source_name && sampler.source_name !== sampler.name) {
+            out = sourceNameReplace(out, sampler.source_name, sampler.name);
+        }
+    }
+    return out;
 }
 
 function rewriteSamplerExpressions(source: string, metadata: InitShaderInfoType): string {
@@ -412,13 +482,13 @@ function parseSamplerFunctionParameter(raw: string): { glslType: string, name: s
     const normalized = raw.trim()
         .replace(/^(?:const|in|out|inout)\s+/, "")
         .replace(/^(?:lowp|mediump|highp)\s+/, "");
-    const match = normalized.match(/^(sampler(?:2D|Cube|2DArray|3D))\s+([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?$/);
+    const match = normalized.match(/^([iu]?sampler(?:2D|Cube|2DArray|3D))\s+([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?$/);
     return match ? { glslType: match[1], name: match[2] } : null;
 }
 
 function expandSamplerArgument(expr: string): string[] {
     const trimmed = expr.trim();
-    const constructor = trimmed.match(/^sampler(?:2D|Cube|2DArray|3D)\s*\(([\s\S]*)\)$/);
+    const constructor = trimmed.match(/^[iu]?sampler(?:2D|Cube|2DArray|3D)\s*\(([\s\S]*)\)$/);
     if (constructor) {
         const args = splitTopLevelArguments(constructor[1]);
         if (args.length === 2) {
@@ -534,7 +604,7 @@ function rewriteFragmentImplicitTextureLod(source: string): string {
             break;
         }
         const args = splitTopLevelArguments(source.slice(openParen + 1, closeParen));
-        if (args.length >= 2 && /^sampler(?:2D|Cube|2DArray|3D)\s*\(/.test(args[0].trim())) {
+        if (args.length >= 2 && /^[iu]?sampler(?:2D|Cube|2DArray|3D)\s*\(/.test(args[0].trim())) {
             result += source.slice(cursor, match.index);
             result += `textureLod(${args[0].trim()}, ${args[1].trim()}, 0.0)`;
             cursor = closeParen + 1;
@@ -658,6 +728,7 @@ export function patchGlslangSampledTextureVariables(spirv: Uint32Array, samplers
     }
 
     const patched = new Uint32Array(filtered);
+    const patchedImageLoads = new Set<number>();
     for (const [pointerTypeId, imageType] of pointerPatches) {
         const pointerOffset = pointerTypeOffsets.get(pointerTypeId);
         if (pointerOffset !== undefined) {
@@ -678,10 +749,40 @@ export function patchGlslangSampledTextureVariables(spirv: Uint32Array, samplers
         }
         if (imageType !== undefined) {
             patched[offset + 1] = imageType;
+            patchedImageLoads.add(patched[offset + 2]);
         }
     }
 
-    return patched;
+    const replacements = new Map<number, number>();
+    const removedOffsets = new Set<number>();
+    for (const offset of offsets) {
+        const op = patched[offset] & 0xffff;
+        if (op !== SPV_OP_IMAGE) {
+            continue;
+        }
+        const sampledImageId = patched[offset + 3];
+        if (patchedImageLoads.has(sampledImageId)) {
+            replacements.set(patched[offset + 2], sampledImageId);
+            removedOffsets.add(offset);
+        }
+    }
+    if (replacements.size === 0) {
+        return patched;
+    }
+
+    const finalWords = Array.from(patched.slice(0, 5));
+    for (const offset of offsets) {
+        if (removedOffsets.has(offset)) {
+            continue;
+        }
+        const wordCount = patched[offset] >>> 16;
+        finalWords.push(patched[offset]);
+        for (let i = 1; i < wordCount; i++) {
+            finalWords.push(replacements.get(patched[offset + i]) || patched[offset + i]);
+        }
+    }
+
+    return new Uint32Array(finalWords);
 }
 
 export function buildGlslangSource(
@@ -694,10 +795,15 @@ export function buildGlslangSource(
     const prepared = prepareSourceAndDeclarations(source);
     const lines: string[] = [prepared.source.trimEnd()];
     const declarations = prepared.declarations;
-    const bodyStart = source
+    const sourceWithoutPreamble = source
         .replace(/^\s*#version[^\n]*(?:\n|$)/gm, "")
-        .replace(/^\s*(#extension[^\n]*|#define[^\n]*|precision\s+(?:lowp|mediump|highp)\s+\w+\s*;)\s*$/gm, "")
-        .replace(GLOBAL_DECLARATION_REGEX, (full, prefix) => prefix);
+        .replace(/^\s*(#extension[^\n]*|#define[^\n]*|precision\s+(?:lowp|mediump|highp)\s+\w+\s*;)\s*$/gm, "");
+    const bodyStart = sourceWithoutPreamble.replace(
+        GLOBAL_DECLARATION_REGEX,
+        (full, prefix, _declaration, _interpolation, _qualifier, _glslType, _rawNames, offset) => {
+            return isTopLevelAt(sourceWithoutPreamble, offset) ? prefix : full;
+        },
+    );
     let body = bodyStart;
     addSamplerPrecisionDeclarations(lines, metadata);
 
@@ -714,7 +820,8 @@ export function buildGlslangSource(
     for (const varying of stageVaryings) {
         const location = layout.varyingLocations.get(varying.name);
         const direction = stage === "vertex" ? "out" : "in";
-        lines.push(`layout(location = ${location === undefined ? 0 : location}) ${direction} ${varying.glsl_type} ${varying.name}${declarationArraySuffix(declarations, varying.name)};`);
+        const interpolation = varying.interpolation ? `${varying.interpolation} ` : "";
+        lines.push(`layout(location = ${location === undefined ? 0 : location}) ${interpolation}${direction} ${varying.glsl_type} ${varying.name}${declarationArraySuffix(declarations, varying.name)};`);
     }
 
     let fragmentOutputLocation = 0;
@@ -725,6 +832,8 @@ export function buildGlslangSource(
     }
 
     const normalized = stage === "fragment" ? normalizeLegacyFragmentBuiltins(body) : { source: body, usesFragColor: false };
+    normalized.source = normalizeWebGlBuiltinsForVulkanGlsl(normalized.source);
+    normalized.source = rewriteMetadataSourceNames(normalized.source, metadata);
     body = lowerSamplerFunctionParameters(normalized.source);
     body = rewriteSamplerExpressions(body, metadata);
     if (stage === "fragment" && options.preserveImplicitTextureLod === false) {
@@ -748,13 +857,42 @@ function stripResourceDeclarations(wgsl: string): string {
         .replace(/^\s*struct\s+\w*Uniform\w*\s*\{[\s\S]*?^\s*\}\s*;?\s*$/gm, "");
 }
 
+function uniformReadExpression(uniform: NameAndType): string {
+    return `_hyd_uniforms_.${uniform.name}`;
+}
+
+const WGSL_RESERVED_IDENTIFIER_RENAMES: Record<string, string> = {
+    target: "target_",
+};
+
+function replaceBareIdentifier(source: string, from: string, to: string): string {
+    return source.replace(new RegExp(`\\b${escapeRegExp(from)}\\b`, "g"), (match, offset: number) => {
+        if (offset > 0 && source[offset - 1] === ".") {
+            return match;
+        }
+        return to;
+    });
+}
+
+function renameReservedWgslIdentifiers(wgsl: string): string {
+    let out = wgsl;
+    for (const [reserved, replacement] of Object.entries(WGSL_RESERVED_IDENTIFIER_RENAMES)) {
+        const declarationRegex = new RegExp(`\\b(?:var(?:<[^>]+>)?|let)\\s+${escapeRegExp(reserved)}\\b|[(,]\\s*${escapeRegExp(reserved)}\\s*:`, "m");
+        if (declarationRegex.test(out)) {
+            out = replaceBareIdentifier(out, reserved, replacement);
+        }
+    }
+    return out;
+}
+
 function normalizeTintWgsl(wgsl: string, metadata: InitShaderInfoType): string {
     let out = stripResourceDeclarations(wgsl);
+    out = renameReservedWgslIdentifiers(out);
 
     const uniformPlaceholders: Array<[string, string]> = [];
     for (const uniform of metadata.uniforms) {
         const placeholder = `__HYD_UNIFORM_${uniformPlaceholders.length}__`;
-        uniformPlaceholders.push([placeholder, `_hyd_uniforms_.${uniform.name}`]);
+        uniformPlaceholders.push([placeholder, uniformReadExpression(uniform)]);
         out = out.replace(new RegExp(`\\b[A-Za-z_]\\w*\\s*\\.\\s*${escapeRegExp(uniform.name)}\\b`, "g"), placeholder);
         out = wordBoundaryReplace(out, uniform.name, placeholder);
     }

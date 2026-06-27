@@ -29,6 +29,7 @@ import { deepEqual, equal, ok } from "node:assert/strict";
     DEPTH_COMPONENT: 0x1902,
     UNSIGNED_BYTE: 0x1401,
     FLOAT: 0x1406,
+    BROWSER_DEFAULT_WEBGL: 0x9244,
 };
 
 const {
@@ -36,6 +37,12 @@ const {
 } = require("../../src/components/hydTexture") as typeof import("../../src/components/hydTexture");
 
 const GL = WebGL2RenderingContext;
+const unpack = (flipY: boolean, alignment: number) => ({
+    flipY,
+    alignment,
+    premultiplyAlpha: false,
+    colorspaceConversion: GL.BROWSER_DEFAULT_WEBGL,
+});
 
 const rgba = new Uint8Array([
     1, 2, 3, 4,
@@ -43,10 +50,7 @@ const rgba = new Uint8Array([
     9, 10, 11, 12,
     13, 14, 15, 16,
 ]);
-const flippedRgba = prepareTypedTextureUpload(rgba, 2, 2, GL.RGBA, GL.RGBA, GL.UNSIGNED_BYTE, {
-    flipY: true,
-    alignment: 4,
-});
+const flippedRgba = prepareTypedTextureUpload(rgba, 2, 2, GL.RGBA, GL.RGBA, GL.UNSIGNED_BYTE, unpack(true, 4));
 deepEqual(Array.from(flippedRgba.data as Uint8Array), [
     9, 10, 11, 12,
     13, 14, 15, 16,
@@ -59,10 +63,7 @@ const paddedRgb = new Uint8Array([
     1, 2, 3, 4, 5, 6, 0, 0,
     7, 8, 9, 10, 11, 12, 0, 0,
 ]);
-const expandedRgb = prepareTypedTextureUpload(paddedRgb, 2, 2, GL.RGB, GL.RGB, GL.UNSIGNED_BYTE, {
-    flipY: true,
-    alignment: 4,
-});
+const expandedRgb = prepareTypedTextureUpload(paddedRgb, 2, 2, GL.RGB, GL.RGB, GL.UNSIGNED_BYTE, unpack(true, 4));
 ok(expandedRgb.data instanceof Uint8Array);
 deepEqual(Array.from(expandedRgb.data as Uint8Array), [
     7, 8, 9, 255,
@@ -78,10 +79,7 @@ const tightLuminance = new Uint8Array([
     1, 2, 3,
     4, 5, 6,
 ]);
-const expandedLuminance = prepareTypedTextureUpload(tightLuminance, 3, 2, GL.LUMINANCE, GL.LUMINANCE, GL.UNSIGNED_BYTE, {
-    flipY: false,
-    alignment: 4,
-});
+const expandedLuminance = prepareTypedTextureUpload(tightLuminance, 3, 2, GL.LUMINANCE, GL.LUMINANCE, GL.UNSIGNED_BYTE, unpack(false, 4));
 deepEqual(Array.from(expandedLuminance.data as Uint8Array), [
     1, 1, 1, 255,
     2, 2, 2, 255,

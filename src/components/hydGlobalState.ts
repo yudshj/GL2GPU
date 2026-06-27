@@ -49,6 +49,8 @@ export class CommonState implements HydHashable {
     activeTextureUnit: number; // TODO: 这个是否不需要放到hash里？
     viewport: ViewportState;
     arrayBufferBinding: HydBuffer;  // TODO: 这个是否不需要放到hash里？
+    pixelPackBufferBinding: HydBuffer;
+    pixelUnpackBufferBinding: HydBuffer;
     currentProgram: HydProgram;
     vertexArrayBinding: HydVertexArray;
     renderbufferBinding: HydTexture;
@@ -62,6 +64,12 @@ export class CommonState implements HydHashable {
             + this.readFramebufferBinding.hash;
         if (this.arrayBufferBinding) {
             ret += this.arrayBufferBinding.hash;
+        }
+        if (this.pixelPackBufferBinding) {
+            ret += this.pixelPackBufferBinding.hash;
+        }
+        if (this.pixelUnpackBufferBinding) {
+            ret += this.pixelUnpackBufferBinding.hash;
         }
         if (this.renderbufferBinding) {
             ret += this.renderbufferBinding.hash;
@@ -85,6 +93,8 @@ export class CommonState implements HydHashable {
         this.activeTextureUnit = activeTextureUnit;
         this.viewport = viewport;
         this.arrayBufferBinding = arrayBufferBinding;
+        this.pixelPackBufferBinding = null;
+        this.pixelUnpackBufferBinding = null;
         this.currentProgram = currentProgram;
         this.vertexArrayBinding = vertexArrayBinding;
         this.renderbufferBinding = renderbufferBinding;
@@ -173,6 +183,8 @@ export class BlendState implements HydHashable {
 export interface HydPixelUnpackState {
     flipY: boolean;
     alignment: number;
+    premultiplyAlpha: boolean;
+    colorspaceConversion: GLenum;
 }
 
 export class MiscState implements HydHashable {
@@ -180,26 +192,34 @@ export class MiscState implements HydHashable {
     scissorBox: [number, number, number, number];
     colorWriteMask: [boolean, boolean, boolean, boolean];
     unpackFlipYWebGL: boolean;
+    unpackPremultiplyAlphaWebGL: boolean;
+    unpackColorSpaceConversionWebGL: GLenum;
     unpackAlignment: number;
     packAlignment: number;
+    sampleAlphaToCoverage: boolean;
 
     public get unpackState(): HydPixelUnpackState {
         return {
             flipY: this.unpackFlipYWebGL,
             alignment: this.unpackAlignment,
+            premultiplyAlpha: this.unpackPremultiplyAlphaWebGL,
+            colorspaceConversion: this.unpackColorSpaceConversionWebGL,
         };
     }
 
     public get hash(): string {
-        return this.scissorTest.toString() + this.scissorBox.toString() + this.colorWriteMask.toString() + this.unpackFlipYWebGL.toString() + this.unpackAlignment.toString() + this.packAlignment.toString();
+        return this.scissorTest.toString() + this.scissorBox.toString() + this.colorWriteMask.toString() + this.unpackFlipYWebGL.toString() + this.unpackPremultiplyAlphaWebGL.toString() + this.unpackColorSpaceConversionWebGL.toString() + this.unpackAlignment.toString() + this.packAlignment.toString() + this.sampleAlphaToCoverage.toString();
     }
     constructor() {
         this.scissorTest = false;
         this.scissorBox = [0, 0, 0, 0]; // [x, y, width, height]
         this.colorWriteMask = [true, true, true, true];
         this.unpackFlipYWebGL = false;
+        this.unpackPremultiplyAlphaWebGL = false;
+        this.unpackColorSpaceConversionWebGL = WebGL2RenderingContext.BROWSER_DEFAULT_WEBGL;
         this.unpackAlignment = 4;
         this.packAlignment = 4;
+        this.sampleAlphaToCoverage = false;
     }
 }
 
@@ -232,15 +252,15 @@ export class StencilState implements HydHashable {
         this.frontPassDepthFail = 'keep';
         this.frontPassDepthPass = 'keep';
         this.frontRef = 0;
-        this.frontValueMask = 0x7FFFFFFF;
-        this.frontWriteMask = 0x7FFFFFFF;
+        this.frontValueMask = 0xFFFFFFFF;
+        this.frontWriteMask = 0xFFFFFFFF;
         this.backFunc = 'always';
         this.backFail = 'keep';
         this.backPassDepthPass = 'keep';
         this.backPassDepthFail = 'keep';
         this.backRef = 0;
-        this.backValueMask = 0x7FFFFFFF;
-        this.backWriteMask = 0x7FFFFFFF;
+        this.backValueMask = 0xFFFFFFFF;
+        this.backWriteMask = 0xFFFFFFFF;
     }
 }
 
@@ -265,13 +285,13 @@ export class HydGlobalState {
     private __bindGroupCount: number = 0;
     private __pipelineCount: number = 0;
     private uniformBuffer: GPUBuffer;
-    private readonly defaultSampleTextures: Map<GPUTextureViewDimension, HydTexture> = new Map();
+    private readonly defaultSampleTextures: Map<string, HydTexture> = new Map();
 
     constructor(attributes: WebGLContextAttributes, uniform: GPUBuffer, device: GPUDevice) {
         this.contextAttributes = attributes;
         this.defaultFramebuffer = new HydFramebuffer();
         this.defaultFramebuffer.drawBuffers = [WebGL2RenderingContext.BACK];
-        // this.defaultFramebuffer.readBuffer = WebGL2RenderingContext.BACK;
+        this.defaultFramebuffer.readBuffer = WebGL2RenderingContext.BACK;
         this.defaultFramebuffer.attachments = new Map();
         this.device = device;
 
@@ -288,13 +308,14 @@ export class HydGlobalState {
         this.uniformBuffer = uniform;
     }
 
-    private getDefaultSampleTexture(viewDimension: GPUTextureViewDimension): HydTexture {
-        let texture = this.defaultSampleTextures.get(viewDimension);
+    private getDefaultSampleTexture(viewDimension: GPUTextureViewDimension, sampleType: GPUTextureSampleType): HydTexture {
+        const key = `${viewDimension}:${sampleType}`;
+        let texture = this.defaultSampleTextures.get(key);
         if (!texture) {
             texture = new HydTexture(this.device);
-            texture.label = `HydDefaultSampleTexture-${viewDimension}`;
-            texture.ensureSampleable(viewDimension);
-            this.defaultSampleTextures.set(viewDimension, texture);
+            texture.label = `HydDefaultSampleTexture-${viewDimension}-${sampleType}`;
+            texture.ensureSampleable(viewDimension, sampleType);
+            this.defaultSampleTextures.set(key, texture);
         }
         return texture;
     }
@@ -327,12 +348,12 @@ export class HydGlobalState {
         }
     }
 
-    private getSamplerTexture(textureUnit: number, viewDimension: GPUTextureViewDimension): HydTexture {
+    private getSamplerTexture(textureUnit: number, viewDimension: GPUTextureViewDimension, sampleType: GPUTextureSampleType): HydTexture {
         const texture = this.getTextureUnitBinding(textureUnit, viewDimension);
         if (!texture) {
-            return this.getDefaultSampleTexture(viewDimension);
+            return this.getDefaultSampleTexture(viewDimension, sampleType);
         }
-        texture.ensureSampleable(viewDimension);
+        texture.ensureSampleable(viewDimension, sampleType);
         return texture;
     }
 
@@ -394,9 +415,10 @@ export class HydGlobalState {
                     }),
             }
         }
-        if (this.depthState.enabled || this.stencilState.enabled) {
+        const depthStencilAttachment = this.getDepthStencilAttachment();
+        if (depthStencilAttachment) {
             pipelineDescriptor.depthStencil = {
-                format: this.getDepthStencilAttachment().format,
+                format: depthStencilAttachment.format,
                 depthWriteEnabled: this.depthState.enabled && this.depthState.writeMask,
                 depthCompare: this.depthState.enabled ? this.depthState.func : 'always',
                 stencilFront: {
@@ -436,8 +458,9 @@ export class HydGlobalState {
             // depthStencilFormat: this.getDepthStencilAttachment().format,
             // sampleCount: 1,
         }
-        if (this.depthState.enabled || this.stencilState.enabled) {
-            ret['depthStencilFormat'] = this.getDepthStencilAttachment().format;
+        const depthStencilAttachment = this.getDepthStencilAttachment();
+        if (depthStencilAttachment) {
+            ret['depthStencilFormat'] = depthStencilAttachment.format;
         }
         return ret;
     }
@@ -454,9 +477,10 @@ export class HydGlobalState {
                 } else {
                     cacheKey += 'null';
                 }
-            });
-        if (this.depthState.enabled || this.stencilState.enabled) {
-            const dsa = this.getDepthStencilAttachment();
+        });
+        const depthStencilAttachment = this.getDepthStencilAttachment();
+        if (depthStencilAttachment) {
+            const dsa = depthStencilAttachment;
             cacheKey += '$' +
                 dsa.view.label +
                 (this.depthState.enabled ? ((this.clearState.target & WebGL2RenderingContext.DEPTH_BUFFER_BIT) ? 'clear' : 'load') : undefined) +
@@ -496,8 +520,9 @@ export class HydGlobalState {
                     }
                 }),
         };
-        if (this.depthState.enabled || this.stencilState.enabled) {
-            const dsa = this.getDepthStencilAttachment();
+        const depthStencilAttachment = this.getDepthStencilAttachment();
+        if (depthStencilAttachment) {
+            const dsa = depthStencilAttachment;
             renderPassDescriptor.depthStencilAttachment = {
                 view: dsa.view,
                 depthClearValue: this.clearState.depth,
@@ -618,20 +643,23 @@ export class HydGlobalState {
         }
     }
 
-    private getDepthStencilAttachment(): { view: GPUTextureView, format: GPUTextureFormat } {
+    private getDepthStencilAttachment(): { view: GPUTextureView, format: GPUTextureFormat } | null {
         if (this.depthState.enabled && this.stencilState.enabled) {
             const attachment = this.commonState.drawFramebufferBinding.attachments.get(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT);
+            if (!attachment) return null;
             return { view: attachment.view, format: attachment.format };
         }
         if (this.depthState.enabled) {
             const attachment = this.commonState.drawFramebufferBinding.attachments.get(WebGL2RenderingContext.DEPTH_ATTACHMENT);
+            if (!attachment) return null;
             return { view: attachment.view, format: attachment.format };
         }
         if (this.stencilState.enabled) {
             const attachment = this.commonState.drawFramebufferBinding.attachments.get(WebGL2RenderingContext.STENCIL_ATTACHMENT);
+            if (!attachment) return null;
             return { view: attachment.view, format: attachment.format };
         }
-        throw new Error("getDepthStencilAttachment failed");
+        return null;
     }
 
     public getBindGroup(): [string, GPUBindGroupEntry[], string, GPUBindGroupLayoutEntry[], HydTexture[]] {
@@ -663,28 +691,29 @@ export class HydGlobalState {
         let bindGroupLayoutKey = '0-du-' + program.alignedUniformSize;
 
         for (const sampler of program.hydSamplers) {
-            const textureAttachment: HydTexture = this.getSamplerTexture(sampler.textureUnit, sampler.viewDimension);
+            const textureAttachment: HydTexture = this.getSamplerTexture(sampler.textureUnit, sampler.viewDimension, sampler.sampleType);
+            const samplerBindingType = textureAttachment.isDepthStencil ? 'non-filtering' : sampler.samplerBindingType;
             textureAttachments.push(textureAttachment);
             bindGroupLayoutEntry.push({
                 binding: bindGroupLayoutEntry.length,
-                visibility: GPUShaderStage.FRAGMENT,
+                visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
                 sampler: {
-                    type: textureAttachment.isDepthStencil ? 'non-filtering' : 'filtering',
+                    type: samplerBindingType,
                 },
             });
             bindGroupLayoutEntry.push({
                 binding: bindGroupLayoutEntry.length,
-                visibility: GPUShaderStage.FRAGMENT,
+                visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
                 texture: {
-                    sampleType: textureAttachment.isDepthStencil ? 'unfilterable-float' : 'float',
+                    sampleType: textureAttachment.isDepthStencil ? 'unfilterable-float' : sampler.sampleType,
                     viewDimension: sampler.viewDimension,
                     multisampled: false,
                 },
             });
-            bindGroupLayoutKey += bindGroupLayoutEntry.length + '-t-' + textureAttachment.isDepthStencil + sampler.viewDimension;
+            bindGroupLayoutKey += bindGroupLayoutEntry.length + '-t-' + textureAttachment.isDepthStencil + sampler.viewDimension + sampler.sampleType + sampler.samplerBindingType;
             bindGroupEntry.push({
                 binding: bindGroupEntry.length,
-                resource: textureAttachment.sampler,
+                resource: textureAttachment.samplerForBinding(samplerBindingType),
             });
             bindGroupEntry.push({
                 binding: bindGroupEntry.length,

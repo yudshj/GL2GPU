@@ -298,6 +298,13 @@ function fieldOrIndexAssignmentCount(source: string, name: string): number {
     return source.match(regex)?.length ?? 0;
 }
 
+function pointerAssignmentCount(source: string, name: string): number {
+    const deref = `\\*\\s*\\(\\s*${escapeRegExp(name)}\\s*\\)`;
+    const maybeParenthesizedDeref = `(?:${deref}|\\(\\s*${deref}\\s*\\))`;
+    const regex = new RegExp(`${maybeParenthesizedDeref}\\s*(?:[+\\-*/%&|^]?=|(?:\\.|\\[[^\\]]+\\])[^=;\\n]*=)`, "g");
+    return source.match(regex)?.length ?? 0;
+}
+
 function applyIdentifierMap(source: string, replacements: Map<string, string>): string {
     let out = source;
     const names = Array.from(replacements.keys()).sort((a, b) => b.length - a.length);
@@ -504,7 +511,7 @@ function lowerReadOnlyPointerParamsOnce(source: string): PointerParamLowering {
                 safe = false;
                 break;
             }
-            if (assignmentCount(fn.body, param.name) > 0 || assignmentCount(fn.body, `*(${param.name})`) > 0) {
+            if (assignmentCount(fn.body, param.name) > 0 || pointerAssignmentCount(fn.body, param.name) > 0) {
                 safe = false;
                 break;
             }
@@ -583,21 +590,48 @@ function lowerReadOnlyPointerParams(source: string): PointerParamLowering {
     return { wgsl: out, loweredPointerParams, skipped: "pointer-param-iteration-limit" };
 }
 
+function collectVectorDimensions(source: string): Map<string, number> {
+    const dimensions = new Map<string, number>();
+    const typePattern = "vec\\s*([234])\\s*(?:f|<\\s*f32\\s*>)";
+    const declarationRegex = new RegExp(`\\b(?:var(?:<[^>]+>)?|let)\\s+([A-Za-z_]\\w*)\\s*:\\s*${typePattern}`, "g");
+    for (let match = declarationRegex.exec(source); match !== null; match = declarationRegex.exec(source)) {
+        dimensions.set(match[1], Number(match[2]));
+    }
+    const paramRegex = new RegExp(`\\b([A-Za-z_]\\w*)\\s*:\\s*${typePattern}`, "g");
+    for (let match = paramRegex.exec(source); match !== null; match = paramRegex.exec(source)) {
+        dimensions.set(match[1], Number(match[2]));
+    }
+    return dimensions;
+}
+
 function foldVectorConstructors(source: string): { wgsl: string, folded: number } {
     let folded = 0;
+    const vectorDimensions = collectVectorDimensions(source);
     let out = source.replace(/\bvec2f\s*\(\s*([A-Za-z_]\w*)\.x\s*,\s*\1\.y\s*\)/g, (_match, value) => {
+        if (vectorDimensions.get(value) !== 2) {
+            return _match;
+        }
         folded++;
         return value;
     });
     out = out.replace(/\bvec3f\s*\(\s*([A-Za-z_]\w*)\.x\s*,\s*\1\.y\s*,\s*\1\.z\s*\)/g, (_match, value) => {
+        if (vectorDimensions.get(value) !== 3) {
+            return _match;
+        }
         folded++;
         return value;
     });
     out = out.replace(/\bvec4f\s*\(\s*([A-Za-z_]\w*)\.x\s*,\s*\1\.y\s*,\s*\1\.z\s*,\s*\1\.w\s*\)/g, (_match, value) => {
+        if (vectorDimensions.get(value) !== 4) {
+            return _match;
+        }
         folded++;
         return value;
     });
     out = out.replace(/\bvec4f\s*\(\s*([A-Za-z_]\w*)\.x\s*,\s*\1\.y\s*,\s*\1\.z\s*,\s*([^,)]+?)\s*\)/g, (_match, value, scalar) => {
+        if (vectorDimensions.get(value) !== 3) {
+            return _match;
+        }
         folded++;
         return `vec4f(${value}, ${scalar.trim()})`;
     });
@@ -632,6 +666,16 @@ function removeSingleUseLets(source: string): { wgsl: string, removed: number } 
             const isSimpleAlias = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?$/.test(expression);
             if (useCount === 0 || (!isSimpleAlias && useCount !== 1)) {
                 continue;
+            }
+            if (!isSimpleAlias) {
+                const firstUse = after.search(new RegExp(`\\b${escapeRegExp(name)}\\b`));
+                if (firstUse < 0) {
+                    continue;
+                }
+                const betweenDeclarationAndUse = after.slice(0, firstUse);
+                if (betweenDeclarationAndUse.trim().length > 0) {
+                    continue;
+                }
             }
             out = out.slice(0, match.index) + out.slice(match.index + full.length);
             const replacement = isSimpleAlias ? expression : `(${expression})`;
