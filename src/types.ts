@@ -137,6 +137,7 @@ export class HydVertexArrayAttribute implements HydHashable{
     public int: boolean;
     public normalized: boolean = false;
     public stride: number = 0;
+    public webglStride: number = 0;
     public offset: number = 0;
     public divisor: number = 0;
     public buffer: HydBuffer;
@@ -174,16 +175,21 @@ export interface HydActiveUniformInfo {
 // }
 
 
-// // 让instanceof能够正常工作
-const OriginWebGLShader = WebGLShader;
-WebGLShader = new Proxy(OriginWebGLShader, {
-    get: function (target, p, receiver) {
-        if (p === Symbol.hasInstance) {
-            return (instance: any) => {
-                return (instance instanceof HydShader) || (instance instanceof OriginWebGLShader);
-            }
-        } else {
-            return target[p];
-        }
+const nativeFunctionHasInstance = Function.prototype[Symbol.hasInstance];
+
+function installHydHasInstance(constructor: any, predicate: (instance: any) => boolean) {
+    try {
+        Object.defineProperty(constructor, Symbol.hasInstance, {
+            configurable: true,
+            value(instance: any) {
+                return predicate(instance) || nativeFunctionHasInstance.call(constructor, instance);
+            },
+        });
+    } catch (_) {
     }
-}) as any;
+}
+
+installHydHasInstance(WebGLShader, (instance) => instance instanceof HydShader);
+installHydHasInstance(WebGLRenderingContext, (instance) =>
+    instance?.hydContextType === "webgl" || instance?.hydContextType === "experimental-webgl");
+installHydHasInstance(WebGL2RenderingContext, (instance) => instance?.hydContextType === "webgl2");

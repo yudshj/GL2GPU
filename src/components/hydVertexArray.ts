@@ -5,6 +5,7 @@ import { HydBuffer } from "./hydBuffer";
 
 export class HydVertexArray  implements HydHashable {
     private __hash__: string;
+    public readonly ownerToken: object;
     public attributes: Array<HydVertexArrayAttribute> = [
         new HydVertexArrayAttribute(),
         new HydVertexArrayAttribute(),
@@ -24,6 +25,9 @@ export class HydVertexArray  implements HydHashable {
         new HydVertexArrayAttribute(),
     ];
     public elementArrayBufferBinding: HydBuffer = null;
+    constructor(ownerToken?: object) {
+        this.ownerToken = ownerToken;
+    }
     public get hash(): string {
         let ret = this.elementArrayBufferBinding ? this.elementArrayBufferBinding.hash : 'null';
         for (const attribute of this.attributes) {

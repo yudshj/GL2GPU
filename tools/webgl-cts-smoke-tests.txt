@@ -1,0 +1,8 @@
+conformance/programs/gl-getshadersource.html
+conformance/programs/program-infolog.html
+conformance/programs/program-handling.html
+conformance/programs/program-test.html
+conformance/context/incorrect-context-object-behaviour.html
+conformance/misc/is-object.html
+conformance/state/gl-object-get-calls.html
+conformance/canvas/drawingbuffer-test.html

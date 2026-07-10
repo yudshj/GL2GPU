@@ -82,6 +82,10 @@ export class ProgramUniformBuffer {
     public int32View: Int32Array;
     public uint32View: Uint32Array;
     public wordOffset: number;
+    public ownerToken: object;
+    public program: HydProgram;
+    public linkGeneration: number;
+    public useToken: number = 0;
 
     constructor(name: string, type: GLenum, size: GLsizei, internal: boolean = false, sourceName?: string) {
         this.name = name;
@@ -107,6 +111,10 @@ export class ProgramUniformSampler {
     sourceName?: string;
     originFlipUniform?: ProgramUniformBuffer;
     originFlipValue?: boolean;
+    ownerToken: object;
+    program: HydProgram;
+    linkGeneration: number;
+    useToken: number = 0;
     constructor(
         name: string,
         webgl_type: GLenum,
@@ -315,6 +323,7 @@ export class HydProgram implements HydHashable {
     }
     private vertexShader: HydShader;
     private fragmentShader: HydShader;
+    private readonly attachedShaders: HydShader[] = [];
     private readonly shaderTranslator: ShaderTranslator;
     public vertexModule: GPUShaderModule;
     public fragmentModule: GPUShaderModule;
@@ -324,7 +333,12 @@ export class HydProgram implements HydHashable {
     private readonly device: GPUDevice;
 
     public deleted: boolean = false;
+    public destroyed: boolean = false;
     public linked: boolean = false;
+    public infoLog: string = "";
+    public readonly ownerToken: object;
+    public linkGeneration: number = 0;
+    public validated: boolean = false;
 
     public hydAttributes: Array<ProgramAttribute> = [];
     public hydAttributeLocations: Set<number> = new Set();
@@ -353,9 +367,10 @@ export class HydProgram implements HydHashable {
     public alignedUniformSize: number;
     // private uniformToFlush: number;
 
-    constructor(device: GPUDevice, shaderTranslator: ShaderTranslator) {
+    constructor(device: GPUDevice, shaderTranslator: ShaderTranslator, ownerToken?: object) {
         this.device = device;
         this.shaderTranslator = shaderTranslator;
+        this.ownerToken = ownerToken;
     }
 
     public write_uniform_i(dstOffset: number, num: number, value: ArrayLike<number>) {
@@ -390,11 +405,46 @@ export class HydProgram implements HydHashable {
         }
     }
 
-    public attachShader(shader: HydShader) {
+    public attachShader(shader: HydShader): boolean {
+        if (this.attachedShaders.includes(shader) || this.attachedShaders.some((attached) => attached.type === shader.type)) {
+            return false;
+        }
+        this.attachedShaders.push(shader);
+        shader.attachmentCount++;
         if (shader.type === WebGLRenderingContext.VERTEX_SHADER) {
             this.vertexShader = shader;
         } else if (shader.type === WebGLRenderingContext.FRAGMENT_SHADER) {
             this.fragmentShader = shader;
+        }
+        return true;
+    }
+
+    public detachShader(shader: HydShader): boolean {
+        const index = this.attachedShaders.indexOf(shader);
+        if (index < 0) {
+            return false;
+        }
+        this.attachedShaders.splice(index, 1);
+        shader.attachmentCount = Math.max(0, shader.attachmentCount - 1);
+        if (shader.deleted && shader.attachmentCount === 0) {
+            shader.destroyed = true;
+        }
+        if (this.vertexShader === shader) {
+            this.vertexShader = undefined;
+        }
+        if (this.fragmentShader === shader) {
+            this.fragmentShader = undefined;
+        }
+        return true;
+    }
+
+    public getAttachedShaders(): HydShader[] {
+        return this.attachedShaders.slice();
+    }
+
+    public detachAllShaders() {
+        for (const shader of this.getAttachedShaders()) {
+            this.detachShader(shader);
         }
     }
 
@@ -402,8 +452,25 @@ export class HydProgram implements HydHashable {
         this.boundAttributeLocations.set(name, index);
     }
 
-    public linkProgram() {
-        const translatedProgram = this.shaderTranslator.translateProgram(this.vertexShader, this.fragmentShader, this.boundAttributeLocations);
+    public linkProgram(): boolean {
+        this.linked = false;
+        this.infoLog = "";
+        if (!this.vertexShader || !this.fragmentShader) {
+            this.infoLog = "A vertex shader and a fragment shader must both be attached.";
+            return false;
+        }
+        if (!this.vertexShader.compiled || !this.fragmentShader.compiled) {
+            this.infoLog = "All attached shaders must compile successfully before linking.";
+            return false;
+        }
+
+        let translatedProgram: ReturnType<ShaderTranslator["translateProgram"]>;
+        try {
+            translatedProgram = this.shaderTranslator.translateProgram(this.vertexShader, this.fragmentShader, this.boundAttributeLocations);
+        } catch (error) {
+            this.infoLog = error instanceof Error ? error.message : String(error);
+            return false;
+        }
         if (this.vertexShader && translatedProgram.vertex) {
             this.vertexShader.shader_info = translatedProgram.vertex;
         }
@@ -413,7 +480,6 @@ export class HydProgram implements HydHashable {
 
         HydProgram.linkedPrograms++;
         this._hash = HydProgram.linkedPrograms.toString();
-        this.linked = true;
         let shaders = [];
         let tmpOutput = "";
         if (this.vertexShader) {
@@ -490,6 +556,16 @@ export class HydProgram implements HydHashable {
         this.hydAttributeLocations = new Set(this.hydAttributes.map((attribute) => attribute.location));
         this.hydUniforms = aus.uniforms;
         this.hydSamplers = aus.samplers;
+        for (const uniform of this.hydUniforms) {
+            uniform.ownerToken = this.ownerToken;
+            uniform.program = this;
+            uniform.linkGeneration = this.linkGeneration;
+        }
+        for (const sampler of this.hydSamplers) {
+            sampler.ownerToken = this.ownerToken;
+            sampler.program = this;
+            sampler.linkGeneration = this.linkGeneration;
+        }
         this.hydSampler2D = [];
         for (const sampler of this.hydSamplers) {
             if (sampler.webgl_type === WebGL2RenderingContext.SAMPLER_2D) {
@@ -527,6 +603,8 @@ export class HydProgram implements HydHashable {
             uniform.uint32View = this.activeUniformUint32;
             uniform.wordOffset = uniform.offset >> 2;
         }
+        this.linked = true;
+        return true;
         // this.uniformArrayBufferView = new DataView(this.uniformArrayBuffer.buffer);
         // this.uniformToFlush = MAX_UNIFORM_SIZE - 2 * this.uniformBufferLengthAligned;
     }

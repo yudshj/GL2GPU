@@ -7,17 +7,19 @@ export class FramebufferAttributes implements HydHashable {
     public face: number;
     public layer: number;
     public attachment: HydTexture;
+    public objectType: GLenum;
 
-    constructor(attachmentPoint: number, level: number, face: number, attachment: HydTexture, layer?: number) {
+    constructor(attachmentPoint: number, level: number, face: number, attachment: HydTexture, layer?: number, objectType: GLenum = WebGL2RenderingContext.TEXTURE) {
         this.attachmentPoint = attachmentPoint;
         this.level = level;
         this.face = face;
         this.layer = layer;
         this.attachment = attachment;
+        this.objectType = objectType;
     }
 
     public get hash(): string {
-        return `${this.attachmentPoint}-${this.level}-${this.face}-${this.layer}-${this.attachment.hash}`;
+        return `${this.attachmentPoint}-${this.level}-${this.face}-${this.layer}-${this.objectType}-${this.attachment.hash}`;
     }
 
     public get view(): GPUTextureView {
@@ -38,6 +40,9 @@ export class FramebufferAttributes implements HydHashable {
 }
 
 export class HydFramebuffer implements HydHashable {
+    public readonly ownerToken: object;
+    public initialized: boolean = false;
+    public deleted: boolean = false;
     public attachments: Map<GLenum, FramebufferAttributes> = new Map();
     public drawBuffers: GLenum[] = [
         WebGL2RenderingContext.COLOR_ATTACHMENT0
@@ -45,6 +50,10 @@ export class HydFramebuffer implements HydHashable {
     public readBuffer: GLenum = WebGL2RenderingContext.COLOR_ATTACHMENT0;
 
     private _hash: string = null;
+
+    constructor(ownerToken?: object) {
+        this.ownerToken = ownerToken;
+    }
 
     public get hash(): string {
         if (!this._hash) {

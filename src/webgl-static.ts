@@ -83,7 +83,7 @@ async function hydGetContext(element: HTMLCanvasElement, _shader_info_url: strin
         alphaMode: contextAttributes.alpha === false ? 'opaque' : 'premultiplied',
     });
     // const wrapper = new HydWebGLWrapper(this, gpuctx, glctx, contextAttributes, hydDevice, uniform_size);
-    return new HydWebGLStatic(targetElement, gpuctx, contextAttributes, hydDevice, uniform_size, replay_delay, shaderTranslator);
+    return new HydWebGLStatic(targetElement, gpuctx, contextAttributes, hydDevice, uniform_size, replay_delay, shaderTranslator, contextType);
 };
 
 export { hydGetContext, hydGetContext as gl2gpuGetContext, beginFrame, endFrame };

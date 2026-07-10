@@ -68,6 +68,9 @@ const parameterToString: Map<GLenum, GPUAddressMode | GPUFilterMode> = new Map([
     [WebGL2RenderingContext.CLAMP_TO_EDGE, "clamp-to-edge"],
     [WebGL2RenderingContext.MIRRORED_REPEAT, "mirror-repeat"],
     [WebGL2RenderingContext.LINEAR_MIPMAP_LINEAR, "linear"],
+    [WebGL2RenderingContext.LINEAR_MIPMAP_NEAREST, "linear"],
+    [WebGL2RenderingContext.NEAREST_MIPMAP_LINEAR, "nearest"],
+    [WebGL2RenderingContext.NEAREST_MIPMAP_NEAREST, "nearest"],
 ]);
 
 const pnameToString: Map<GLenum, string> = new Map([
@@ -314,6 +317,7 @@ function sampleTypeLookup(internalFormat: GLenum, format: GLenum, type: GLenum):
 export class HydTexture implements HydHashable {
     // public bindGroupHashes: [Map<string, GPUBindGroup>, string][] = [];
     public onDestroy: Array<() => void> = [];
+    public onDelete: Array<() => void> = [];
     static __total__ = 0;
     public static isDestroyedTexture: boolean = false;
     public label: string;
@@ -366,6 +370,12 @@ export class HydTexture implements HydHashable {
     };
 
     private readonly device: GPUDevice;
+    public readonly ownerToken: object;
+    public initialized: boolean = false;
+    public deleted: boolean = false;
+    public renderbufferInternalFormat: GLenum = 0;
+    public renderbufferSamples: number = 0;
+    public readonly webglParameters: Map<GLenum, GLenum> = new Map();
     private static __samplerCount: number = 0;
     private static __viewCount: number = 0;
 
@@ -531,9 +541,15 @@ export class HydTexture implements HydHashable {
         }
         return this._texture;
     }
-    constructor(device: GPUDevice) {
+    constructor(device: GPUDevice, ownerToken?: object) {
         this.device = device;
+        this.ownerToken = ownerToken;
         this.label = `HydTexture${HydTexture.__total__++}`;
+        this.webglParameters.set(WebGL2RenderingContext.TEXTURE_MIN_FILTER, WebGL2RenderingContext.NEAREST_MIPMAP_LINEAR);
+        this.webglParameters.set(WebGL2RenderingContext.TEXTURE_MAG_FILTER, WebGL2RenderingContext.LINEAR);
+        this.webglParameters.set(WebGL2RenderingContext.TEXTURE_WRAP_S, WebGL2RenderingContext.REPEAT);
+        this.webglParameters.set(WebGL2RenderingContext.TEXTURE_WRAP_T, WebGL2RenderingContext.REPEAT);
+        this.webglParameters.set(WebGL2RenderingContext.TEXTURE_WRAP_R, WebGL2RenderingContext.REPEAT);
     }
 
     public ensureSampleable(viewDimension: GPUTextureViewDimension = "2d", sampleType: GPUTextureSampleType = "float") {
@@ -896,6 +912,7 @@ export class HydTexture implements HydHashable {
     public texParameteri(pname: GLenum, param: GLenum) {
         console.assert(pnameToString.has(pname) && parameterToString.has(param));
         this.state[pnameToString.get(pname)] = parameterToString.get(param);
+        this.webglParameters.set(pname, param);
         this._sampler = null;
         this._nonFilteringSampler = null;
         this._hash = null;

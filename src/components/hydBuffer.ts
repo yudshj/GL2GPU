@@ -5,14 +5,20 @@ export class HydBuffer implements HydHashable {
     static __total__ = 0;
     private __buffer__: GPUBuffer;
     private device: GPUDevice;
+    public readonly ownerToken: object;
+    public initialized: boolean = false;
+    public deleted: boolean = false;
+    public webglSize: number = 0;
+    public webglUsage: GLenum = 0x88E4;
     public descriptor: GPUBufferDescriptor = {
         size: undefined,
         usage: GPUBufferUsage.COPY_DST,
     };
     public shadowData: Uint8Array = new Uint8Array(0);
 
-    constructor(device: GPUDevice) {
+    constructor(device: GPUDevice, ownerToken?: object) {
         this.device = device;
+        this.ownerToken = ownerToken;
         this.descriptor.label = `buffer ${HydBuffer.__total__++}`;
     }
 

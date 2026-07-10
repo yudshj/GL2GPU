@@ -308,6 +308,18 @@ export class HydGlobalState {
         this.uniformBuffer = uniform;
     }
 
+    public setError(error: GLenum) {
+        if (this.glError === WebGL2RenderingContext.NO_ERROR) {
+            this.glError = error;
+        }
+    }
+
+    public consumeError(): GLenum {
+        const error = this.glError;
+        this.glError = WebGL2RenderingContext.NO_ERROR;
+        return error;
+    }
+
     private getDefaultSampleTexture(viewDimension: GPUTextureViewDimension, sampleType: GPUTextureSampleType): HydTexture {
         const key = `${viewDimension}:${sampleType}`;
         let texture = this.defaultSampleTextures.get(key);
@@ -481,13 +493,17 @@ export class HydGlobalState {
         const depthStencilAttachment = this.getDepthStencilAttachment();
         if (depthStencilAttachment) {
             const dsa = depthStencilAttachment;
+            const clearDepth = Boolean(this.clearState.target & WebGL2RenderingContext.DEPTH_BUFFER_BIT);
+            const clearStencil = Boolean(this.clearState.target & WebGL2RenderingContext.STENCIL_BUFFER_BIT);
+            const useDepth = this.depthState.enabled || clearDepth;
+            const useStencil = this.stencilState.enabled || clearStencil;
             cacheKey += '$' +
                 dsa.view.label +
-                (this.depthState.enabled ? ((this.clearState.target & WebGL2RenderingContext.DEPTH_BUFFER_BIT) ? 'clear' : 'load') : undefined) +
-                (this.depthState.enabled ? 'store' : undefined) +
+                (useDepth ? (clearDepth ? 'clear' : 'load') : undefined) +
+                (useDepth ? 'store' : undefined) +
                 this.clearState.depth +
-                (this.stencilState.enabled ? ((this.clearState.target & WebGL2RenderingContext.STENCIL_BUFFER_BIT) ? 'clear' : 'load') : undefined) +
-                (this.stencilState.enabled ? 'store' : undefined) +
+                (useStencil ? (clearStencil ? 'clear' : 'load') : undefined) +
+                (useStencil ? 'store' : undefined) +
                 this.clearState.stencil;
         }
         return cacheKey;
@@ -523,15 +539,19 @@ export class HydGlobalState {
         const depthStencilAttachment = this.getDepthStencilAttachment();
         if (depthStencilAttachment) {
             const dsa = depthStencilAttachment;
+            const clearDepth = Boolean(this.clearState.target & WebGL2RenderingContext.DEPTH_BUFFER_BIT);
+            const clearStencil = Boolean(this.clearState.target & WebGL2RenderingContext.STENCIL_BUFFER_BIT);
+            const useDepth = this.depthState.enabled || clearDepth;
+            const useStencil = this.stencilState.enabled || clearStencil;
             renderPassDescriptor.depthStencilAttachment = {
                 view: dsa.view,
                 depthClearValue: this.clearState.depth,
-                depthLoadOp: (this.depthState.enabled ? ((this.clearState.target & WebGL2RenderingContext.DEPTH_BUFFER_BIT) ? 'clear' : 'load') : undefined),
-                depthStoreOp: (this.depthState.enabled ? 'store' : undefined),
+                depthLoadOp: (useDepth ? (clearDepth ? 'clear' : 'load') : undefined),
+                depthStoreOp: (useDepth ? 'store' : undefined),
                 depthReadOnly: false,
                 stencilClearValue: this.clearState.stencil,
-                stencilLoadOp: (this.stencilState.enabled ? ((this.clearState.target & WebGL2RenderingContext.STENCIL_BUFFER_BIT) ? 'clear' : 'load') : undefined),
-                stencilStoreOp: (this.stencilState.enabled ? 'store' : undefined),
+                stencilLoadOp: (useStencil ? (clearStencil ? 'clear' : 'load') : undefined),
+                stencilStoreOp: (useStencil ? 'store' : undefined),
                 stencilReadOnly: false,
             }
         }
@@ -644,17 +664,19 @@ export class HydGlobalState {
     }
 
     private getDepthStencilAttachment(): { view: GPUTextureView, format: GPUTextureFormat } | null {
-        if (this.depthState.enabled && this.stencilState.enabled) {
+        const needsDepth = this.depthState.enabled || Boolean(this.clearState.target & WebGL2RenderingContext.DEPTH_BUFFER_BIT);
+        const needsStencil = this.stencilState.enabled || Boolean(this.clearState.target & WebGL2RenderingContext.STENCIL_BUFFER_BIT);
+        if (needsDepth && needsStencil) {
             const attachment = this.commonState.drawFramebufferBinding.attachments.get(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT);
             if (!attachment) return null;
             return { view: attachment.view, format: attachment.format };
         }
-        if (this.depthState.enabled) {
+        if (needsDepth) {
             const attachment = this.commonState.drawFramebufferBinding.attachments.get(WebGL2RenderingContext.DEPTH_ATTACHMENT);
             if (!attachment) return null;
             return { view: attachment.view, format: attachment.format };
         }
-        if (this.stencilState.enabled) {
+        if (needsStencil) {
             const attachment = this.commonState.drawFramebufferBinding.attachments.get(WebGL2RenderingContext.STENCIL_ATTACHMENT);
             if (!attachment) return null;
             return { view: attachment.view, format: attachment.format };
@@ -752,7 +774,7 @@ export class HydGlobalState {
             if (attribute.enabled) {
                 if (!attribute.buffer) {
                     // throw new Error('[HYD] VertexArray attribute buffer is null.');
-                    this.glError = WebGL2RenderingContext.INVALID_OPERATION;
+                    this.setError(WebGL2RenderingContext.INVALID_OPERATION);
                     return;
                 }
                 // TODO: if offset > stride, then we need to set the offset of this vertexBuffer when calling renderPass.setVertexBuffer
