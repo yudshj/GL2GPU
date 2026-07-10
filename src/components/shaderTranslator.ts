@@ -97,7 +97,7 @@ interface ResourcePruneStats {
     removedSamplers: string[];
 }
 
-const GLOBAL_DECLARATION_REGEX = /(^|[;\n])(\s*(?:layout\s*\([^)]*\)\s*)?(?:(?:lowp|mediump|highp)\s+)?((?:(?:flat|smooth|noperspective|centroid|sample)\s+)*)(attribute|uniform|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([^;]+)\s*;)/g;
+const GLOBAL_DECLARATION_REGEX = /\b(?:layout\s*\([^)]*\)\s*)?(?:(?:lowp|mediump|highp)\s+)?((?:(?:flat|smooth|noperspective|centroid|sample)\s+)*)(attribute|uniform|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([^;]+)\s*;/g;
 const SPV_OP_NAME = 5;
 const SPV_OP_TYPE_SAMPLED_IMAGE = 27;
 const SPV_OP_TYPE_POINTER = 32;
@@ -255,7 +255,7 @@ function prepareSourceAndDeclarations(source: string): PreparedGlslSource {
     }
 
     const declarations: ParsedGlslDeclaration[] = [];
-    body = body.replace(GLOBAL_DECLARATION_REGEX, (full, prefix, _declaration, interpolation, qualifier, glslType, rawNames, offset) => {
+    body = body.replace(GLOBAL_DECLARATION_REGEX, (full, interpolation, qualifier, glslType, rawNames, offset) => {
         if (!isTopLevelAt(body, offset)) {
             return full;
         }
@@ -268,7 +268,7 @@ function prepareSourceAndDeclarations(source: string): PreparedGlslSource {
                 arraySuffix: parsed.arraySuffix,
             });
         }
-        return prefix;
+        return "";
     });
 
     return {
@@ -800,8 +800,8 @@ export function buildGlslangSource(
         .replace(/^\s*(#extension[^\n]*|#define[^\n]*|precision\s+(?:lowp|mediump|highp)\s+\w+\s*;)\s*$/gm, "");
     const bodyStart = sourceWithoutPreamble.replace(
         GLOBAL_DECLARATION_REGEX,
-        (full, prefix, _declaration, _interpolation, _qualifier, _glslType, _rawNames, offset) => {
-            return isTopLevelAt(sourceWithoutPreamble, offset) ? prefix : full;
+        (full, _interpolation, _qualifier, _glslType, _rawNames, offset) => {
+            return isTopLevelAt(sourceWithoutPreamble, offset) ? "" : full;
         },
     );
     let body = bodyStart;

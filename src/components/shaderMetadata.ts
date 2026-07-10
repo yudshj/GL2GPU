@@ -176,7 +176,7 @@ export function scanGlslDeclarations(source: string, stage: ShaderStage): GlslDe
     const structs = parseStructDefinitions(cleaned);
 
     const seen = new Set<string>();
-    const declarationPattern = /(?:^|[;\n])\s*(?:(?:layout\s*\([^)]*\)\s*)?)(?:(?:lowp|mediump|highp)\s+)?((?:(?:flat|smooth|noperspective|centroid|sample)\s+)*)(attribute|uniform|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([^;]+)\s*;/g;
+    const declarationPattern = /\b(?:(?:layout\s*\([^)]*\)\s*)?)(?:(?:lowp|mediump|highp)\s+)?((?:(?:flat|smooth|noperspective|centroid|sample)\s+)*)(attribute|uniform|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([^;]+)\s*;/g;
     const bodyWithoutGlobalDeclarations = cleaned.replace(declarationPattern, (full, ...args) => {
         const offset = args[args.length - 2] as number;
         return isTopLevelAt(cleaned, offset) ? "\n" : full;

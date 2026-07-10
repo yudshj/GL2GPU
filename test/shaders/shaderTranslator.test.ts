@@ -38,6 +38,13 @@ if (vertexDecls.uniforms.some((item) => item.name === "uTint")) {
 }
 deepEqual(vertexDecls.varyings.map((item) => item.name), ["vUv"]);
 
+const sameLineDeclarations = scanGlslDeclarations(
+    "attribute vec4 aVertex; attribute vec4 aColor; varying vec4 vColor; void main() { vColor = aColor; gl_Position = aVertex; }",
+    "vertex",
+);
+deepEqual(sameLineDeclarations.attributes.map((item) => item.name), ["aVertex", "aColor"]);
+deepEqual(sameLineDeclarations.varyings.map((item) => item.name), ["vColor"]);
+
 const fragmentDecls = scanGlslDeclarations(fragment, "fragment");
 deepEqual(fragmentDecls.uniforms.map((item) => item.name), ["exposure"]);
 deepEqual(fragmentDecls.samplers.map((item) => [item.name, item.wgsl_texture_type]), [
@@ -353,6 +360,26 @@ if (singleFieldFragmentOutputOptimized.stats.collapsedOutputStructs !== 1) {
     throw new Error(`expected one collapsed output struct, got ${singleFieldFragmentOutputOptimized.stats.collapsedOutputStructs}`);
 }
 
+const multiReturnSingleFieldOutputWgsl = `
+struct main_out {
+  @location(0)
+  value : f32,
+}
+
+@fragment
+fn main(@location(0) condition : f32) -> main_out {
+  if (condition > 0.0f) {
+    return main_out(1.0f);
+  }
+  return main_out(2.0f);
+}
+`;
+const multiReturnSingleFieldOutputOptimized = optimizeTintWgsl(multiReturnSingleFieldOutputWgsl);
+if (!multiReturnSingleFieldOutputOptimized.wgsl.includes("-> main_out") ||
+    multiReturnSingleFieldOutputOptimized.stats.collapsedOutputStructs !== 0) {
+    throw new Error("expected a single-field output with multiple returns to stay uncollapsed");
+}
+
 const multiWriteOutputPrivateWgsl = `
 var<private> a_pos : vec4f;
 var<private> gl_Position : vec4f;
@@ -419,6 +446,39 @@ if (!unsafeOptimized.wgsl.includes("var<private> v_color")) {
 }
 if (!unsafeOptimized.stats.skippedPasses.some((reason) => reason.includes("private-io-escapes-wrapper"))) {
     throw new Error("expected escaped private var skip reason");
+}
+
+const sharedEntryHelperWgsl = `
+var<private> input_value : f32;
+var<private> output_value : f32;
+
+fn main_1() {
+  output_value = input_value;
+}
+
+fn other() {
+  main_1();
+}
+
+struct main_out {
+  @location(0)
+  output_value_1 : f32,
+}
+
+@fragment
+fn main(@location(0) input_value_param : f32) -> main_out {
+  input_value = input_value_param;
+  main_1();
+  return main_out(output_value);
+}
+`;
+const sharedEntryHelperOptimized = optimizeTintWgsl(sharedEntryHelperWgsl);
+if (!sharedEntryHelperOptimized.wgsl.includes("fn main_1()") ||
+    !sharedEntryHelperOptimized.wgsl.includes("fn other()")) {
+    throw new Error("expected an entry helper with another callsite to stay intact");
+}
+if (!sharedEntryHelperOptimized.stats.skippedPasses.some((reason) => reason.includes("helper-has-other-callsites"))) {
+    throw new Error("expected shared entry helper skip reason");
 }
 
 const pointerParamWgsl = `
@@ -498,6 +558,106 @@ if (!lazyPowSelectOptimized.wgsl.includes("select(texCoord.y, 1.0f - texCoord.y,
 }
 if (lazyPowSelectOptimized.stats.branchifiedSelects !== 1) {
     throw new Error(`expected one lazy pow select branchification, got ${lazyPowSelectOptimized.stats.branchifiedSelects}`);
+}
+
+const mutableScalarAliasWgsl = `
+@fragment
+fn main() -> @location(0) f32 {
+  var value : f32 = 1.0f;
+  let x_90 : f32 = value;
+  value = 2.0f;
+  return x_90;
+}
+`;
+const mutableScalarAliasOptimized = optimizeTintWgsl(mutableScalarAliasWgsl);
+if (!mutableScalarAliasOptimized.wgsl.includes("let x_90 : f32 = value;") ||
+    !mutableScalarAliasOptimized.wgsl.includes("return x_90;")) {
+    throw new Error("expected alias of a subsequently written scalar to be preserved");
+}
+
+const mutableFieldAliasWgsl = `
+struct Payload {
+  value : f32,
+}
+
+@fragment
+fn main() -> @location(0) f32 {
+  var payload : Payload;
+  payload.value = 1.0f;
+  let x_91 : f32 = payload.value;
+  payload.value = 2.0f;
+  return x_91;
+}
+`;
+const mutableFieldAliasOptimized = optimizeTintWgsl(mutableFieldAliasWgsl);
+if (!mutableFieldAliasOptimized.wgsl.includes("let x_91 : f32 = payload.value;") ||
+    !mutableFieldAliasOptimized.wgsl.includes("return x_91;")) {
+    throw new Error("expected alias of a subsequently written struct field to be preserved");
+}
+
+const escapedAliasSourceWgsl = `
+fn mutate(value : ptr<function, f32>) {
+  *(value) = 2.0f;
+}
+
+@fragment
+fn main() -> @location(0) f32 {
+  var value : f32 = 1.0f;
+  let x_92 : f32 = value;
+  mutate(&(value));
+  return x_92;
+}
+`;
+const escapedAliasSourceOptimized = optimizeTintWgsl(escapedAliasSourceWgsl);
+if (!escapedAliasSourceOptimized.wgsl.includes("let x_92 : f32 = value;") ||
+    !escapedAliasSourceOptimized.wgsl.includes("return x_92;")) {
+    throw new Error("expected alias of an address-taken value to be preserved");
+}
+
+const repeatedAliasWgsl = `
+@fragment
+fn main(@location(0) value : f32) -> @location(0) f32 {
+  let x_93 : f32 = value;
+  return x_93 + x_93;
+}
+`;
+const repeatedAliasOptimized = optimizeTintWgsl(repeatedAliasWgsl);
+if (repeatedAliasOptimized.wgsl.includes("let x_93 : f32 = value;") ||
+    !repeatedAliasOptimized.wgsl.includes("return value + value;")) {
+    throw new Error("expected a repeated alias of an immutable parameter to fold safely");
+}
+
+const conditionalAssignmentWgsl = `
+@fragment
+fn main(@location(0) condition : f32) -> @location(0) f32 {
+  var value : f32;
+  if (condition > 0.0f) {
+    value = 1.0f;
+  }
+  return value;
+}
+`;
+const conditionalAssignmentOptimized = optimizeTintWgsl(conditionalAssignmentWgsl);
+if (!conditionalAssignmentOptimized.wgsl.includes("var value : f32;") ||
+    conditionalAssignmentOptimized.wgsl.includes("let value : f32 = 1.0f;")) {
+    throw new Error("expected a conditionally assigned var to stay in its dominating scope");
+}
+
+const loopAssignmentWgsl = `
+@fragment
+fn main() -> @location(0) f32 {
+  var value : f32;
+  loop {
+    value = 1.0f;
+    break;
+  }
+  return value;
+}
+`;
+const loopAssignmentOptimized = optimizeTintWgsl(loopAssignmentWgsl);
+if (!loopAssignmentOptimized.wgsl.includes("var value : f32;") ||
+    loopAssignmentOptimized.wgsl.includes("let value : f32 = 1.0f;")) {
+    throw new Error("expected a loop-assigned var to stay in its dominating scope");
 }
 
 const shapeStats = computeShaderShapeStats(`

@@ -394,6 +394,9 @@ function lowerEntryWrapper(source: string): EntryLowering {
         { start: entry.start, end: entry.end, replacement: "" },
         ...privateDeclarations.map((declaration) => ({ start: declaration.start, end: declaration.end, replacement: "" })),
     ]);
+    if (countIdentifier(outsideHelperAndEntry, helper.name) > 0) {
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "helper-has-other-callsites" };
+    }
     for (const name of mappedPrivateNames) {
         if (countIdentifier(outsideHelperAndEntry, name) > 0) {
             return { wgsl: source, loweredPrivateVars: 0, skipped: "private-io-escapes-wrapper" };
@@ -650,8 +653,36 @@ function foldSimpleIfElseSelect(source: string): { wgsl: string, folded: number 
     return { wgsl: out, folded };
 }
 
-function removeSingleUseLets(source: string): { wgsl: string, removed: number } {
-    let out = source;
+function simpleAliasRoot(expression: string): string | undefined {
+    return /^([A-Za-z_]\w*)(?:\.[A-Za-z_]\w*)?$/.exec(expression)?.[1];
+}
+
+function aliasSourceMayChange(
+    sourceBeforeUse: string,
+    sourceBetweenDeclarationAndUse: string,
+    root: string,
+    privateNames: Set<string>,
+): boolean {
+    if (privateNames.has(root)) {
+        return true;
+    }
+
+    const escapedRoot = escapeRegExp(root);
+    if (new RegExp(`&\\s*\\(?\\s*${escapedRoot}\\b`).test(sourceBeforeUse)) {
+        return true;
+    }
+
+    const accessPath = `\\b${escapedRoot}\\b(?:\\s*\\.\\s*[A-Za-z_]\\w*|\\s*\\[[^\\]]+\\])*`;
+    const assignment = new RegExp(`${accessPath}\\s*(?:=(?!=)|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|<<=|>>=|\\+\\+|--)`);
+    return assignment.test(sourceBetweenDeclarationAndUse);
+}
+
+function removeSingleUseLetsInBody(
+    body: string,
+    privateNames: Set<string>,
+    immutableNames: Set<string>,
+): { body: string, removed: number } {
+    let out = body;
     let removed = 0;
     let changed = true;
     while (changed) {
@@ -663,24 +694,56 @@ function removeSingleUseLets(source: string): { wgsl: string, removed: number } 
             const expression = match[3].trim();
             const after = out.slice(match.index + full.length);
             const useCount = countIdentifier(after, name);
-            const isSimpleAlias = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?$/.test(expression);
-            if (useCount === 0 || (!isSimpleAlias && useCount !== 1)) {
+            const root = simpleAliasRoot(expression);
+            const immutableSource = root !== undefined && immutableNames.has(root);
+            if (useCount === 0 || (!immutableSource && useCount !== 1)) {
                 continue;
             }
-            if (!isSimpleAlias) {
-                const firstUse = after.search(new RegExp(`\\b${escapeRegExp(name)}\\b`));
-                if (firstUse < 0) {
-                    continue;
-                }
-                const betweenDeclarationAndUse = after.slice(0, firstUse);
-                if (betweenDeclarationAndUse.trim().length > 0) {
-                    continue;
-                }
+
+            const firstUse = after.search(new RegExp(`\\b${escapeRegExp(name)}\\b`));
+            if (firstUse < 0) {
+                continue;
             }
+            const betweenDeclarationAndUse = after.slice(0, firstUse);
+            if (root) {
+                const sourceBeforeUse = out.slice(0, match.index + full.length + firstUse);
+                if (!immutableSource && aliasSourceMayChange(sourceBeforeUse, betweenDeclarationAndUse, root, privateNames)) {
+                    continue;
+                }
+            } else if (betweenDeclarationAndUse.trim().length > 0) {
+                continue;
+            }
+
             out = out.slice(0, match.index) + out.slice(match.index + full.length);
-            const replacement = isSimpleAlias ? expression : `(${expression})`;
+            const replacement = root ? expression : `(${expression})`;
             out = out.slice(0, match.index) + wordBoundaryReplace(out.slice(match.index), name, replacement);
             removed++;
+            changed = true;
+            break;
+        }
+    }
+    return { body: out, removed };
+}
+
+function removeSingleUseLets(source: string): { wgsl: string, removed: number } {
+    let out = source;
+    let removed = 0;
+    let changed = true;
+    while (changed) {
+        changed = false;
+        const privateNames = new Set(parsePrivateDeclarations(out).map((declaration) => declaration.name));
+        for (const fn of parseFunctions(out)) {
+            const immutableNames = parseParamNames(fn.params);
+            const letRegex = /\blet\s+([A-Za-z_]\w*)\b/g;
+            for (let declaration = letRegex.exec(fn.body); declaration !== null; declaration = letRegex.exec(fn.body)) {
+                immutableNames.add(declaration[1]);
+            }
+            const result = removeSingleUseLetsInBody(fn.body, privateNames, immutableNames);
+            if (result.removed === 0) {
+                continue;
+            }
+            out = out.slice(0, fn.bodyOpen + 1) + result.body + out.slice(fn.bodyClose);
+            removed += result.removed;
             changed = true;
             break;
         }
@@ -1137,6 +1200,9 @@ function collapseSingleFieldOutputStructsOnce(source: string): { wgsl: string, c
         if (!field.attributes) {
             continue;
         }
+        if ((fn.body.match(/\breturn\b/g) || []).length !== 1) {
+            continue;
+        }
 
         const returnRegex = new RegExp(`return\\s+${escapeRegExp(structName)}\\s*\\(`, "g");
         let returnMatch: RegExpExecArray | null = null;
@@ -1398,6 +1464,18 @@ function shouldElideRangeClamps(): boolean {
     return typeof globalThis !== "undefined" && (globalThis as any).__HYD_ASSUME_LIFE_RANGE_CLAMP_REDUNDANT === true;
 }
 
+function braceDepthAt(source: string, index: number): number {
+    let depth = 0;
+    for (let i = 0; i < index; i++) {
+        if (source[i] === "{") {
+            depth++;
+        } else if (source[i] === "}") {
+            depth = Math.max(0, depth - 1);
+        }
+    }
+    return depth;
+}
+
 function promoteSingleAssignmentVarsInBody(body: string): { body: string, promoted: number } {
     let out = body;
     let promoted = 0;
@@ -1424,6 +1502,9 @@ function promoteSingleAssignmentVarsInBody(body: string): { body: string, promot
                 continue;
             }
             if (assignment.index < declaration.index) {
+                continue;
+            }
+            if (braceDepthAt(out, declaration.index) !== braceDepthAt(out, assignment.index)) {
                 continue;
             }
             const between = out.slice(declaration.index + fullDeclaration.length, assignment.index);
