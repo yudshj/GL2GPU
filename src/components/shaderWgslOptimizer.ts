@@ -11,6 +11,7 @@ export interface WgslOptimizerStats {
     collapsedOutputStructs: number;
     removedTemporaries: number;
     foldedConstructors: number;
+    splitDeepExpressions: number;
     skippedPasses: string[];
 }
 
@@ -167,6 +168,83 @@ function splitTopLevelParameters(source: string): string[] {
     return params.map((param) => param.trim()).filter((param) => param.length > 0);
 }
 
+function stripWholeExpressionParentheses(source: string): string {
+    let out = source.trim();
+    while (out.startsWith("(") && findMatching(out, 0, "(", ")") === out.length - 1) {
+        out = out.slice(1, -1).trim();
+    }
+    return out;
+}
+
+function rightmostTopLevelPlus(source: string): number {
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    for (let index = source.length - 1; index >= 0; index--) {
+        const ch = source[index];
+        if (ch === ")") parenDepth++;
+        else if (ch === "(") parenDepth--;
+        else if (ch === "]") bracketDepth++;
+        else if (ch === "[") bracketDepth--;
+        else if (ch === "+" && parenDepth === 0 && bracketDepth === 0) {
+            let previous = index - 1;
+            let next = index + 1;
+            while (previous >= 0 && /\s/.test(source[previous])) previous--;
+            while (next < source.length && /\s/.test(source[next])) next++;
+            if (previous >= 0 && next < source.length && !/[+\-*/%(<>=!,&|^]/.test(source[previous])) {
+                return index;
+            }
+        }
+    }
+    return -1;
+}
+
+function leftAssociativeAddTerms(source: string): string[] {
+    const rightTerms: string[] = [];
+    let left = stripWholeExpressionParentheses(source);
+    while (true) {
+        const plus = rightmostTopLevelPlus(left);
+        if (plus < 0) break;
+        rightTerms.push(left.slice(plus + 1).trim());
+        left = stripWholeExpressionParentheses(left.slice(0, plus));
+    }
+    return [left, ...rightTerms.reverse()];
+}
+
+export function splitDeepAssociativeExpressions(source: string): { wgsl: string, split: number } {
+    const lines = source.split("\n");
+    let split = 0;
+    let temporary = 0;
+    const out: string[] = [];
+    const assignment = /^(\s*)((?:(?:let|var)\s+[A-Za-z_]\w*(?:\s*:\s*[^=;]+)?|[A-Za-z_]\w*)\s*=\s*)(.+);\s*$/;
+    for (const line of lines) {
+        const match = assignment.exec(line);
+        if (!match) {
+            out.push(line);
+            continue;
+        }
+        const terms = leftAssociativeAddTerms(match[3]);
+        if (terms.length <= 48) {
+            out.push(line);
+            continue;
+        }
+        let expression = terms[0];
+        let chunkTerms = 0;
+        for (let index = 1; index < terms.length; index++) {
+            expression = `(${expression} + ${terms[index]})`;
+            chunkTerms++;
+            if (chunkTerms === 24 && index < terms.length - 1) {
+                const name = `_hyd_add_chain_${temporary++}`;
+                out.push(`${match[1]}let ${name} = ${expression};`);
+                expression = name;
+                chunkTerms = 0;
+                split++;
+            }
+        }
+        out.push(`${match[1]}${match[2]}${expression};`);
+    }
+    return { wgsl: out.join("\n"), split };
+}
+
 function parseFunctions(source: string): ParsedFunction[] {
     const functions: ParsedFunction[] = [];
     const regex = /((?:@[A-Za-z_]\w*(?:\([^)]*\))?\s*)*)fn\s+([A-Za-z_]\w*)\s*\(/g;
@@ -314,6 +392,23 @@ function applyIdentifierMap(source: string, replacements: Map<string, string>): 
     return out;
 }
 
+function applyExpressionMap(source: string, replacements: Map<string, string>): string {
+    let out = source;
+    const expressions = Array.from(replacements.keys()).sort((a, b) => b.length - a.length);
+    for (const expression of expressions) {
+        out = out.replace(
+            new RegExp(`\\b${escapeRegExp(expression)}(?=$|[^A-Za-z0-9_])`, "g"),
+            replacements.get(expression),
+        );
+    }
+    return out;
+}
+
+function exactAssignmentCount(source: string, expression: string): number {
+    const regex = new RegExp(`(?:^|[;\\n]\\s*)${escapeRegExp(expression)}\\s*(?:[+\\-*/%&|^]?=)`, "g");
+    return source.match(regex)?.length ?? 0;
+}
+
 function lowerEntryWrapper(source: string): EntryLowering {
     const functions = parseFunctions(source);
     const entries = functions.filter((fn) => /@(vertex|fragment)\b/.test(fn.attributes));
@@ -367,14 +462,32 @@ function lowerEntryWrapper(source: string): EntryLowering {
     }
 
     const outputMap = new Map<string, string>();
+    const outputExpressionMap = new Map<string, string>();
+    const outputPrivateNames = new Set<string>();
     for (let i = 0; i < returnArgs.length; i++) {
         const arg = returnArgs[i].trim();
         if (/^[A-Za-z_]\w*$/.test(arg) && privateNames.has(arg)) {
+            if (outputMap.has(arg)) {
+                return { wgsl: source, loweredPrivateVars: 0, skipped: "duplicate-output-expression" };
+            }
             outputMap.set(arg, `_hyd_output.${outputStruct.fields[i]}`);
+            outputPrivateNames.add(arg);
+            continue;
         }
+        const indexed = /^([A-Za-z_]\w*)\s*\[\s*([^\]]+)\s*\]$/.exec(arg);
+        if (indexed && privateNames.has(indexed[1])) {
+            const expression = `${indexed[1]}[${indexed[2].trim()}]`;
+            if (outputExpressionMap.has(expression)) {
+                return { wgsl: source, loweredPrivateVars: 0, skipped: "duplicate-output-expression" };
+            }
+            outputExpressionMap.set(expression, `_hyd_output.${outputStruct.fields[i]}`);
+            outputPrivateNames.add(indexed[1]);
+            continue;
+        }
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "unsupported-output-expression" };
     }
 
-    const mappedPrivateNames = new Set([...inputMap.keys(), ...outputMap.keys()]);
+    const mappedPrivateNames = new Set([...inputMap.keys(), ...outputPrivateNames]);
     if (mappedPrivateNames.size === 0) {
         return { wgsl: source, loweredPrivateVars: 0, skipped: "no-mapped-private-io" };
     }
@@ -413,11 +526,22 @@ function lowerEntryWrapper(source: string): EntryLowering {
             return { wgsl: source, loweredPrivateVars: 0, skipped: "output-private-never-written" };
         }
     }
+    for (const expression of outputExpressionMap.keys()) {
+        if (exactAssignmentCount(helper.body, expression) < 1) {
+            return { wgsl: source, loweredPrivateVars: 0, skipped: "output-private-never-written" };
+        }
+    }
 
     const replacements = new Map<string, string>([...inputMap, ...outputMap]);
-    let loweredBody = applyIdentifierMap(helper.body, replacements)
+    let loweredBody = applyExpressionMap(helper.body, outputExpressionMap);
+    loweredBody = applyIdentifierMap(loweredBody, replacements)
         .replace(/^\s*return\s*;\s*$/gm, "")
         .trim();
+    for (const name of mappedPrivateNames) {
+        if (countIdentifier(loweredBody, name) > 0) {
+            return { wgsl: source, loweredPrivateVars: 0, skipped: "private-io-has-unmapped-uses" };
+        }
+    }
     loweredBody = loweredBody.split("\n").map((line) => `  ${line}`).join("\n");
 
     const newEntry = `${entry.attributes}fn ${entry.name}(${entry.params})${entry.returnType} {\n  var _hyd_output: ${outputStructName};\n${loweredBody}\n  return _hyd_output;\n}`;
@@ -598,6 +722,10 @@ function collectVectorDimensions(source: string): Map<string, number> {
     const typePattern = "vec\\s*([234])\\s*(?:f|<\\s*f32\\s*>)";
     const declarationRegex = new RegExp(`\\b(?:var(?:<[^>]+>)?|let)\\s+([A-Za-z_]\\w*)\\s*:\\s*${typePattern}`, "g");
     for (let match = declarationRegex.exec(source); match !== null; match = declarationRegex.exec(source)) {
+        dimensions.set(match[1], Number(match[2]));
+    }
+    const inferredConstructorRegex = /\b(?:var|let)\s+([A-Za-z_]\w*)\s*=\s*vec([234])f\s*\(/g;
+    for (let match = inferredConstructorRegex.exec(source); match !== null; match = inferredConstructorRegex.exec(source)) {
         dimensions.set(match[1], Number(match[2]));
     }
     const paramRegex = new RegExp(`\\b([A-Za-z_]\\w*)\\s*:\\s*${typePattern}`, "g");
@@ -1626,10 +1754,13 @@ export function optimizeTintWgsl(wgsl: string): WgslOptimizerResult {
         collapsedOutputStructs: 0,
         removedTemporaries: 0,
         foldedConstructors: 0,
+        splitDeepExpressions: 0,
         skippedPasses: [],
     };
 
-    const lowered = lowerEntryWrapper(wgsl);
+    const initialDepth = splitDeepAssociativeExpressions(wgsl);
+    stats.splitDeepExpressions += initialDepth.split;
+    const lowered = lowerEntryWrapper(initialDepth.wgsl);
     let out = lowered.wgsl;
     stats.loweredPrivateVars = lowered.loweredPrivateVars;
     if (lowered.skipped && !["no-entry-wrapper", "no-private-io"].includes(lowered.skipped)) {
@@ -1654,6 +1785,10 @@ export function optimizeTintWgsl(wgsl: string): WgslOptimizerResult {
     stats.collapsedOutputStructs = peepholes.collapsedOutputStructs;
     stats.removedTemporaries = peepholes.removedTemporaries;
     stats.foldedConstructors = peepholes.foldedConstructors;
+
+    const finalDepth = splitDeepAssociativeExpressions(out);
+    out = finalDepth.wgsl;
+    stats.splitDeepExpressions += finalDepth.split;
 
     return {
         wgsl: out.trim() + "\n",

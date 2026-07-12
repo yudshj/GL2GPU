@@ -1,6 +1,5 @@
-import {HydBuffer} from "./components/hydBuffer";
-import { HydShader } from "./components/hydShader";
-import { HydHashable } from "./components/base/hydHashable";
+import type {HydBuffer} from "./components/hydBuffer";
+import type { HydHashable } from "./components/base/hydHashable";
 // import { HydGlobalStateHashed as gs0 } from "./components/hydGlobalState";
 // import { HydGlobalState as gs1 } from "./components/hydGlobalState";
 // import { HydGlobalState as gs2 } from "./components/hydGlobalStateNoC";
@@ -177,6 +176,39 @@ export interface HydActiveUniformInfo {
 
 const nativeFunctionHasInstance = Function.prototype[Symbol.hasInstance];
 
+export const HYD_WEBGL_OBJECT_BRAND = Symbol.for("gl2gpu.webglObjectBrand");
+
+export type HydWebGlObjectBrand =
+    "active-info" | "buffer" | "framebuffer" | "program" | "renderbuffer" |
+    "shader" | "shader-precision-format" | "texture" | "uniform-location" | "vertex-array";
+
+const WEBGL_OBJECT_TAGS: Record<HydWebGlObjectBrand, string> = {
+    "active-info": "WebGLActiveInfo",
+    buffer: "WebGLBuffer",
+    framebuffer: "WebGLFramebuffer",
+    program: "WebGLProgram",
+    renderbuffer: "WebGLRenderbuffer",
+    shader: "WebGLShader",
+    "shader-precision-format": "WebGLShaderPrecisionFormat",
+    texture: "WebGLTexture",
+    "uniform-location": "WebGLUniformLocation",
+    "vertex-array": "WebGLVertexArrayObject",
+};
+
+export function brandHydWebGlObject<T extends object>(instance: T, brand: HydWebGlObjectBrand): T {
+    Object.defineProperty(instance, HYD_WEBGL_OBJECT_BRAND, {
+        configurable: false,
+        enumerable: false,
+        value: brand,
+    });
+    Object.defineProperty(instance, Symbol.toStringTag, {
+        configurable: true,
+        enumerable: false,
+        value: WEBGL_OBJECT_TAGS[brand],
+    });
+    return instance;
+}
+
 function installHydHasInstance(constructor: any, predicate: (instance: any) => boolean) {
     try {
         Object.defineProperty(constructor, Symbol.hasInstance, {
@@ -189,7 +221,23 @@ function installHydHasInstance(constructor: any, predicate: (instance: any) => b
     }
 }
 
-installHydHasInstance(WebGLShader, (instance) => instance instanceof HydShader);
+function installHydObjectHasInstance(constructorName: string, brand: HydWebGlObjectBrand) {
+    const constructor = (globalThis as any)[constructorName];
+    if (constructor) {
+        installHydHasInstance(constructor, (instance) => instance?.[HYD_WEBGL_OBJECT_BRAND] === brand);
+    }
+}
+
+installHydObjectHasInstance("WebGLActiveInfo", "active-info");
+installHydObjectHasInstance("WebGLBuffer", "buffer");
+installHydObjectHasInstance("WebGLFramebuffer", "framebuffer");
+installHydObjectHasInstance("WebGLProgram", "program");
+installHydObjectHasInstance("WebGLRenderbuffer", "renderbuffer");
+installHydObjectHasInstance("WebGLShader", "shader");
+installHydObjectHasInstance("WebGLShaderPrecisionFormat", "shader-precision-format");
+installHydObjectHasInstance("WebGLTexture", "texture");
+installHydObjectHasInstance("WebGLUniformLocation", "uniform-location");
+installHydObjectHasInstance("WebGLVertexArrayObject", "vertex-array");
 installHydHasInstance(WebGLRenderingContext, (instance) =>
     instance?.hydContextType === "webgl" || instance?.hydContextType === "experimental-webgl");
 installHydHasInstance(WebGL2RenderingContext, (instance) => instance?.hydContextType === "webgl2");

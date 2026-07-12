@@ -48,6 +48,7 @@ export interface ShaderCaptureRecord {
     source: "runtime" | "cache" | "manual" | string;
     optimizer?: unknown;
     timingsMs?: Record<string, number>;
+    compatibilityFallbacks?: string[];
     glsl?: ShaderSourceCapture;
     normalizedGlsl?: ShaderSourceCapture;
     spirv?: {

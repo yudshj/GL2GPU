@@ -44,6 +44,7 @@ const char* HYD_SPV_TO_WGSL(const uint32_t* spirv, size_t word_count) {
     std::vector<uint32_t> input(spirv, spirv + word_count);
     tint::spirv::reader::Options reader_options;
     reader_options.allowed_features = tint::wgsl::AllowedFeatures::Everything();
+    reader_options.allow_non_uniform_derivatives = true;
 
     auto program = tint::spirv::reader::Read(input, reader_options);
     if (!program.IsValid()) {

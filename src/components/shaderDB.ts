@@ -12,6 +12,14 @@ export interface NameAndType {
     internal?: boolean;
     interpolation?: string;
     source_name?: string;
+    size?: number;
+    is_array?: boolean;
+    wgsl_declarations?: string[];
+}
+
+function attributeLocationSpan(glslType: string): number {
+    const matrix = /^mat([2-4])(?:x[2-4])?$/.exec(glslType);
+    return matrix ? Number(matrix[1]) : 1;
 }
 
 export interface TextureNameAndType {
@@ -20,6 +28,10 @@ export interface TextureNameAndType {
     wgsl_texture_type: string;
     wgsl_sampler_type: string;
     source_name?: string;
+    size?: number;
+    is_array?: boolean;
+    array_name?: string;
+    array_index?: number;
 }
 
 export interface ShaderInfoType {
@@ -118,7 +130,9 @@ export function MergeShaderInfo(shaderInfo: Array<ShaderInfoType | InitShaderInf
     for (const info of shaderInfo) {
         for (const uniform of info.uniforms) {
             if (uniformMap.has(uniform.name)) {
-                if (uniformMap.get(uniform.name).glsl_type !== uniform.glsl_type) {
+                const existing = uniformMap.get(uniform.name);
+                if (existing.glsl_type !== uniform.glsl_type ||
+                    existing.size !== uniform.size || existing.is_array !== uniform.is_array) {
                     throw new Error(`uniform ${uniform.name} type conflict`);
                 }
             } else {
@@ -161,14 +175,23 @@ export function ShaderInfo2HydAus(shaderInfo: ShaderInfoType): { attributes: Arr
     return {
         attributes: shaderInfo.attributes.map((attr, idx) => {
             return {
-                name: attr.name,
+                name: attr.source_name || attr.name,
+                shaderName: attr.name,
                 location: idx,
+                locationSpan: attributeLocationSpan(attr.glsl_type),
                 type: Type2Constant.get(attr.glsl_type),
                 size: 1,
             };
         }),
         uniforms: shaderInfo.uniforms.map((uniform) => {
-            return new ProgramUniformBuffer(uniform.name, Type2Constant.get(uniform.glsl_type), 1, !!uniform.internal, uniform.source_name);
+            return new ProgramUniformBuffer(
+                uniform.name,
+                Type2Constant.get(uniform.glsl_type),
+                uniform.size || 1,
+                !!uniform.internal,
+                uniform.source_name,
+                !!uniform.is_array,
+            );
         }),
         samplers: shaderInfo.samplers.map((sampler) => {
             const webglType = Type2Constant.get(sampler.glsl_type);
@@ -183,6 +206,10 @@ export function ShaderInfo2HydAus(shaderInfo: ShaderInfoType): { attributes: Arr
                 sampleType,
                 samplerBindingType(sampleType),
                 sampler.source_name,
+                sampler.size || 1,
+                sampler.array_name,
+                sampler.array_index,
+                !!sampler.is_array,
             );
         }),
     };
@@ -192,6 +219,13 @@ export function ShaderInfo2String(shaderInfo: ShaderInfoType): string {
     let res = "";
     let offset = 0;
     if (shaderInfo.uniforms.length > 0) {
+        const declarations = new Set<string>();
+        for (const uniform of shaderInfo.uniforms) {
+            for (const declaration of uniform.wgsl_declarations || []) declarations.add(declaration);
+        }
+        if (declarations.size > 0) {
+            res += `${Array.from(declarations).join("\n\n")}\n\n`;
+        }
         res += "struct HydUniformObject {\n";
         for (const uniform of shaderInfo.uniforms) {
             res += `  ${uniform.name}: ${uniform.wgsl_type},\n`;

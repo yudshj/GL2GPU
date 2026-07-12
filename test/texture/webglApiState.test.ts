@@ -16,6 +16,14 @@ import { equal, notEqual } from "node:assert/strict";
     INVALID_ENUM: 0x0500,
     INVALID_VALUE: 0x0501,
     INVALID_OPERATION: 0x0502,
+    ZERO: 0,
+    ONE: 1,
+    LESS: 0x0201,
+    ALWAYS: 0x0207,
+    KEEP: 0x1E00,
+    FUNC_ADD: 0x8006,
+    CCW: 0x0901,
+    DONT_CARE: 0x1100,
     COLOR_BUFFER_BIT: 0x4000,
     DEPTH_BUFFER_BIT: 0x0100,
     STENCIL_BUFFER_BIT: 0x0400,
@@ -58,8 +66,23 @@ const texture = new HydTexture({} as GPUDevice);
 const before = texture.hash;
 texture.texParameteri(WebGL2RenderingContext.TEXTURE_MIN_FILTER, WebGL2RenderingContext.LINEAR);
 notEqual(texture.hash, before);
+equal(texture.sourceOrigin, "uninitialized");
+equal(texture.markFramebufferRenderTarget(), true);
+equal(texture.sourceOrigin, "render-target");
+equal(texture.markFramebufferRenderTarget(), false);
 
 const errorState = new HydGlobalStateHashed({} as WebGLContextAttributes, {} as GPUBuffer, {} as GPUDevice);
+equal(errorState.depthState.funcEnum, WebGL2RenderingContext.LESS);
+equal(errorState.polygonState.cullFaceModeEnum, WebGL2RenderingContext.BACK);
+equal(errorState.polygonState.frontFaceEnum, WebGL2RenderingContext.CCW);
+equal(errorState.blendState.srcRGBEnum, WebGL2RenderingContext.ONE);
+equal(errorState.blendState.dstRGBEnum, WebGL2RenderingContext.ZERO);
+equal(errorState.blendState.equationRGBEnum, WebGL2RenderingContext.FUNC_ADD);
+equal(errorState.stencilState.frontFuncEnum, WebGL2RenderingContext.ALWAYS);
+equal(errorState.stencilState.frontFailEnum, WebGL2RenderingContext.KEEP);
+equal(errorState.miscState.dither, true);
+equal(errorState.miscState.sampleCoverageValue, 1);
+equal(errorState.miscState.generateMipmapHint, WebGL2RenderingContext.DONT_CARE);
 errorState.setError(WebGL2RenderingContext.INVALID_ENUM);
 errorState.setError(WebGL2RenderingContext.INVALID_OPERATION);
 equal(errorState.consumeError(), WebGL2RenderingContext.INVALID_ENUM);

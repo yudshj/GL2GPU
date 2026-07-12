@@ -1,6 +1,6 @@
 import { HydHashable } from "./base/hydHashable";
 import { HydBuffer } from "./hydBuffer";
-import { HydFramebuffer } from "./hydFramebuffer";
+import { FramebufferAttributes, HydFramebuffer } from "./hydFramebuffer";
 import { HydProgram } from "./hydProgram";
 import { HydTexture } from "./hydTexture";
 import { HydVertexArray } from "./hydVertexArray";
@@ -106,6 +106,7 @@ export class CommonState implements HydHashable {
 export class DepthState implements HydHashable {
     enabled: boolean;
     func: GPUCompareFunction;
+    funcEnum: GLenum;
     range: [number, number];
     writeMask: boolean;
     // depthBuffer: HydTexture;
@@ -115,6 +116,7 @@ export class DepthState implements HydHashable {
     constructor() {
         this.enabled = false;
         this.func = 'less';
+        this.funcEnum = WebGL2RenderingContext.LESS;
         this.range = [0, 1];
         this.writeMask = true;
     }
@@ -123,7 +125,9 @@ export class DepthState implements HydHashable {
 export class PolygonState implements HydHashable {
     cullFace: boolean;
     cullFaceMode: GPUCullMode;
+    cullFaceModeEnum: GLenum;
     frontFace: GPUFrontFace;
+    frontFaceEnum: GLenum;
     polygonOffsetFill: boolean;
     polygonOffsetUnits: number;
     polygonOffsetFactor: number;
@@ -133,7 +137,9 @@ export class PolygonState implements HydHashable {
     constructor() {
         this.cullFace = false;
         this.cullFaceMode = 'back';
+        this.cullFaceModeEnum = WebGL2RenderingContext.BACK;
         this.frontFace = 'ccw';
+        this.frontFaceEnum = WebGL2RenderingContext.CCW;
         this.polygonOffsetFill = false;
         this.polygonOffsetUnits = 0;
         this.polygonOffsetFactor = 0;
@@ -160,23 +166,35 @@ export class BlendState implements HydHashable {
     enabled: boolean;
     color: [number, number, number, number];
     dstRGB: GPUBlendFactor;
+    dstRGBEnum: GLenum;
     srcRGB: GPUBlendFactor;
+    srcRGBEnum: GLenum;
     dstAlpha: GPUBlendFactor;
+    dstAlphaEnum: GLenum;
     srcAlpha: GPUBlendFactor;
+    srcAlphaEnum: GLenum;
     equationRGB: GPUBlendOperation;
+    equationRGBEnum: GLenum;
     equationAlpha: GPUBlendOperation;
+    equationAlphaEnum: GLenum;
     public get hash(): string {
         return this.enabled.toString() + this.color.toString() + this.dstRGB.toString() + this.srcRGB.toString() + this.dstAlpha.toString() + this.srcAlpha.toString() + this.equationRGB.toString() + this.equationAlpha.toString();
     }
     constructor() {
         this.enabled = false;
         this.dstRGB = 'zero';
+        this.dstRGBEnum = WebGL2RenderingContext.ZERO;
         this.dstAlpha = 'zero';
+        this.dstAlphaEnum = WebGL2RenderingContext.ZERO;
         this.srcRGB = 'one';
+        this.srcRGBEnum = WebGL2RenderingContext.ONE;
         this.srcAlpha = 'one';
+        this.srcAlphaEnum = WebGL2RenderingContext.ONE;
         this.color = [0.0, 0.0, 0.0, 0.0];
         this.equationRGB = 'add';
+        this.equationRGBEnum = WebGL2RenderingContext.FUNC_ADD;
         this.equationAlpha = 'add';
+        this.equationAlphaEnum = WebGL2RenderingContext.FUNC_ADD;
     }
 }
 
@@ -185,6 +203,7 @@ export interface HydPixelUnpackState {
     alignment: number;
     premultiplyAlpha: boolean;
     colorspaceConversion: GLenum;
+    unpackColorSpace: "srgb" | "display-p3";
 }
 
 export class MiscState implements HydHashable {
@@ -194,9 +213,16 @@ export class MiscState implements HydHashable {
     unpackFlipYWebGL: boolean;
     unpackPremultiplyAlphaWebGL: boolean;
     unpackColorSpaceConversionWebGL: GLenum;
+    unpackColorSpace: "srgb" | "display-p3";
     unpackAlignment: number;
     packAlignment: number;
     sampleAlphaToCoverage: boolean;
+    sampleCoverage: boolean;
+    sampleCoverageValue: number;
+    sampleCoverageInvert: boolean;
+    dither: boolean;
+    lineWidth: number;
+    generateMipmapHint: GLenum;
 
     public get unpackState(): HydPixelUnpackState {
         return {
@@ -204,11 +230,12 @@ export class MiscState implements HydHashable {
             alignment: this.unpackAlignment,
             premultiplyAlpha: this.unpackPremultiplyAlphaWebGL,
             colorspaceConversion: this.unpackColorSpaceConversionWebGL,
+            unpackColorSpace: this.unpackColorSpace,
         };
     }
 
     public get hash(): string {
-        return this.scissorTest.toString() + this.scissorBox.toString() + this.colorWriteMask.toString() + this.unpackFlipYWebGL.toString() + this.unpackPremultiplyAlphaWebGL.toString() + this.unpackColorSpaceConversionWebGL.toString() + this.unpackAlignment.toString() + this.packAlignment.toString() + this.sampleAlphaToCoverage.toString();
+        return this.scissorTest.toString() + this.scissorBox.toString() + this.colorWriteMask.toString() + this.unpackFlipYWebGL.toString() + this.unpackPremultiplyAlphaWebGL.toString() + this.unpackColorSpaceConversionWebGL.toString() + this.unpackColorSpace + this.unpackAlignment.toString() + this.packAlignment.toString() + this.sampleAlphaToCoverage.toString();
     }
     constructor() {
         this.scissorTest = false;
@@ -217,9 +244,16 @@ export class MiscState implements HydHashable {
         this.unpackFlipYWebGL = false;
         this.unpackPremultiplyAlphaWebGL = false;
         this.unpackColorSpaceConversionWebGL = WebGL2RenderingContext.BROWSER_DEFAULT_WEBGL;
+        this.unpackColorSpace = "srgb";
         this.unpackAlignment = 4;
         this.packAlignment = 4;
         this.sampleAlphaToCoverage = false;
+        this.sampleCoverage = false;
+        this.sampleCoverageValue = 1;
+        this.sampleCoverageInvert = false;
+        this.dither = true;
+        this.lineWidth = 1;
+        this.generateMipmapHint = WebGL2RenderingContext.DONT_CARE;
     }
 }
 
@@ -227,17 +261,25 @@ export class StencilState implements HydHashable {
     enabled: boolean;
 
     frontFunc: GPUCompareFunction;
+    frontFuncEnum: GLenum;
     frontFail: GPUStencilOperation;
+    frontFailEnum: GLenum;
     frontPassDepthFail: GPUStencilOperation;
+    frontPassDepthFailEnum: GLenum;
     frontPassDepthPass: GPUStencilOperation;
+    frontPassDepthPassEnum: GLenum;
     frontRef: GLuint;
     frontValueMask: GLuint;
     frontWriteMask: GLuint;
 
     backFunc: GPUCompareFunction;
+    backFuncEnum: GLenum;
     backFail: GPUStencilOperation;
+    backFailEnum: GLenum;
     backPassDepthFail: GPUStencilOperation;
+    backPassDepthFailEnum: GLenum;
     backPassDepthPass: GPUStencilOperation;
+    backPassDepthPassEnum: GLenum;
     backRef: GLuint;
     backValueMask: GLuint;
     backWriteMask: GLuint;
@@ -248,16 +290,24 @@ export class StencilState implements HydHashable {
     constructor() {
         this.enabled = false;
         this.frontFunc = 'always';
+        this.frontFuncEnum = WebGL2RenderingContext.ALWAYS;
         this.frontFail = 'keep';
+        this.frontFailEnum = WebGL2RenderingContext.KEEP;
         this.frontPassDepthFail = 'keep';
+        this.frontPassDepthFailEnum = WebGL2RenderingContext.KEEP;
         this.frontPassDepthPass = 'keep';
+        this.frontPassDepthPassEnum = WebGL2RenderingContext.KEEP;
         this.frontRef = 0;
         this.frontValueMask = 0xFFFFFFFF;
         this.frontWriteMask = 0xFFFFFFFF;
         this.backFunc = 'always';
+        this.backFuncEnum = WebGL2RenderingContext.ALWAYS;
         this.backFail = 'keep';
+        this.backFailEnum = WebGL2RenderingContext.KEEP;
         this.backPassDepthPass = 'keep';
+        this.backPassDepthPassEnum = WebGL2RenderingContext.KEEP;
         this.backPassDepthFail = 'keep';
+        this.backPassDepthFailEnum = WebGL2RenderingContext.KEEP;
         this.backRef = 0;
         this.backValueMask = 0xFFFFFFFF;
         this.backWriteMask = 0xFFFFFFFF;
@@ -276,24 +326,29 @@ export class HydGlobalState {
     public stencilState = new StencilState();
     public textureUnits: HydTextureUnitBindings[] = [];
     public topology: GPUPrimitiveTopology = null;
+    public stripIndexFormat: GPUIndexFormat | undefined;
+    public drawingBufferGeneration: number = 0;
     public readonly currentVertexAttribValues: Float32Array[] = Array.from({ length: 16 }, () => new Float32Array([0, 0, 0, 1]));
 
     public readonly defaultVertexArrayBinding: HydVertexArray = new HydVertexArray();
     public readonly defaultFramebuffer: HydFramebuffer;
+    public __canvasTexture: GPUTexture;
     public __canvasView: GPUTextureView;
     public device: GPUDevice;
     private __bindGroupCount: number = 0;
     private __pipelineCount: number = 0;
     private uniformBuffer: GPUBuffer;
     private readonly defaultSampleTextures: Map<string, HydTexture> = new Map();
+    private readonly webglVersion: 1 | 2;
 
-    constructor(attributes: WebGLContextAttributes, uniform: GPUBuffer, device: GPUDevice) {
+    constructor(attributes: WebGLContextAttributes, uniform: GPUBuffer, device: GPUDevice, webglVersion: 1 | 2 = 1) {
         this.contextAttributes = attributes;
         this.defaultFramebuffer = new HydFramebuffer();
         this.defaultFramebuffer.drawBuffers = [WebGL2RenderingContext.BACK];
         this.defaultFramebuffer.readBuffer = WebGL2RenderingContext.BACK;
         this.defaultFramebuffer.attachments = new Map();
         this.device = device;
+        this.webglVersion = webglVersion;
 
         this.commonState = new CommonState(
             0,
@@ -362,19 +417,22 @@ export class HydGlobalState {
 
     private getSamplerTexture(textureUnit: number, viewDimension: GPUTextureViewDimension, sampleType: GPUTextureSampleType): HydTexture {
         const texture = this.getTextureUnitBinding(textureUnit, viewDimension);
-        if (!texture) {
+        if (!texture || !texture.isSamplingComplete(viewDimension, this.webglVersion)) {
             return this.getDefaultSampleTexture(viewDimension, sampleType);
         }
         texture.ensureSampleable(viewDimension, sampleType);
         return texture;
     }
 
-    private getColorWriteMask(): GPUColorWriteFlags {
+    private getColorWriteMask(attachment?: FramebufferAttributes): GPUColorWriteFlags {
         const [r, g, b, a] = this.miscState.colorWriteMask;
+        const writesDefaultFramebuffer = this.commonState.drawFramebufferBinding === this.defaultFramebuffer;
+        const targetHasAlpha = !attachment || attachment.colorBits[3] > 0;
+        const writeAlpha = a && targetHasAlpha && !(writesDefaultFramebuffer && this.contextAttributes.alpha === false);
         return (r ? GPUColorWrite.RED : 0) |
             (g ? GPUColorWrite.GREEN : 0) |
             (b ? GPUColorWrite.BLUE : 0) |
-            (a ? GPUColorWrite.ALPHA : 0);
+            (writeAlpha ? GPUColorWrite.ALPHA : 0);
     }
 
     public getPipelineDescriptor(topology: GPUPrimitiveTopology, vertexBufferLayout: GPUVertexBufferLayout[]): [string, GPURenderPipelineDescriptor] {
@@ -389,11 +447,14 @@ export class HydGlobalState {
             vertex: vertexState,
             primitive: {
                 topology: topology,
+                stripIndexFormat: topology === "line-strip" || topology === "triangle-strip"
+                    ? this.stripIndexFormat
+                    : undefined,
                 cullMode: this.polygonState.cullFace ? this.polygonState.cullFaceMode : undefined,
                 frontFace: this.polygonState.frontFace,
             },
         };
-        let cacheKey = this.commonState.currentProgram.hash + this.polygonState.cullFace.toString() + this.polygonState.cullFaceMode.toString() + this.polygonState.frontFace.toString() + this.polygonState.polygonOffsetFill.toString() + this.polygonState.polygonOffsetUnits.toString() + this.polygonState.polygonOffsetFactor.toString() + this.topology.toString();
+        let cacheKey = this.commonState.currentProgram.hash + this.polygonState.cullFace.toString() + this.polygonState.cullFaceMode.toString() + this.polygonState.frontFace.toString() + this.polygonState.polygonOffsetFill.toString() + this.polygonState.polygonOffsetUnits.toString() + this.polygonState.polygonOffsetFactor.toString() + this.topology.toString() + (this.stripIndexFormat || "none");
 
         if (haveFragmentState) {
             const blend: GPUBlendState = this.blendState.enabled ? {
@@ -418,9 +479,14 @@ export class HydGlobalState {
                     .map((value) => {
                         cacheKey += value.toString();
                         if (value === WebGL2RenderingContext.BACK) {
-                            return { format: 'bgra8unorm', blend, writeMask: this.getColorWriteMask() } as GPUColorTargetState;
+                            const writeMask = this.getColorWriteMask();
+                            cacheKey += `:${writeMask}`;
+                            return { format: 'bgra8unorm', blend, writeMask } as GPUColorTargetState;
                         } else if (WebGL2RenderingContext.COLOR_ATTACHMENT0 <= value && value <= WebGL2RenderingContext.COLOR_ATTACHMENT15) {
-                            return { format: this.commonState.drawFramebufferBinding.attachments.get(value).format, blend, writeMask: this.getColorWriteMask() } as GPUColorTargetState;
+                            const attachment = this.commonState.drawFramebufferBinding.attachments.get(value);
+                            const writeMask = this.getColorWriteMask(attachment);
+                            cacheKey += `:${writeMask}`;
+                            return { format: attachment.format, blend, writeMask } as GPUColorTargetState;
                         } else {
                             return null;
                         }
@@ -429,28 +495,35 @@ export class HydGlobalState {
         }
         const depthStencilAttachment = this.getDepthStencilAttachment();
         if (depthStencilAttachment) {
-            pipelineDescriptor.depthStencil = {
+            cacheKey += depthStencilAttachment.format;
+            const hasDepth = depthStencilAttachment.format.startsWith("depth");
+            const hasStencil = depthStencilAttachment.format.includes("stencil");
+            const depthStencil: GPUDepthStencilState = {
                 format: depthStencilAttachment.format,
-                depthWriteEnabled: this.depthState.enabled && this.depthState.writeMask,
-                depthCompare: this.depthState.enabled ? this.depthState.func : 'always',
-                stencilFront: {
+            };
+            if (hasDepth) {
+                depthStencil.depthWriteEnabled = this.depthState.enabled && this.depthState.writeMask;
+                depthStencil.depthCompare = this.depthState.enabled ? this.depthState.func : 'always';
+            }
+            if (hasStencil) {
+                depthStencil.stencilFront = {
                     compare: this.stencilState.frontFunc,
                     failOp: this.stencilState.frontFail,
                     depthFailOp: this.stencilState.frontPassDepthFail,
                     passOp: this.stencilState.frontPassDepthPass,
-                },
-                stencilBack: {
+                };
+                depthStencil.stencilBack = {
                     compare: this.stencilState.backFunc,
                     failOp: this.stencilState.backFail,
                     depthFailOp: this.stencilState.backPassDepthFail,
                     passOp: this.stencilState.backPassDepthPass,
-                },
-                stencilWriteMask: this.stencilState.frontWriteMask, // TODO: WHATS THIS?
-                stencilReadMask: this.stencilState.frontValueMask, // TODO: WHATS THIS?
-                depthBias: this.polygonState.polygonOffsetFill ? this.polygonState.polygonOffsetUnits : undefined,
-                depthBiasSlopeScale: this.polygonState.polygonOffsetFill ? this.polygonState.polygonOffsetFactor : undefined,
-                // depthBiasClamp: this.polygonState.polygonOffsetClamp,
+                };
+                depthStencil.stencilWriteMask = this.stencilState.frontWriteMask;
+                depthStencil.stencilReadMask = this.stencilState.frontValueMask;
             }
+            depthStencil.depthBias = this.polygonState.polygonOffsetFill ? this.polygonState.polygonOffsetUnits : undefined;
+            depthStencil.depthBiasSlopeScale = this.polygonState.polygonOffsetFill ? this.polygonState.polygonOffsetFactor : undefined;
+            pipelineDescriptor.depthStencil = depthStencil;
             cacheKey += this.depthState.hash + this.stencilState.hash;
         }
         return [fastHashCode(cacheKey).toString(), pipelineDescriptor];
@@ -515,21 +588,28 @@ export class HydGlobalState {
             colorAttachments: this.commonState.drawFramebufferBinding.drawBuffers
                 .map((value) => {
                     if (value === WebGL2RenderingContext.BACK) {
+                        const clearValue = this.contextAttributes.alpha === false
+                            ? [this.clearState.color[0], this.clearState.color[1], this.clearState.color[2], 1]
+                            : this.clearState.color;
                         return {
                             view: this.__canvasView,
                             label: this.__canvasView.label,
                             loadOp: (this.clearState.target & WebGL2RenderingContext.COLOR_BUFFER_BIT) ? 'clear' : 'load',
                             storeOp: 'store',
-                            clearValue: this.clearState.color,
+                            clearValue,
                         };
                     } else if (WebGL2RenderingContext.COLOR_ATTACHMENT0 <= value && value <= WebGL2RenderingContext.COLOR_ATTACHMENT15) {
-                        const view = this.commonState.drawFramebufferBinding.attachments.get(value).view;
+                        const attachment = this.commonState.drawFramebufferBinding.attachments.get(value);
+                        const view = attachment.view;
+                        const clearValue = attachment.colorBits[3] === 0
+                            ? [this.clearState.color[0], this.clearState.color[1], this.clearState.color[2], 1]
+                            : this.clearState.color;
                         return {
                             view,
                             label: view.label,
                             loadOp: (this.clearState.target & WebGL2RenderingContext.COLOR_BUFFER_BIT) ? 'clear' : 'load',
                             storeOp: 'store',
-                            clearValue: this.clearState.color,
+                            clearValue,
                         };
                     } else {
                         return null;
@@ -543,19 +623,33 @@ export class HydGlobalState {
             const clearStencil = Boolean(this.clearState.target & WebGL2RenderingContext.STENCIL_BUFFER_BIT);
             const useDepth = this.depthState.enabled || clearDepth;
             const useStencil = this.stencilState.enabled || clearStencil;
+            const hasDepth = dsa.format.startsWith("depth");
+            const hasStencil = dsa.format.includes("stencil");
             renderPassDescriptor.depthStencilAttachment = {
                 view: dsa.view,
                 depthClearValue: this.clearState.depth,
-                depthLoadOp: (useDepth ? (clearDepth ? 'clear' : 'load') : undefined),
-                depthStoreOp: (useDepth ? 'store' : undefined),
-                depthReadOnly: false,
+                depthLoadOp: hasDepth ? (useDepth && clearDepth ? 'clear' : 'load') : undefined,
+                depthStoreOp: hasDepth ? 'store' : undefined,
+                depthReadOnly: hasDepth ? false : undefined,
                 stencilClearValue: this.clearState.stencil,
-                stencilLoadOp: (useStencil ? (clearStencil ? 'clear' : 'load') : undefined),
-                stencilStoreOp: (useStencil ? 'store' : undefined),
-                stencilReadOnly: false,
+                stencilLoadOp: hasStencil ? (useStencil && clearStencil ? 'clear' : 'load') : undefined,
+                stencilStoreOp: hasStencil ? 'store' : undefined,
+                stencilReadOnly: hasStencil ? false : undefined,
             }
         }
         return renderPassDescriptor;
+    }
+
+    public getCurrentRenderPassInfo(): {
+        hash: string,
+        bundleDescriptor: GPURenderBundleEncoderDescriptor,
+        passDescriptor: GPURenderPassDescriptor,
+    } {
+        return {
+            hash: fastHashCode(this.getRenderPassDescriptorCacheKey()).toString(),
+            bundleDescriptor: this.getRenderBundleEncoderDescriptor(),
+            passDescriptor: this.getRenderPassDescriptor(),
+        };
     }
 
     private _bindGroupCache: Map<string, GPUBindGroup> = new Map();
@@ -587,6 +681,10 @@ export class HydGlobalState {
             this._currentVertexAttribBufferKeys[index] = key;
         }
         return [this._currentVertexAttribBuffers[index], key];
+    }
+
+    public updateCurrentVertexAttribBuffer(index: number) {
+        this.getCurrentVertexAttribBuffer(index);
     }
 
     public getPBV(): PbvInfo {
@@ -664,20 +762,31 @@ export class HydGlobalState {
     }
 
     private getDepthStencilAttachment(): { view: GPUTextureView, format: GPUTextureFormat } | null {
-        const needsDepth = this.depthState.enabled || Boolean(this.clearState.target & WebGL2RenderingContext.DEPTH_BUFFER_BIT);
-        const needsStencil = this.stencilState.enabled || Boolean(this.clearState.target & WebGL2RenderingContext.STENCIL_BUFFER_BIT);
+        const framebuffer = this.commonState.drawFramebufferBinding;
+        let needsDepth = this.depthState.enabled || Boolean(this.clearState.target & WebGL2RenderingContext.DEPTH_BUFFER_BIT);
+        let needsStencil = this.stencilState.enabled || Boolean(this.clearState.target & WebGL2RenderingContext.STENCIL_BUFFER_BIT);
+        if (framebuffer === this.defaultFramebuffer) {
+            needsDepth = needsDepth && this.contextAttributes.depth !== false;
+            needsStencil = needsStencil && this.contextAttributes.stencil === true;
+            if ((needsDepth || needsStencil) && this.contextAttributes.depth !== false && this.contextAttributes.stencil === true) {
+                const attachment = framebuffer.attachments.get(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT);
+                return attachment ? { view: attachment.view, format: attachment.format } : null;
+            }
+        }
         if (needsDepth && needsStencil) {
-            const attachment = this.commonState.drawFramebufferBinding.attachments.get(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT);
+            const attachment = framebuffer.attachments.get(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT);
             if (!attachment) return null;
             return { view: attachment.view, format: attachment.format };
         }
         if (needsDepth) {
-            const attachment = this.commonState.drawFramebufferBinding.attachments.get(WebGL2RenderingContext.DEPTH_ATTACHMENT);
+            const attachment = framebuffer.attachments.get(WebGL2RenderingContext.DEPTH_ATTACHMENT) ||
+                framebuffer.attachments.get(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT);
             if (!attachment) return null;
             return { view: attachment.view, format: attachment.format };
         }
         if (needsStencil) {
-            const attachment = this.commonState.drawFramebufferBinding.attachments.get(WebGL2RenderingContext.STENCIL_ATTACHMENT);
+            const attachment = framebuffer.attachments.get(WebGL2RenderingContext.STENCIL_ATTACHMENT) ||
+                framebuffer.attachments.get(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT);
             if (!attachment) return null;
             return { view: attachment.view, format: attachment.format };
         }
@@ -750,10 +859,23 @@ export class HydGlobalState {
         const bufferAttributeMap = new Map<string, [GPUBuffer, number, GPUVertexStepMode, Array<GPUVertexAttribute>]>();
         const vao = this.commonState.vertexArrayBinding;
         const activeAttributeLocations = this.commonState.currentProgram.hydAttributeLocations;
+        const divisorGroupBaseOffsets = new WeakMap<HydBuffer, Map<string, number>>();
         const buffers: GPUBuffer[] = [];
         const layouts: GPUVertexBufferLayout[] = [];
         const offsets: number[] = [];
         const vbKeys = [];
+        for (let location = 0; location < vao.attributes.length; location++) {
+            if (!activeAttributeLocations.has(location)) continue;
+            const attribute = vao.attributes[location];
+            if (!attribute.enabled || !attribute.buffer || !attribute.format || attribute.divisor <= 1) continue;
+            let offsetsByLayout = divisorGroupBaseOffsets.get(attribute.buffer);
+            if (!offsetsByLayout) {
+                offsetsByLayout = new Map();
+                divisorGroupBaseOffsets.set(attribute.buffer, offsetsByLayout);
+            }
+            const key = `${attribute.stride}:${attribute.divisor}`;
+            offsetsByLayout.set(key, Math.min(offsetsByLayout.get(key) ?? attribute.offset, attribute.offset));
+        }
         /*
         attribute: {
             public enabled: boolean = false;
@@ -777,21 +899,50 @@ export class HydGlobalState {
                     this.setError(WebGL2RenderingContext.INVALID_OPERATION);
                     return;
                 }
-                // TODO: if offset > stride, then we need to set the offset of this vertexBuffer when calling renderPass.setVertexBuffer
-                // https://github.com/gpuweb/gpuweb/issues/1357#issuecomment-765079909
+                let vertexBuffer = attribute.buffer.buffer;
+                let arrayStride = attribute.stride;
+                let attributeOffset = attribute.offset;
+                let format = attribute.format;
+                let bufferHash = attribute.buffer.hash;
+                if (!format) {
+                    const converted = attribute.buffer.getFloatVertexBuffer(
+                        attribute.type,
+                        attribute.size,
+                        attribute.normalized,
+                        attribute.webglStride,
+                        attribute.offset,
+                        attribute.divisor > 1 ? attribute.divisor : 1,
+                    );
+                    vertexBuffer = converted.buffer;
+                    arrayStride = converted.arrayStride;
+                    attributeOffset = 0;
+                    format = converted.format;
+                    bufferHash = converted.key;
+                } else if (attribute.divisor > 1) {
+                    const layoutKey = `${attribute.stride}:${attribute.divisor}`;
+                    const sourceOffset = divisorGroupBaseOffsets.get(attribute.buffer)?.get(layoutKey) ?? attribute.offset;
+                    const expanded = attribute.buffer.getDivisorVertexBuffer(
+                        attribute.stride,
+                        attribute.divisor,
+                        sourceOffset,
+                    );
+                    vertexBuffer = expanded.buffer;
+                    attributeOffset -= sourceOffset;
+                    bufferHash = expanded.key;
+                }
                 const stepMode: GPUVertexStepMode = attribute.divisor > 0 ? 'instance' : 'vertex';
-                let hash = attribute.buffer.hash + '|' + attribute.stride + '|' + stepMode + '|' + Math.floor(attribute.offset / 2048);
+                let hash = bufferHash + '|' + arrayStride + '|' + stepMode + '|' + Math.floor(attributeOffset / 2048);
                 if (bufferAttributeMap.has(hash)) {
                     bufferAttributeMap.get(hash)[3].push({
                         shaderLocation: attribute.shaderLocation,
-                        offset: attribute.offset,
-                        format: attribute.format,
+                        offset: attributeOffset,
+                        format,
                     });
                 } else {
-                    bufferAttributeMap.set(hash, [attribute.buffer.buffer, attribute.stride, stepMode, [{
+                    bufferAttributeMap.set(hash, [vertexBuffer, arrayStride, stepMode, [{
                         shaderLocation: attribute.shaderLocation,
-                        offset: attribute.offset,
-                        format: attribute.format,
+                        offset: attributeOffset,
+                        format,
                     }]]);
                 }
             }
@@ -880,6 +1031,9 @@ export class HydHashPbv implements PbvInfo {
 export class HydGlobalStateHashed extends HydGlobalState implements HydHashable {
     private _hashPbvCur: HydHashPbv = new HydHashPbv(null);
     private _hashPbvCache: Map<string, HydHashPbv> = new Map();
+    public get stateToken(): object {
+        return this._hashPbvCur;
+    }
     public recordTransition(glFunc: string, ...glArgs: ({ toString(): string })[]) {
         // recordTransition 的正确性尤为重要！
         this.recordTransitionOne(glFunc + '$' + glArgs.join(','));
@@ -923,7 +1077,9 @@ export class HydGlobalStateHashed extends HydGlobalState implements HydHashable 
             + this.stencilState.hash
             + textureUnitHash
             + this.clearState.target.toString()
-            + this.topology;
+            + this.drawingBufferGeneration.toString()
+            + this.topology
+            + (this.stripIndexFormat || "none");
     }
 
     public getPBV(): PbvInfo {
@@ -939,4 +1095,5 @@ export class HydGlobalStateHashed extends HydGlobalState implements HydHashable 
         }
         return pbv;
     }
+
 }

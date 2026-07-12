@@ -10,11 +10,18 @@ class GPURenderBundleTransition {
     public readonly opArgs: any[];
     public readonly father: GPURenderBundleTransition;
 
-    public onceHash: string | GPUBindGroup = null;
+    public onceHash: string = null;
     public onceNext: GPURenderBundleTransition;
-    public bindGroupOffset: number | null = null;
+    public onceBindGroup: GPUBindGroup = null;
+    public onceBindGroupOffset: number | null = null;
+    public onceBindGroupNext: GPURenderBundleTransition = null;
     public onceNumericPrefix: string = null;
     public onceNumericHash: number = NaN;
+    public onceNumericNext: GPURenderBundleTransition = null;
+    public onceIndexBuffer: GPUBuffer = null;
+    public onceIndexFormat: GPUIndexFormat = null;
+    public onceIndexNext: GPURenderBundleTransition = null;
+    public indexBufferTransitions: WeakMap<GPUBuffer, Partial<Record<GPUIndexFormat, GPURenderBundleTransition>>> = new WeakMap();
 
     constructor(opName: GpuOperators, opArgs: any[], father: GPURenderBundleTransition) {
         this.opName = opName;
@@ -37,28 +44,47 @@ class GPURenderBundleTransition {
     }
 
     public gotoBindGroup(bindGroup: GPUBindGroup, do0: number | null) {
-        if (this.bindGroupOffset === do0 && this.onceHash == bindGroup) {
-            return this.onceNext;
+        if (this.onceBindGroupOffset === do0 && this.onceBindGroup === bindGroup) {
+            return this.onceBindGroupNext;
         }
-        this.onceHash = bindGroup;
-        this.bindGroupOffset = do0;
+        this.onceBindGroup = bindGroup;
+        this.onceBindGroupOffset = do0;
         const hash = 'b0' + bindGroup.label + (do0 === null ? 'none' : do0);
         const transition = this.jumpTable.get(hash);
         if (!transition) {
             const newTransition = new GPURenderBundleTransition('setBindGroup', [0, bindGroup, do0], this);
             this.jumpTable.set(hash, newTransition);
-            return this.onceNext = newTransition;
+            return this.onceBindGroupNext = newTransition;
         }
-        return this.onceNext = transition;
+        return this.onceBindGroupNext = transition;
     }
 
     public gotoNumeric(prefix: string, numericHash: number, opName: GpuOperators, ...opArgs: any[]): GPURenderBundleTransition {
         if (this.onceNumericPrefix === prefix && this.onceNumericHash === numericHash) {
-            return this.onceNext;
+            return this.onceNumericNext;
         }
         this.onceNumericPrefix = prefix;
         this.onceNumericHash = numericHash;
-        return this.goto(prefix + numericHash, opName, ...opArgs);
+        return this.onceNumericNext = this.goto(prefix + numericHash, opName, ...opArgs);
+    }
+
+    public gotoIndexBuffer(buffer: GPUBuffer, format: GPUIndexFormat): GPURenderBundleTransition {
+        if (this.onceIndexBuffer === buffer && this.onceIndexFormat === format) {
+            return this.onceIndexNext;
+        }
+        this.onceIndexBuffer = buffer;
+        this.onceIndexFormat = format;
+        let transitions = this.indexBufferTransitions.get(buffer);
+        if (!transitions) {
+            transitions = {};
+            this.indexBufferTransitions.set(buffer, transitions);
+        }
+        let transition = transitions[format];
+        if (!transition) {
+            transition = new GPURenderBundleTransition('setIndexBuffer', [buffer, format], this);
+            transitions[format] = transition;
+        }
+        return this.onceIndexNext = transition;
     }
 }
 
@@ -96,12 +122,8 @@ class HydRenderPassEncoder {
             slot, buffer, offset
         );
     }
-    public setIndexBuffer(opHash: string, buffer: GPUBuffer, format: GPUIndexFormat) {
-        this.bundleCache = this.bundleCache.goto(
-            opHash,
-            'setIndexBuffer',
-            buffer, format
-        );
+    public setIndexBuffer(buffer: GPUBuffer, format: GPUIndexFormat) {
+        this.bundleCache = this.bundleCache.gotoIndexBuffer(buffer, format);
     }
     public draw(vertexCount: number, instanceCount: number, firstVertex: number, firstInstance: number) {
         this.bundleCache = this.bundleCache.gotoNumeric('d', vertexCount*839 ^ instanceCount*853 ^ firstVertex*857 ^ firstInstance*859, 'draw', vertexCount, instanceCount, firstVertex, firstInstance);
@@ -151,7 +173,8 @@ export class HydRenderPassCache {
     public renderPassBindGroupCacheKey: string = null;
     public renderPassVertexBufferCacheKeys: string[] = [];
     public renderPassVertexBufferCacheKey: string = null;
-    public renderPassIndexBufferCacheKey: string = null;
+    private renderPassIndexBuffer: GPUBuffer = null;
+    private renderPassIndexFormat: GPUIndexFormat = null;
     private viewPortInfo: [number, number, number, number, number, number] = [0, 0, 0, 0, 0, 0];
     private scissorInfo: [number, number, number, number] = [0, 0, 0, 0];
     private stencilReferenceInfo: number = 0;
@@ -175,6 +198,11 @@ export class HydRenderPassCache {
         }
     }
 
+    public CeDiscardAndReset() {
+        this._commandEncoder = null;
+        this.resetCache();
+    }
+
     public get commandEncoder() {
         return this._commandEncoder = this._commandEncoder || this.device.createCommandEncoder({
             label: `commandEncoder-${this.__commandEncoderCount++}`,
@@ -191,7 +219,8 @@ export class HydRenderPassCache {
         this.renderPassBindGroupCacheKey = null;
         this.renderPassVertexBufferCacheKey = null;
         this.renderPassVertexBufferCacheKeys = [];
-        this.renderPassIndexBufferCacheKey = null;
+        this.renderPassIndexBuffer = null;
+        this.renderPassIndexFormat = null;
         this.viewPortInfo = [0, 0, 0, 0, 0, 0];
         this.scissorInfo = [0, 0, 0, 0];
         this.stencilReferenceInfo = 0;
@@ -295,9 +324,10 @@ export class HydRenderPassCache {
     }
 
     public RpSetIndexBuffer(indexBuffer: GPUBuffer, indexFormat: GPUIndexFormat) {
-        if (this.renderPassIndexBufferCacheKey !== indexBuffer.label) {
-            this.renderPassIndexBufferCacheKey = indexBuffer.label;
-            this.renderBundleGenerator.setIndexBuffer(indexBuffer.label, indexBuffer, indexFormat);
+        if (this.renderPassIndexBuffer !== indexBuffer || this.renderPassIndexFormat !== indexFormat) {
+            this.renderPassIndexBuffer = indexBuffer;
+            this.renderPassIndexFormat = indexFormat;
+            this.renderBundleGenerator.setIndexBuffer(indexBuffer, indexFormat);
         }
     }
 

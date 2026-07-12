@@ -24,6 +24,9 @@ for (let i = 2; i < process.argv.length; i++) {
     argv.set(key, "true");
   }
 }
+const captureConsole = argv.get("capture-console") === "true";
+const suiteName = argv.get("suite") || "manifest";
+const officialVersion = argv.get("version") || "2.0.1";
 
 if (argv.get("headless") === "true") {
   throw new Error("The WebGL CTS harness only runs in headed Chrome.");
@@ -52,6 +55,10 @@ function contentType(filePath) {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".ogv": "video/ogg",
     ".txt": "text/plain; charset=utf-8",
   }[path.extname(filePath).toLowerCase()] || "application/octet-stream";
 }
@@ -80,109 +87,102 @@ function escapeAttribute(value) {
 }
 
 function delayedBodyScripts(html) {
-  const body = /<body\b[^>]*>([\s\S]*?)<\/body>/i.exec(html);
-  if (!body) return { html, dynamicContexts: 0, dynamicCanvases: 0 };
-  let dynamicContexts = 0;
-  let dynamicCanvases = 0;
-  const rewrittenBody = body[1].replace(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi, (full, attributes, source) => {
+  const body = /<body\b([^>]*)>([\s\S]*?)<\/body>/i.exec(html);
+  if (!body) return { html, bodyOnload: "" };
+  const onloadMatch = /\sonload\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(body[1]);
+  const bodyOnload = onloadMatch ? (onloadMatch[1] || onloadMatch[2] || onloadMatch[3] || "") : "";
+  const bodyAttributes = onloadMatch
+    ? body[1].slice(0, onloadMatch.index) + body[1].slice(onloadMatch.index + onloadMatch[0].length)
+    : body[1];
+  const rewriteScripts = (sourceHtml) => sourceHtml.replace(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi, (full, attributes, source) => {
     if (!isExecutableScript(attributes)) return full;
     const srcMatch = /\bsrc\s*=\s*(["'])([^"']+)\1/i.exec(attributes);
-    let code = srcMatch ? "" : source;
-    dynamicContexts += (code.match(/\bcreate3DContext\s*\(\s*\)/g) || []).length;
-    code = code.replace(/\bdocument\.createElement\s*\(\s*(["'])canvas\1\s*\)/g, () => {
-      dynamicCanvases++;
-      return "window.__GL2GPU_CTS_CREATE_CANVAS()";
-    });
+    const code = srcMatch ? "" : source;
     const src = srcMatch ? ` data-gl2gpu-src="${escapeAttribute(srcMatch[2])}"` : "";
     return `<script type="application/x-gl2gpu-delayed"${src}>${code}</script>`;
   });
+  const rewrittenBody = rewriteScripts(body[2]);
+  const rewritten = `<body${bodyAttributes}>${rewrittenBody}</body>`;
+  const tailStart = body.index + body[0].length;
+  const head = html.slice(0, body.index);
+  const delayHeadScripts = /<script\b[^>]*\bsrc\s*=\s*(["'])[^"']*unit\.js(?:[?#][^"']*)?\1/i.test(head);
   return {
-    html: html.slice(0, body.index) + body[0].replace(body[1], rewrittenBody) + html.slice(body.index + body[0].length),
-    dynamicContexts,
-    dynamicCanvases,
+    html: (delayHeadScripts ? rewriteScripts(head) : head) + rewritten + rewriteScripts(html.slice(tailStart)),
+    bodyOnload,
   };
 }
 
-function bootScript(dynamicContexts, dynamicCanvases) {
+function bootScript(bodyOnload) {
   return `
 <script>
-window.__GL2GPU_CTS_RESULT = { ready: false, finished: false, passes: [], failures: [], bootError: null };
+window.__GL2GPU_CTS_RESULT = { ready: false, finished: false, passes: [], failures: [], shaders: [], bootError: null };
+window.__HYD_DEBUG_READBACK = ${argv.get("debug-readback") === "true"};
+window.__HYD_DEBUG_TEXTURE_UPLOAD = ${argv.get("debug-texture-upload") === "true"};
+if (${argv.get("capture-shaders") === "true"}) {
+  window.__HYD_SHADER_CAPTURE = function(record) {
+    window.__GL2GPU_CTS_RESULT.shaders.push(record);
+  };
+}
 window.addEventListener("DOMContentLoaded", async () => {
   const result = window.__GL2GPU_CTS_RESULT;
   try {
     if (!window.GL2GPU) throw new Error("GL2GPU bundle was not loaded");
     const nativeGetContext = HTMLCanvasElement.prototype.getContext;
+    const runtime = await GL2GPU.gl2gpuCreateRuntime({
+      optimizeTintWgsl: true,
+      legacyTextureCoordinateFixups: false
+    });
     const contextMap = new WeakMap();
-    const contexts = [];
-    async function prepare(canvas) {
-      const context = await GL2GPU.gl2gpuGetContext(
-        canvas,
-        null,
-        ["webgl", {}],
-        [1 << 21, 0],
-        { optimizeTintWgsl: true, legacyTextureCoordinateFixups: false }
-      );
-      contextMap.set(canvas, context);
-      if (context.canvas && context.canvas !== canvas) contextMap.set(context.canvas, context);
-      contexts.push(context);
-      return context;
-    }
-    const declaredCanvases = Array.from(document.querySelectorAll("canvas"));
-    await Promise.all(declaredCanvases.map(prepare));
-    const contextPool = [];
-    for (let i = 0; i < ${Math.min(8, Math.max(4, dynamicContexts))}; i++) {
-      const canvas = document.createElement("canvas");
-      canvas.width = 32;
-      canvas.height = 32;
-      canvas.style.display = "none";
-      document.body.appendChild(canvas);
-      contextPool.push(await prepare(canvas));
-    }
-    const canvasPool = [];
-    for (let i = 0; i < ${dynamicCanvases > 0 ? 8 : 0}; i++) {
-      const canvas = document.createElement("canvas");
-      canvas.style.display = "none";
-      document.body.appendChild(canvas);
-      await prepare(canvas);
-      canvasPool.push(canvas);
-    }
-    window.__GL2GPU_CTS_CREATE_CANVAS = function() {
-      const canvas = canvasPool.shift();
-      if (!canvas) throw new Error("CTS dynamic canvas pool exhausted");
-      return canvas;
-    };
+    const contextTypes = new WeakMap();
     HTMLCanvasElement.prototype.getContext = function(type, attributes) {
       if (type === "webgl" || type === "experimental-webgl" || type === "webgl2") {
-        const context = contextMap.get(this);
-        if (!context) throw new Error("CTS requested an unprepared WebGL canvas");
+        const normalizedType = type === "webgl2" ? "webgl2" : "webgl";
+        const existing = contextMap.get(this);
+        if (existing) return contextTypes.get(this) === normalizedType ? existing : null;
+        const gpuContext = nativeGetContext.call(this, "webgpu");
+        if (!gpuContext) return null;
+        const context = GL2GPU.gl2gpuCreateContext(
+          runtime,
+          this,
+          null,
+          [normalizedType, attributes || {}],
+          [1 << 21, 0],
+          gpuContext
+        );
+        if (${argv.get("debug-api") === "true"}) {
+          result.apiDebug = {
+            keys: Object.keys(context).slice(0, 400),
+            colorBufferBit: context.COLOR_BUFFER_BIT,
+            activeTextureType: typeof context.activeTexture,
+            canvasMatches: context.canvas === this
+          };
+        }
+        contextMap.set(this, context);
+        contextTypes.set(this, normalizedType);
+        if (context.canvas && context.canvas !== this) {
+          contextMap.set(context.canvas, context);
+          contextTypes.set(context.canvas, normalizedType);
+        }
         return context;
       }
       return nativeGetContext.call(this, type, attributes);
     };
-    const originalCreate3DContext = window.WebGLTestUtils && WebGLTestUtils.create3DContext;
-    if (originalCreate3DContext) {
-      WebGLTestUtils.create3DContext = function(canvas, attributes, version) {
-        if (canvas === undefined || canvas === null) {
-          return contextPool.shift() || null;
-        }
-        return originalCreate3DContext.call(this, canvas, attributes, version);
+    const installResultHooks = () => {
+      const wrap = (name, callback) => {
+        const original = window[name];
+        if (typeof original !== "function" || original.__gl2gpuResultHook) return;
+        const wrapped = function() {
+          callback(arguments);
+          return original.apply(this, arguments);
+        };
+        wrapped.__gl2gpuResultHook = true;
+        window[name] = wrapped;
       };
-    }
-    const originalPassed = window.testPassed;
-    const originalFailed = window.testFailed;
-    const originalFinished = window.notifyFinishedToHarness;
-    window.testPassed = function(message) {
-      result.passes.push(String(message));
-      return originalPassed.apply(this, arguments);
+      wrap("testPassed", args => result.passes.push(Array.from(args, String).join(" | ")));
+      wrap("testFailed", args => result.failures.push(Array.from(args, String).join(" | ")));
+      wrap("notifyFinishedToHarness", () => { result.finished = true; });
     };
-    window.testFailed = function(message) {
-      result.failures.push(String(message));
-      return originalFailed.apply(this, arguments);
-    };
-    window.notifyFinishedToHarness = function() {
-      result.finished = true;
-      return originalFinished.apply(this, arguments);
-    };
+    installResultHooks();
     window.addEventListener("error", (event) => {
       result.failures.push("Uncaught test error: " + (event.error && (event.error.stack || event.error.message) || event.message));
       result.finished = true;
@@ -208,7 +208,14 @@ window.addEventListener("DOMContentLoaded", async () => {
         executable.textContent = script.textContent || "";
         document.body.appendChild(executable);
       }
+      installResultHooks();
     }
+    installResultHooks();
+    const bodyOnload = ${JSON.stringify(bodyOnload)};
+    if (bodyOnload) {
+      Function(bodyOnload).call(document.body);
+    }
+    window.dispatchEvent(new Event("load"));
   } catch (error) {
     result.bootError = String(error && (error.stack || error.message) || error);
     result.finished = true;
@@ -224,7 +231,7 @@ function transformHtml(source) {
   let html = /<head\b[^>]*>/i.test(delayed.html)
     ? delayed.html.replace(/<head([^>]*)>/i, `<head$1>\n${bundle}`)
     : `${bundle}\n${delayed.html}`;
-  const boot = bootScript(delayed.dynamicContexts, delayed.dynamicCanvases);
+  const boot = bootScript(delayed.bodyOnload);
   html = /<\/body>/i.test(html) ? html.replace(/<\/body>/i, `${boot}\n</body>`) : `${html}\n${boot}`;
   return html;
 }
@@ -287,15 +294,87 @@ async function launchHeadedChrome(chromium) {
   throw lastError || new Error("No headed Chrome executable is available");
 }
 
-function loadTests() {
+function versionAtLeast(have, want) {
+  const haveParts = String(have).split(" ")[0].split(".").map(Number);
+  const wantParts = String(want).split(" ")[0].split(".").map(Number);
+  for (let index = 0; index < wantParts.length; index++) {
+    const havePart = haveParts[index] || 0;
+    const wantPart = wantParts[index] || 0;
+    if (havePart !== wantPart) return havePart > wantPart;
+  }
+  return true;
+}
+
+function loadOfficialTests(ctsTestsRoot) {
+  const tests = [];
+  const visit = (relativeListPath, inherited = { minVersion: "1.0", maxVersion: null, slow: false }) => {
+    const listPath = path.join(ctsTestsRoot, relativeListPath);
+    const prefix = path.posix.dirname(relativeListPath);
+    const lines = fs.readFileSync(listPath, "utf8").split(/\r?\n/);
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#") || line.startsWith(";") || line.startsWith("//")) continue;
+      const tokens = line.split(/\s+/);
+      const options = { ...inherited };
+      const paths = [];
+      for (let index = 0; index < tokens.length; index++) {
+        const token = tokens[index];
+        if (token === "--slow") {
+          options.slow = true;
+        } else if (token === "--min-version") {
+          options.minVersion = tokens[++index];
+        } else if (token === "--max-version") {
+          options.maxVersion = tokens[++index];
+        } else if (token.startsWith("--")) {
+          throw new Error(`Unsupported CTS list option ${token} in ${relativeListPath}`);
+        } else {
+          paths.push(token);
+        }
+      }
+      const relativePath = path.posix.normalize(path.posix.join(prefix === "." ? "" : prefix, paths.join(" ")));
+      if (relativePath.endsWith(".txt")) {
+        visit(relativePath, options);
+        continue;
+      }
+      const included = versionAtLeast(officialVersion, options.minVersion || "1.0") &&
+        (!options.maxVersion || versionAtLeast(options.maxVersion, officialVersion));
+      if (included) tests.push(relativePath);
+    }
+  };
+  visit("00_test_list.txt");
+  return tests;
+}
+
+function selectTestRange(tests) {
+  const shardCount = Math.max(1, Number(argv.get("shard-count") || 1));
+  const shardIndex = Number(argv.get("shard-index") || 0);
+  if (!Number.isInteger(shardIndex) || shardIndex < 0 || shardIndex >= shardCount) {
+    throw new Error(`Invalid shard ${shardIndex}/${shardCount}`);
+  }
+  let selected = shardCount === 1 ? tests : tests.filter((_, index) => index % shardCount === shardIndex);
+  const start = Math.max(0, Number(argv.get("start") || 0));
+  const limit = argv.has("limit") ? Math.max(0, Number(argv.get("limit"))) : selected.length;
+  selected = selected.slice(start, start + limit);
+  return selected;
+}
+
+function loadTests(ctsTestsRoot) {
   if (argv.has("tests")) {
     return argv.get("tests").split(",").map((value) => value.trim()).filter(Boolean);
   }
+  if (suiteName === "official") {
+    return selectTestRange(loadOfficialTests(ctsTestsRoot));
+  }
+  if (suiteName !== "manifest") throw new Error(`Unsupported suite ${suiteName}`);
   const testsFile = path.resolve(argv.get("tests-file") || defaultTestsFile);
   return fs.readFileSync(testsFile, "utf8")
     .split(/\r?\n/)
     .map((value) => value.trim())
     .filter((value) => value && !value.startsWith("#"));
+}
+
+function isBenignConsoleError(message) {
+  return /^Failed to load resource: the server responded with a status of 404 \(Not Found\)$/i.test(message);
 }
 
 async function main() {
@@ -309,20 +388,35 @@ async function main() {
     throw new Error(`Expected WebGL CTS ${EXPECTED_CTS_COMMIT}, found ${ctsCommit}. Pass --allow-cts-commit ${ctsCommit} to run intentionally.`);
   }
   fs.mkdirSync(outputRoot, { recursive: true });
-  const tests = loadTests();
+  const tests = loadTests(ctsTestsRoot);
+  if (argv.get("list-only") === "true") {
+    console.log(JSON.stringify({ suite: suiteName, version: officialVersion, total: tests.length, tests }, null, 2));
+    return;
+  }
   const timeoutMs = Number(argv.get("timeout-ms") || 45000);
+  const restartEvery = Math.max(0, Number(argv.get("restart-every") || 100));
   const { chromium } = loadPlaywright();
-  const launched = await launchHeadedChrome(chromium);
+  let launched = await launchHeadedChrome(chromium);
+  const chromeExecutablePath = launched.executablePath;
   const server = await startServer(ctsTestsRoot);
   const results = [];
   try {
-    for (const test of tests) {
+    for (let testIndex = 0; testIndex < tests.length; testIndex++) {
+      if (testIndex > 0 && restartEvery > 0 && testIndex % restartEvery === 0) {
+        await launched.browser.close();
+        launched = await launchHeadedChrome(chromium);
+      }
+      const test = tests[testIndex];
       const page = await launched.browser.newPage({ viewport: { width: 1024, height: 768 }, deviceScaleFactor: 1 });
       const consoleErrors = [];
+      const consoleMessages = [];
       const pageErrors = [];
       page.on("console", (message) => {
         const text = message.text();
-        if (message.type() === "error" || /GPUValidationError|Runtime shader translation failed|unsupported|not implemented/i.test(text)) {
+        if (captureConsole && consoleMessages.length < 1000) {
+          consoleMessages.push({ type: message.type(), text: text.slice(0, 12000) });
+        }
+        if (message.type() === "error" || /GPUValidationError|Runtime shader translation failed|\[HYD\] WebGPU uncaptured error|not implemented/i.test(text)) {
           consoleErrors.push(text.slice(0, 4000));
         }
       });
@@ -330,24 +424,61 @@ async function main() {
       const started = Date.now();
       let state;
       let timedOut = false;
+      const captureState = () => page.evaluate(() => {
+        const state = window.__GL2GPU_CTS_RESULT;
+        if (!state) return null;
+        const testLog = document.getElementById("console")?.innerText || "";
+        const harnessResults = window.RESULTS;
+        const failureLines = testLog
+          .split(/\r?\n/)
+          .filter((line) => line.startsWith("FAIL "))
+          .map((line) => line.slice(5));
+        const failures = state.failures.length > 0
+          ? state.failures
+          : failureLines.length > 0
+            ? failureLines
+            : harnessResults && harnessResults.fail > 0
+              ? [`${harnessResults.fail} Khronos harness failure(s)`]
+              : [];
+        return {
+          ...state,
+          finished: Boolean(state.finished || window._didNotifyFinishedToHarness || /(?:^|\n)TEST COMPLETE(?:\n|$)/.test(testLog)),
+          failures,
+          testLog,
+        };
+      });
       try {
-        await page.goto(`${server.baseUrl}/${test}`, { waitUntil: "load", timeout: timeoutMs });
-        await page.waitForFunction(() => window.__GL2GPU_CTS_RESULT && window.__GL2GPU_CTS_RESULT.finished, null, { timeout: timeoutMs });
-        state = await page.evaluate(() => window.__GL2GPU_CTS_RESULT);
+        const testUrl = new URL(`${server.baseUrl}/${test}`);
+        if (suiteName === "official") {
+          testUrl.searchParams.set("webglVersion", String(Math.max(1, Number.parseInt(officialVersion, 10) || 1)));
+          testUrl.searchParams.set("quiet", "0");
+        }
+        await page.goto(testUrl.href, { waitUntil: "load", timeout: timeoutMs });
+        await page.waitForFunction(() => {
+          const state = window.__GL2GPU_CTS_RESULT;
+          if (!state) return false;
+          const testLog = document.getElementById("console")?.innerText || "";
+          return state.finished || window._didNotifyFinishedToHarness || /(?:^|\n)TEST COMPLETE(?:\n|$)/.test(testLog);
+        }, null, { timeout: timeoutMs });
+        state = await captureState();
       } catch (error) {
         timedOut = /Timeout/i.test(String(error));
-        state = await page.evaluate(() => window.__GL2GPU_CTS_RESULT || null).catch(() => null);
+        state = await captureState().catch(() => null);
         pageErrors.push(String(error.stack || error.message || error).slice(0, 4000));
       }
       const name = test.replace(/[^A-Za-z0-9_.-]+/g, "_");
       await page.screenshot({ path: path.join(outputRoot, `${name}.png`), fullPage: true }).catch(() => {});
+      const hardConsoleErrors = consoleErrors.filter((message) => !isBenignConsoleError(message));
       const result = {
         test,
-        valid: Boolean(state && state.finished && !state.bootError && state.failures.length === 0 && pageErrors.length === 0),
+        valid: Boolean(state && state.finished && !state.bootError && state.failures.length === 0 &&
+          pageErrors.length === 0 && hardConsoleErrors.length === 0),
         durationMs: Date.now() - started,
         timedOut,
         state,
         consoleErrors,
+        hardConsoleErrors,
+        consoleMessages,
         pageErrors,
       };
       results.push(result);
@@ -360,8 +491,11 @@ async function main() {
   }
   const report = {
     generatedAt: new Date().toISOString(),
+    suite: suiteName,
+    version: suiteName === "official" ? officialVersion : null,
     headed: true,
-    chrome: launched.executablePath,
+    chrome: chromeExecutablePath,
+    browserRestartEvery: restartEvery,
     ctsRoot,
     ctsCommit,
     expectedCtsCommit: EXPECTED_CTS_COMMIT,

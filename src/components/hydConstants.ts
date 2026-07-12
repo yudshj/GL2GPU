@@ -57,6 +57,10 @@ export const enumToViewDimension: Map<GLenum, GPUTextureViewDimension> = new Map
     [WebGL2RenderingContext.TEXTURE_CUBE_MAP_NEGATIVE_Z, 'cube'],
 ]);
 export const enumToConstant: Map<number, any> = new Map([
+    [WebGL2RenderingContext.ALIASED_LINE_WIDTH_RANGE, new Float32Array([1, 1])],
+    [WebGL2RenderingContext.ALIASED_POINT_SIZE_RANGE, new Float32Array([1, 1])],
+    [WebGL2RenderingContext.COMPRESSED_TEXTURE_FORMATS, new Uint32Array(0)],
+    [WebGL2RenderingContext.SUBPIXEL_BITS, 4],
     [WebGL2RenderingContext.MAX_COMBINED_TEXTURE_IMAGE_UNITS, 16],
     [WebGL2RenderingContext.MAX_CUBE_MAP_TEXTURE_SIZE, 4096],
     [WebGL2RenderingContext.MAX_FRAGMENT_UNIFORM_VECTORS, 1024],
@@ -67,7 +71,7 @@ export const enumToConstant: Map<number, any> = new Map([
     [WebGL2RenderingContext.MAX_VERTEX_ATTRIBS, 16],
     [WebGL2RenderingContext.MAX_VERTEX_TEXTURE_IMAGE_UNITS, 16],
     [WebGL2RenderingContext.MAX_VERTEX_UNIFORM_VECTORS, 1024],
-    [WebGL2RenderingContext.MAX_VIEWPORT_DIMS, [4096, 4096]],
+    [WebGL2RenderingContext.MAX_VIEWPORT_DIMS, new Int32Array([16384, 16384])],
 
     [WebGL2RenderingContext.MAX_3D_TEXTURE_SIZE, 256],
     [WebGL2RenderingContext.MAX_ARRAY_TEXTURE_LAYERS, 256],
@@ -96,8 +100,6 @@ export const enumToConstant: Map<number, any> = new Map([
     [WebGL2RenderingContext.MAX_VERTEX_OUTPUT_COMPONENTS, 64],
     [WebGL2RenderingContext.MAX_VERTEX_UNIFORM_BLOCKS, 12],
     [WebGL2RenderingContext.MAX_VERTEX_UNIFORM_COMPONENTS, 4096],
-
-    [WebGL2RenderingContext.VERSION, "WebGL 2.0 (OpenGL ES 3.0 Chromium)"],
 ] as Array<[number, any]>);
 // const USE_CACHE = true;
 export const enumToIndexFormat: Map<GLenum, GPUIndexFormat> = new Map([
@@ -105,6 +107,7 @@ export const enumToIndexFormat: Map<GLenum, GPUIndexFormat> = new Map([
     [WebGL2RenderingContext.UNSIGNED_INT, 'uint32'],
 ]);
 export const indexEnumToBytes: Map<GLenum, number> = new Map([
+    [WebGL2RenderingContext.UNSIGNED_BYTE, 1],
     [WebGL2RenderingContext.UNSIGNED_SHORT, 2],
     [WebGL2RenderingContext.UNSIGNED_INT, 4],
 ]);

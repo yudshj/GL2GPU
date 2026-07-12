@@ -2,9 +2,16 @@ import fastHashCode from 'fast-hash-code';
 
 import {HydShader} from "./hydShader";
 import {MergeShaderInfo, samplerFlipYUniformName, ShaderInfo2HydAus, ShaderInfo2String, hydTrim} from "./shaderDB";
+import {
+    DEPTH_RANGE_DIFF_UNIFORM_NAME,
+    DEPTH_RANGE_FAR_UNIFORM_NAME,
+    DEPTH_RANGE_NEAR_UNIFORM_NAME,
+    FRAG_COORD_HEIGHT_UNIFORM_NAME,
+} from "./shaderInternalUniforms";
 import { HydHashable } from './base/hydHashable';
 import { ShaderTranslator } from './shaderTranslator';
 import { emitShaderCapture, sourceCapture } from './shaderCapture';
+import { composeShaderModuleWgsl } from './shaderWgslTypes';
 
 export const ALIGNMENT_BLOCK_SIZE: number = 256;
 
@@ -67,6 +74,22 @@ const glSizeToAlignedBytes: Map<GLenum, number> = new Map([
     [WebGL2RenderingContext.FLOAT_MAT4x3, 4 * 4],
 ]);
 
+const glMatrixDimensions: Map<GLenum, { columns: number, rows: number }> = new Map([
+    [WebGL2RenderingContext.FLOAT_MAT2, { columns: 2, rows: 2 }],
+    [WebGL2RenderingContext.FLOAT_MAT3, { columns: 3, rows: 3 }],
+    [WebGL2RenderingContext.FLOAT_MAT4, { columns: 4, rows: 4 }],
+    [WebGL2RenderingContext.FLOAT_MAT2x3, { columns: 2, rows: 3 }],
+    [WebGL2RenderingContext.FLOAT_MAT2x4, { columns: 2, rows: 4 }],
+    [WebGL2RenderingContext.FLOAT_MAT3x2, { columns: 3, rows: 2 }],
+    [WebGL2RenderingContext.FLOAT_MAT3x4, { columns: 3, rows: 4 }],
+    [WebGL2RenderingContext.FLOAT_MAT4x2, { columns: 4, rows: 2 }],
+    [WebGL2RenderingContext.FLOAT_MAT4x3, { columns: 4, rows: 3 }],
+]);
+
+export function uniformMatrixDimensions(type: GLenum): { columns: number, rows: number } | null {
+    return glMatrixDimensions.get(type) || null;
+}
+
 export class ProgramUniformBuffer {
     public name: string;
     public size: number;
@@ -75,27 +98,40 @@ export class ProgramUniformBuffer {
     public offset: number;
     public byteLength: number;
     public alignedByteLength: number;
+    public elementByteLength: number;
+    public elementStride: number;
     public internal: boolean;
     public sourceName?: string;
     public dataView: DataView;
     public float32View: Float32Array;
     public int32View: Int32Array;
     public uint32View: Uint32Array;
+    public writeFloat32View: Float32Array | null = null;
+    public writeInt32View: Int32Array | null = null;
+    public writeUint32View: Uint32Array | null = null;
     public wordOffset: number;
+    public arrayStrideWords: number = 0;
+    public remainingArrayElements: number = 1;
+    public isArray: boolean;
     public ownerToken: object;
     public program: HydProgram;
     public linkGeneration: number;
-    public useToken: number = 0;
 
-    constructor(name: string, type: GLenum, size: GLsizei, internal: boolean = false, sourceName?: string) {
+    constructor(name: string, type: GLenum, size: GLsizei, internal: boolean = false, sourceName?: string, isArray: boolean = false) {
         this.name = name;
         this.size = size;
         this.webgl_type = type;
         this.internal = internal;
         this.sourceName = sourceName;
-        // TODO: 考虑size
-        this.byteLength = glSizeToBytes.get(type);
-        this.alignedByteLength = glSizeToAlignedBytes.get(type);
+        this.isArray = isArray;
+        const matrix = uniformMatrixDimensions(type);
+        this.elementByteLength = matrix ? matrix.columns * 16 : glSizeToBytes.get(type);
+        const elementAlignment = matrix ? 16 : glSizeToAlignedBytes.get(type);
+        this.elementStride = isArray
+            ? Math.ceil(this.elementByteLength / Math.max(16, elementAlignment)) * Math.max(16, elementAlignment)
+            : this.elementByteLength;
+        this.byteLength = isArray ? this.elementStride * size : this.elementByteLength;
+        this.alignedByteLength = isArray ? Math.max(16, elementAlignment) : elementAlignment;
     }
 }
 
@@ -114,7 +150,13 @@ export class ProgramUniformSampler {
     ownerToken: object;
     program: HydProgram;
     linkGeneration: number;
-    useToken: number = 0;
+    activeForUniformUpdates: boolean = false;
+    storage?: ProgramUniformSampler;
+    arrayName?: string;
+    arrayIndex?: number;
+    arrayElements?: ProgramUniformSampler[];
+    remainingArrayElements: number = 1;
+    isArray: boolean;
     constructor(
         name: string,
         webgl_type: GLenum,
@@ -122,9 +164,13 @@ export class ProgramUniformSampler {
         sampleType: GPUTextureSampleType = "float",
         samplerBindingType: GPUSamplerBindingType = "filtering",
         sourceName?: string,
+        size: number = 1,
+        arrayName?: string,
+        arrayIndex?: number,
+        isArray: boolean = false,
     ) {
         this.name = name;
-        this.size = 1;
+        this.size = size;
         this.webgl_type = webgl_type;
         this.textureUnit = 0;
 
@@ -132,12 +178,17 @@ export class ProgramUniformSampler {
         this.samplerBindingType = samplerBindingType;
         this.viewDimension = viewDimension;
         this.sourceName = sourceName;
+        this.arrayName = arrayName;
+        this.arrayIndex = arrayIndex;
+        this.isArray = isArray;
     }
 }
 
 interface SamplerOriginVariant {
-    module: GPUShaderModule;
-    wgsl: string;
+    vertexModule: GPUShaderModule;
+    fragmentModule: GPUShaderModule;
+    vertexWgsl: string;
+    fragmentWgsl: string;
 }
 
 function cloneShaderInfo(info: ReturnType<typeof MergeShaderInfo>): ReturnType<typeof MergeShaderInfo> {
@@ -255,11 +306,11 @@ function insertSamplerOriginFlipHelper(wgsl: string): string {
         return wgsl;
     }
     const helper = `fn _hyd_samplerOriginCoordFlip(texCoord: vec2<f32>) -> vec2<f32> {\n    return vec2<f32>(texCoord.x, 1.0 - texCoord.y);\n}\n\n`;
-    const fragmentIndex = wgsl.indexOf("@fragment");
-    if (fragmentIndex < 0) {
-        return helper + wgsl;
-    }
-    return wgsl.slice(0, fragmentIndex) + helper + wgsl.slice(fragmentIndex);
+    const directivePrefix = wgsl.match(
+        /^\s*(?:(?:(?:enable|requires)\s+[^;]+;|diagnostic\s*\([^;]+\)\s*;)\s*)+/,
+    );
+    const insertion = directivePrefix ? directivePrefix[0].length : 0;
+    return wgsl.slice(0, insertion) + helper + wgsl.slice(insertion);
 }
 
 function hasSamplerOriginCall(wgsl: string): boolean {
@@ -305,9 +356,11 @@ export function specializeSamplerOriginWgsl(wgsl: string, samplerOriginFlips: Ma
 
 export interface ProgramAttribute {
     name: string;
+    shaderName: string;
     size: number;
     type: GLenum;
     location: number;
+    locationSpan: number;
 }
 
 export class HydProgram implements HydHashable {
@@ -319,7 +372,7 @@ export class HydProgram implements HydHashable {
         if (!this.samplerOriginVariantKey) {
             return this._hash;
         }
-        return `${this._hash}origin:${this.samplerOriginVariantKey}:${this.fragmentModule?.label || ""}|`;
+        return `${this._hash}origin:${this.samplerOriginVariantKey}:${this.vertexModule?.label || ""}:${this.fragmentModule?.label || ""}|`;
     }
     private vertexShader: HydShader;
     private fragmentShader: HydShader;
@@ -327,6 +380,7 @@ export class HydProgram implements HydHashable {
     private readonly shaderTranslator: ShaderTranslator;
     public vertexModule: GPUShaderModule;
     public fragmentModule: GPUShaderModule;
+    private vertexWgsl: string = "";
     private fragmentWgsl: string = "";
     private readonly samplerOriginVariants: Map<string, SamplerOriginVariant> = new Map();
     private samplerOriginVariantKey: string = "";
@@ -343,7 +397,13 @@ export class HydProgram implements HydHashable {
     public hydAttributes: Array<ProgramAttribute> = [];
     public hydAttributeLocations: Set<number> = new Set();
     public hydUniforms: Array<ProgramUniformBuffer> = [];
+    public fragCoordHeightUniform: ProgramUniformBuffer = null;
+    public fragCoordHeightValue: number = Number.NaN;
+    public depthRangeUniforms: ProgramUniformBuffer[] = [];
+    public depthRangeValue: [number, number] = [Number.NaN, Number.NaN];
     public hydSamplers: Array<ProgramUniformSampler> = [];
+    public uniformBufferLocations: Array<ProgramUniformBuffer> = [];
+    public uniformSamplerLocations: Array<ProgramUniformSampler> = [];
     public hydSampler2D: Array<ProgramUniformSampler> = [];
     public originUniformStateVersion: number = -1;
     public originVariantStateVersion: number = -1;
@@ -500,8 +560,30 @@ export class HydProgram implements HydHashable {
         const runtimeShaderInfo = this.staticSamplerOriginVariants ? baseShaderInfo : dynamicShaderInfo;
         const code = ShaderInfo2String(runtimeShaderInfo);
         const dynamicCode = this.staticSamplerOriginVariants ? ShaderInfo2String(dynamicShaderInfo) : code;
+        this.vertexWgsl = composeShaderModuleWgsl(code, this.vertexShader.shader_info.wgsl);
+        this.fragmentWgsl = composeShaderModuleWgsl(code, this.fragmentShader.shader_info.wgsl);
+        let vs = this.vertexWgsl;
+        let fs = this.fragmentWgsl;
+        if (this.staticSamplerOriginVariants) {
+            const defaultFlips = new Map<string, boolean>();
+            for (const sampler of runtimeShaderInfo.samplers) {
+                if (sampler.glsl_type === "sampler2D") {
+                    defaultFlips.set(sampler.name, false);
+                }
+            }
+            vs = specializeSamplerOriginWgsl(this.vertexWgsl, defaultFlips);
+            fs = specializeSamplerOriginWgsl(this.fragmentWgsl, defaultFlips);
+            if (vs.includes("_hyd_samplerFlipY_") || fs.includes("_hyd_samplerFlipY_")) {
+                this.staticSamplerOriginVariants = false;
+                this.vertexWgsl = composeShaderModuleWgsl(dynamicCode, this.vertexShader.shader_info.wgsl);
+                this.fragmentWgsl = composeShaderModuleWgsl(dynamicCode, this.fragmentShader.shader_info.wgsl);
+                vs = this.vertexWgsl;
+                fs = this.fragmentWgsl;
+            }
+        }
+        this.samplerOriginVariants.clear();
+        this.samplerOriginVariantKey = "";
         if (this.vertexShader) {
-            const vs = code + this.vertexShader.shader_info.wgsl;
             console.debug('[HYD] linkProgram vertex:\n\n', vs);
             if (this.vertexShader.shader_info.shader_capture) {
                 emitShaderCapture({
@@ -515,24 +597,6 @@ export class HydProgram implements HydHashable {
             this._hash += this.vertexModule.label + '|';
         }
         if (this.fragmentShader) {
-            this.fragmentWgsl = code + this.fragmentShader.shader_info.wgsl;
-            let fs = this.fragmentWgsl;
-            if (this.staticSamplerOriginVariants) {
-                const defaultFlips = new Map<string, boolean>();
-                for (const sampler of runtimeShaderInfo.samplers) {
-                    if (sampler.glsl_type === "sampler2D") {
-                        defaultFlips.set(sampler.name, false);
-                    }
-                }
-                fs = specializeSamplerOriginWgsl(this.fragmentWgsl, defaultFlips);
-                if (fs.includes("_hyd_samplerFlipY_")) {
-                    this.staticSamplerOriginVariants = false;
-                    fs = dynamicCode + this.fragmentShader.shader_info.wgsl;
-                    this.fragmentWgsl = fs;
-                }
-            }
-            this.samplerOriginVariants.clear();
-            this.samplerOriginVariantKey = "";
             console.debug('[HYD] linkProgram fragment:\n\n', fs);
             if (this.fragmentShader.shader_info.shader_capture) {
                 emitShaderCapture({
@@ -548,13 +612,27 @@ export class HydProgram implements HydHashable {
         const aus = ShaderInfo2HydAus(this.staticSamplerOriginVariants ? runtimeShaderInfo : dynamicShaderInfo);
         this.hydAttributes = aus.attributes;
         for (const attribute of this.hydAttributes) {
-            const location = translatedProgram.attributeLocations?.get(attribute.name);
+            const location = translatedProgram.attributeLocations?.get(attribute.shaderName);
             if (location !== undefined) {
                 attribute.location = location;
             }
         }
-        this.hydAttributeLocations = new Set(this.hydAttributes.map((attribute) => attribute.location));
+        this.hydAttributeLocations = new Set();
+        for (const attribute of this.hydAttributes) {
+            for (let offset = 0; offset < attribute.locationSpan; offset++) {
+                this.hydAttributeLocations.add(attribute.location + offset);
+            }
+        }
         this.hydUniforms = aus.uniforms;
+        this.fragCoordHeightUniform = this.hydUniforms.find((uniform) =>
+            uniform.name === FRAG_COORD_HEIGHT_UNIFORM_NAME) || null;
+        this.fragCoordHeightValue = Number.NaN;
+        this.depthRangeUniforms = [
+            DEPTH_RANGE_NEAR_UNIFORM_NAME,
+            DEPTH_RANGE_FAR_UNIFORM_NAME,
+            DEPTH_RANGE_DIFF_UNIFORM_NAME,
+        ].map((name) => this.hydUniforms.find((uniform) => uniform.name === name) || null);
+        this.depthRangeValue = [Number.NaN, Number.NaN];
         this.hydSamplers = aus.samplers;
         for (const uniform of this.hydUniforms) {
             uniform.ownerToken = this.ownerToken;
@@ -618,7 +696,8 @@ export class HydProgram implements HydHashable {
     }
 
     public applySamplerOriginVariant(samplerOriginFlips: Map<string, boolean>) {
-        if (!this.fragmentShader || this.fragmentWgsl.length === 0 || samplerOriginFlips.size === 0) {
+        if (!this.vertexShader || !this.fragmentShader || this.vertexWgsl.length === 0 ||
+            this.fragmentWgsl.length === 0 || samplerOriginFlips.size === 0) {
             this.samplerOriginVariantKey = "";
             return;
         }
@@ -645,12 +724,31 @@ export class HydProgram implements HydHashable {
         }
         let variant = this.samplerOriginVariants.get(key);
         if (!variant) {
-            const wgsl = specializeSamplerOriginWgsl(this.fragmentWgsl, samplerOriginFlips);
+            const vertexWgsl = specializeSamplerOriginWgsl(this.vertexWgsl, samplerOriginFlips);
+            const fragmentWgsl = specializeSamplerOriginWgsl(this.fragmentWgsl, samplerOriginFlips);
             variant = {
-                wgsl,
-                module: this.device.createShaderModule({ code: wgsl, label: fastHashCode(wgsl).toString() }),
+                vertexWgsl,
+                fragmentWgsl,
+                vertexModule: this.device.createShaderModule({
+                    code: vertexWgsl,
+                    label: fastHashCode(vertexWgsl).toString(),
+                }),
+                fragmentModule: this.device.createShaderModule({
+                    code: fragmentWgsl,
+                    label: fastHashCode(fragmentWgsl).toString(),
+                }),
             };
             this.samplerOriginVariants.set(key, variant);
+            if (this.vertexShader.shader_info.shader_capture) {
+                emitShaderCapture({
+                    ...this.vertexShader.shader_info.shader_capture,
+                    kind: "shader-final",
+                    source: "runtime-origin-variant",
+                    programId: this._hash,
+                    shaderId: `${this.vertexShader.shader_info.shader_capture.shaderId}:origin:${key}`,
+                    finalWgsl: sourceCapture(vertexWgsl),
+                });
+            }
             if (this.fragmentShader.shader_info.shader_capture) {
                 emitShaderCapture({
                     ...this.fragmentShader.shader_info.shader_capture,
@@ -658,11 +756,12 @@ export class HydProgram implements HydHashable {
                     source: "runtime-origin-variant",
                     programId: this._hash,
                     shaderId: `${this.fragmentShader.shader_info.shader_capture.shaderId}:origin:${key}`,
-                    finalWgsl: sourceCapture(wgsl),
+                    finalWgsl: sourceCapture(fragmentWgsl),
                 });
             }
         }
-        this.fragmentModule = variant.module;
+        this.vertexModule = variant.vertexModule;
+        this.fragmentModule = variant.fragmentModule;
         this.samplerOriginVariantKey = key;
     }
 }

@@ -231,10 +231,101 @@ __webpack_require__.r(__webpack_exports__);
 // EXPORTS
 __webpack_require__.d(__webpack_exports__, {
   beginFrame: () => (/* reexport */ beginFrame),
+  createHydContext: () => (/* binding */ createHydContext),
+  createHydRuntime: () => (/* binding */ createHydRuntime),
   endFrame: () => (/* reexport */ endFrame),
+  gl2gpuCreateContext: () => (/* binding */ createHydContext),
+  gl2gpuCreateRuntime: () => (/* binding */ createHydRuntime),
   gl2gpuGetContext: () => (/* binding */ hydGetContext),
   hydGetContext: () => (/* binding */ hydGetContext)
 });
+
+;// ./src/types.ts
+class HydVertexArrayAttribute {
+    __hash__ = '';
+    __layoutHash__ = '';
+    enabled = false;
+    size;
+    type;
+    int;
+    normalized = false;
+    stride = 0;
+    webglStride = 0;
+    offset = 0;
+    divisor = 0;
+    buffer;
+    shaderLocation;
+    format;
+    updateHash() {
+        const bufferHash = this.buffer ? this.buffer.hash : '-_-';
+        const tmp = `${this.size}_${this.type}_${this.int}_${this.normalized}_${this.stride}_${this.offset}_${this.divisor}`;
+        this.__layoutHash__ = this.enabled ? tmp : './.';
+        this.__hash__ = `${this.__layoutHash__}@${bufferHash}`;
+    }
+    get hash() {
+        return this.__hash__;
+    }
+    get layoutHash() {
+        return this.__layoutHash__;
+    }
+}
+const nativeFunctionHasInstance = Function.prototype[Symbol.hasInstance];
+const HYD_WEBGL_OBJECT_BRAND = Symbol.for("gl2gpu.webglObjectBrand");
+const WEBGL_OBJECT_TAGS = {
+    "active-info": "WebGLActiveInfo",
+    buffer: "WebGLBuffer",
+    framebuffer: "WebGLFramebuffer",
+    program: "WebGLProgram",
+    renderbuffer: "WebGLRenderbuffer",
+    shader: "WebGLShader",
+    "shader-precision-format": "WebGLShaderPrecisionFormat",
+    texture: "WebGLTexture",
+    "uniform-location": "WebGLUniformLocation",
+    "vertex-array": "WebGLVertexArrayObject",
+};
+function brandHydWebGlObject(instance, brand) {
+    Object.defineProperty(instance, HYD_WEBGL_OBJECT_BRAND, {
+        configurable: false,
+        enumerable: false,
+        value: brand,
+    });
+    Object.defineProperty(instance, Symbol.toStringTag, {
+        configurable: true,
+        enumerable: false,
+        value: WEBGL_OBJECT_TAGS[brand],
+    });
+    return instance;
+}
+function installHydHasInstance(constructor, predicate) {
+    try {
+        Object.defineProperty(constructor, Symbol.hasInstance, {
+            configurable: true,
+            value(instance) {
+                return predicate(instance) || nativeFunctionHasInstance.call(constructor, instance);
+            },
+        });
+    }
+    catch (_) {
+    }
+}
+function installHydObjectHasInstance(constructorName, brand) {
+    const constructor = globalThis[constructorName];
+    if (constructor) {
+        installHydHasInstance(constructor, (instance) => instance?.[HYD_WEBGL_OBJECT_BRAND] === brand);
+    }
+}
+installHydObjectHasInstance("WebGLActiveInfo", "active-info");
+installHydObjectHasInstance("WebGLBuffer", "buffer");
+installHydObjectHasInstance("WebGLFramebuffer", "framebuffer");
+installHydObjectHasInstance("WebGLProgram", "program");
+installHydObjectHasInstance("WebGLRenderbuffer", "renderbuffer");
+installHydObjectHasInstance("WebGLShader", "shader");
+installHydObjectHasInstance("WebGLShaderPrecisionFormat", "shader-precision-format");
+installHydObjectHasInstance("WebGLTexture", "texture");
+installHydObjectHasInstance("WebGLUniformLocation", "uniform-location");
+installHydObjectHasInstance("WebGLVertexArrayObject", "vertex-array");
+installHydHasInstance(WebGLRenderingContext, (instance) => instance?.hydContextType === "webgl" || instance?.hydContextType === "experimental-webgl");
+installHydHasInstance(WebGL2RenderingContext, (instance) => instance?.hydContextType === "webgl2");
 
 ;// ./src/components/hydRenderPassCache.ts
 class GPURenderBundleTransition {
@@ -245,9 +336,16 @@ class GPURenderBundleTransition {
     father;
     onceHash = null;
     onceNext;
-    bindGroupOffset = null;
+    onceBindGroup = null;
+    onceBindGroupOffset = null;
+    onceBindGroupNext = null;
     onceNumericPrefix = null;
     onceNumericHash = NaN;
+    onceNumericNext = null;
+    onceIndexBuffer = null;
+    onceIndexFormat = null;
+    onceIndexNext = null;
+    indexBufferTransitions = new WeakMap();
     constructor(opName, opArgs, father) {
         this.opName = opName;
         this.opArgs = opArgs;
@@ -267,27 +365,45 @@ class GPURenderBundleTransition {
         return this.onceNext = transition;
     }
     gotoBindGroup(bindGroup, do0) {
-        if (this.bindGroupOffset === do0 && this.onceHash == bindGroup) {
-            return this.onceNext;
+        if (this.onceBindGroupOffset === do0 && this.onceBindGroup === bindGroup) {
+            return this.onceBindGroupNext;
         }
-        this.onceHash = bindGroup;
-        this.bindGroupOffset = do0;
+        this.onceBindGroup = bindGroup;
+        this.onceBindGroupOffset = do0;
         const hash = 'b0' + bindGroup.label + (do0 === null ? 'none' : do0);
         const transition = this.jumpTable.get(hash);
         if (!transition) {
             const newTransition = new GPURenderBundleTransition('setBindGroup', [0, bindGroup, do0], this);
             this.jumpTable.set(hash, newTransition);
-            return this.onceNext = newTransition;
+            return this.onceBindGroupNext = newTransition;
         }
-        return this.onceNext = transition;
+        return this.onceBindGroupNext = transition;
     }
     gotoNumeric(prefix, numericHash, opName, ...opArgs) {
         if (this.onceNumericPrefix === prefix && this.onceNumericHash === numericHash) {
-            return this.onceNext;
+            return this.onceNumericNext;
         }
         this.onceNumericPrefix = prefix;
         this.onceNumericHash = numericHash;
-        return this.goto(prefix + numericHash, opName, ...opArgs);
+        return this.onceNumericNext = this.goto(prefix + numericHash, opName, ...opArgs);
+    }
+    gotoIndexBuffer(buffer, format) {
+        if (this.onceIndexBuffer === buffer && this.onceIndexFormat === format) {
+            return this.onceIndexNext;
+        }
+        this.onceIndexBuffer = buffer;
+        this.onceIndexFormat = format;
+        let transitions = this.indexBufferTransitions.get(buffer);
+        if (!transitions) {
+            transitions = {};
+            this.indexBufferTransitions.set(buffer, transitions);
+        }
+        let transition = transitions[format];
+        if (!transition) {
+            transition = new GPURenderBundleTransition('setIndexBuffer', [buffer, format], this);
+            transitions[format] = transition;
+        }
+        return this.onceIndexNext = transition;
     }
 }
 class HydRenderPassEncoder {
@@ -314,8 +430,8 @@ class HydRenderPassEncoder {
     setVertexBuffer(opHash, slot, buffer, offset) {
         this.bundleCache = this.bundleCache.goto(opHash, 'setVertexBuffer', slot, buffer, offset);
     }
-    setIndexBuffer(opHash, buffer, format) {
-        this.bundleCache = this.bundleCache.goto(opHash, 'setIndexBuffer', buffer, format);
+    setIndexBuffer(buffer, format) {
+        this.bundleCache = this.bundleCache.gotoIndexBuffer(buffer, format);
     }
     draw(vertexCount, instanceCount, firstVertex, firstInstance) {
         this.bundleCache = this.bundleCache.gotoNumeric('d', vertexCount * 839 ^ instanceCount * 853 ^ firstVertex * 857 ^ firstInstance * 859, 'draw', vertexCount, instanceCount, firstVertex, firstInstance);
@@ -365,7 +481,8 @@ class HydRenderPassCache {
     renderPassBindGroupCacheKey = null;
     renderPassVertexBufferCacheKeys = [];
     renderPassVertexBufferCacheKey = null;
-    renderPassIndexBufferCacheKey = null;
+    renderPassIndexBuffer = null;
+    renderPassIndexFormat = null;
     viewPortInfo = [0, 0, 0, 0, 0, 0];
     scissorInfo = [0, 0, 0, 0];
     stencilReferenceInfo = 0;
@@ -385,6 +502,10 @@ class HydRenderPassCache {
             this._commandEncoder = null;
         }
     }
+    CeDiscardAndReset() {
+        this._commandEncoder = null;
+        this.resetCache();
+    }
     get commandEncoder() {
         return this._commandEncoder = this._commandEncoder || this.device.createCommandEncoder({
             label: `commandEncoder-${this.__commandEncoderCount++}`,
@@ -399,7 +520,8 @@ class HydRenderPassCache {
         this.renderPassBindGroupCacheKey = null;
         this.renderPassVertexBufferCacheKey = null;
         this.renderPassVertexBufferCacheKeys = [];
-        this.renderPassIndexBufferCacheKey = null;
+        this.renderPassIndexBuffer = null;
+        this.renderPassIndexFormat = null;
         this.viewPortInfo = [0, 0, 0, 0, 0, 0];
         this.scissorInfo = [0, 0, 0, 0];
         this.stencilReferenceInfo = 0;
@@ -473,9 +595,10 @@ class HydRenderPassCache {
         }
     }
     RpSetIndexBuffer(indexBuffer, indexFormat) {
-        if (this.renderPassIndexBufferCacheKey !== indexBuffer.label) {
-            this.renderPassIndexBufferCacheKey = indexBuffer.label;
-            this.renderBundleGenerator.setIndexBuffer(indexBuffer.label, indexBuffer, indexFormat);
+        if (this.renderPassIndexBuffer !== indexBuffer || this.renderPassIndexFormat !== indexFormat) {
+            this.renderPassIndexBuffer = indexBuffer;
+            this.renderPassIndexFormat = indexFormat;
+            this.renderBundleGenerator.setIndexBuffer(indexBuffer, indexFormat);
         }
     }
     RpSetViewportValues(x, y, width, height, minDepth, maxDepth) {
@@ -514,77 +637,175 @@ class HydRenderPassCache {
     }
 }
 
-;// ./src/components/hydFramebuffer.ts
-class FramebufferAttributes {
-    attachmentPoint;
-    level;
-    face;
-    layer;
-    attachment;
-    objectType;
-    constructor(attachmentPoint, level, face, attachment, layer, objectType = WebGL2RenderingContext.TEXTURE) {
-        this.attachmentPoint = attachmentPoint;
-        this.level = level;
-        this.face = face;
-        this.layer = layer;
-        this.attachment = attachment;
-        this.objectType = objectType;
-    }
-    get hash() {
-        return `${this.attachmentPoint}-${this.level}-${this.face}-${this.layer}-${this.objectType}-${this.attachment.hash}`;
-    }
-    get view() {
-        return this.attachment.getFramebufferView(this.face, this.level, this.layer);
-    }
-    get format() {
-        return this.attachment.format;
-    }
-    get width() {
-        return this.attachment.width;
-    }
-    get height() {
-        return this.attachment.height;
-    }
-}
-class HydFramebuffer {
-    ownerToken;
-    initialized = false;
-    deleted = false;
-    attachments = new Map();
-    drawBuffers = [
-        WebGL2RenderingContext.COLOR_ATTACHMENT0
-    ];
-    readBuffer = WebGL2RenderingContext.COLOR_ATTACHMENT0;
-    _hash = null;
-    constructor(ownerToken) {
-        this.ownerToken = ownerToken;
-    }
-    get hash() {
-        if (!this._hash) {
-            this._hash = '';
-            const sortedKeys = Array.from(this.attachments.keys()).sort();
-            for (const key of sortedKeys) {
-                const value = this.attachments.get(key);
-                this._hash += key.toString() + '-' + value.hash.toString() + '|';
-            }
-            for (const drawBuffer of this.drawBuffers) {
-                this._hash += drawBuffer.toString() + '|';
-            }
-            this._hash += this.readBuffer.toString();
-        }
-        return this._hash;
-    }
-    resetHash() {
-        this._hash = null;
-    }
-}
-
 ;// ./src/components/hydTexture.ts
+const GL_SRGB_EXT = 0x8C40;
+const GL_SRGB_ALPHA_EXT = 0x8C42;
+const NATIVE_CANVAS_GET_CONTEXT = typeof HTMLCanvasElement === "undefined"
+    ? null
+    : HTMLCanvasElement.prototype.getContext;
+let externalPixelConverter;
+function createExternalPixelConverter() {
+    if (!NATIVE_CANVAS_GET_CONTEXT || typeof document === "undefined")
+        return null;
+    const canvas = document.createElement("canvas");
+    const gl = (NATIVE_CANVAS_GET_CONTEXT.call(canvas, "webgl", {
+        alpha: true,
+        antialias: false,
+        depth: false,
+        stencil: false,
+        premultipliedAlpha: false,
+        preserveDrawingBuffer: true,
+    }) || NATIVE_CANVAS_GET_CONTEXT.call(canvas, "experimental-webgl", {
+        alpha: true,
+        antialias: false,
+        depth: false,
+        stencil: false,
+        premultipliedAlpha: false,
+        preserveDrawingBuffer: true,
+    }));
+    if (!gl)
+        return null;
+    const compile = (type, source) => {
+        const shader = gl.createShader(type);
+        if (!shader)
+            return null;
+        gl.shaderSource(shader, source);
+        gl.compileShader(shader);
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            gl.deleteShader(shader);
+            return null;
+        }
+        return shader;
+    };
+    const vertex = compile(gl.VERTEX_SHADER, `
+attribute vec2 a_position;
+varying vec2 v_texCoord;
+void main() {
+  gl_Position = vec4(a_position, 0.0, 1.0);
+  v_texCoord = a_position * 0.5 + 0.5;
+}`);
+    const fragment = compile(gl.FRAGMENT_SHADER, `
+precision mediump float;
+uniform sampler2D u_texture;
+varying vec2 v_texCoord;
+void main() {
+  gl_FragColor = texture2D(u_texture, v_texCoord);
+}`);
+    if (!vertex || !fragment)
+        return null;
+    const program = gl.createProgram();
+    if (!program)
+        return null;
+    gl.attachShader(program, vertex);
+    gl.attachShader(program, fragment);
+    gl.linkProgram(program);
+    gl.deleteShader(vertex);
+    gl.deleteShader(fragment);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS))
+        return null;
+    const texture = gl.createTexture();
+    const vertexBuffer = gl.createBuffer();
+    const position = gl.getAttribLocation(program, "a_position");
+    if (!texture || !vertexBuffer || position < 0)
+        return null;
+    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]), gl.STATIC_DRAW);
+    gl.useProgram(program);
+    gl.uniform1i(gl.getUniformLocation(program, "u_texture"), 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return { canvas, gl, texture, program, position, vertexBuffer };
+}
+function convertExternalTextureSource(source, width, height, format, type, unpack) {
+    if (width <= 0 || height <= 0)
+        return new Uint8Array(0);
+    if (externalPixelConverter?.gl.isContextLost()) {
+        externalPixelConverter = undefined;
+    }
+    if (externalPixelConverter === undefined) {
+        externalPixelConverter = createExternalPixelConverter();
+    }
+    const converter = externalPixelConverter;
+    if (!converter)
+        return null;
+    const { canvas, gl, texture, program, position, vertexBuffer } = converter;
+    try {
+        if (canvas.width !== width || canvas.height !== height) {
+            canvas.width = width;
+            canvas.height = height;
+        }
+        gl.viewport(0, 0, width, height);
+        gl.useProgram(program);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, unpack.alignment);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, unpack.flipY);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, unpack.premultiplyAlpha);
+        gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, unpack.colorspaceConversion);
+        if ("unpackColorSpace" in gl) {
+            gl.unpackColorSpace = unpack.unpackColorSpace;
+        }
+        const conversionFormat = format === GL_SRGB_EXT
+            ? gl.RGB
+            : format === GL_SRGB_ALPHA_EXT
+                ? gl.RGBA
+                : format;
+        for (let pending = gl.getError(), attempts = 0; pending !== gl.NO_ERROR && pending !== gl.CONTEXT_LOST_WEBGL && attempts < 8; pending = gl.getError(), attempts++) {
+        }
+        gl.texImage2D(gl.TEXTURE_2D, 0, conversionFormat, conversionFormat, type, source);
+        if (gl.getError() !== gl.NO_ERROR)
+            return null;
+        gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+        gl.enableVertexAttribArray(position);
+        gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        const pixels = new Uint8Array(width * height * 4);
+        gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        const error = gl.getError();
+        if (globalThis.__HYD_DEBUG_TEXTURE_UPLOAD) {
+            const sample = (u, v) => {
+                const x = Math.min(width - 1, Math.max(0, Math.floor(width * u)));
+                const y = Math.min(height - 1, Math.max(0, Math.floor(height * v)));
+                const offset = (y * width + x) * 4;
+                return Array.from(pixels.subarray(offset, offset + 4));
+            };
+            console.debug("[HYD] external upload conversion", JSON.stringify({
+                source: source?.constructor?.name || typeof source,
+                width,
+                height,
+                flipY: unpack.flipY,
+                error,
+                q25: sample(0.75, 0.25),
+                q75: sample(0.75, 0.75),
+            }));
+        }
+        return error === gl.NO_ERROR ? pixels : null;
+    }
+    catch (error) {
+        if (error?.name === "SecurityError")
+            throw error;
+        return null;
+    }
+}
+function isExternalTextureSource(data) {
+    return (typeof HTMLImageElement !== "undefined" && data instanceof HTMLImageElement) ||
+        (typeof ImageBitmap !== "undefined" && data instanceof ImageBitmap) ||
+        (typeof ImageData !== "undefined" && data instanceof ImageData) ||
+        (typeof HTMLCanvasElement !== "undefined" && data instanceof HTMLCanvasElement) ||
+        (typeof HTMLVideoElement !== "undefined" && data instanceof HTMLVideoElement) ||
+        (typeof OffscreenCanvas !== "undefined" && data instanceof OffscreenCanvas) ||
+        (typeof VideoFrame !== "undefined" && data instanceof VideoFrame);
+}
 const DEFAULT_PIXEL_UNPACK_STATE = {
     flipY: false,
     alignment: 4,
     premultiplyAlpha: false,
     colorspaceConversion: WebGL2RenderingContext.BROWSER_DEFAULT_WEBGL,
+    unpackColorSpace: "srgb",
 };
 const targetToOrigin = new Map([
     [WebGL2RenderingContext.TEXTURE_2D, { x: 0, y: 0, z: 0 }],
@@ -604,6 +825,41 @@ const targetViewDimensionMap = new Map([
     [WebGL2RenderingContext.TEXTURE_CUBE_MAP, "cube"],
     [WebGL2RenderingContext.TEXTURE_2D_ARRAY, "2d-array"],
 ]);
+const CUBE_FACE_TARGETS = [
+    WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X,
+    WebGL2RenderingContext.TEXTURE_CUBE_MAP_NEGATIVE_X,
+    WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_Y,
+    WebGL2RenderingContext.TEXTURE_CUBE_MAP_NEGATIVE_Y,
+    WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_Z,
+    WebGL2RenderingContext.TEXTURE_CUBE_MAP_NEGATIVE_Z,
+];
+function isWebGlColorRenderableInternalFormat(internalFormat) {
+    switch (internalFormat) {
+        case GL_SRGB_ALPHA_EXT:
+        case WebGL2RenderingContext.RGB:
+        case WebGL2RenderingContext.RGBA:
+        case WebGL2RenderingContext.RGB565:
+        case WebGL2RenderingContext.RGBA4:
+        case WebGL2RenderingContext.RGB5_A1:
+        case WebGL2RenderingContext.R8:
+        case WebGL2RenderingContext.RG8:
+        case WebGL2RenderingContext.RGB8:
+        case WebGL2RenderingContext.RGBA8:
+        case WebGL2RenderingContext.SRGB8_ALPHA8:
+        case WebGL2RenderingContext.RGBA8UI:
+        case WebGL2RenderingContext.RGBA16UI:
+        case WebGL2RenderingContext.RGBA32UI:
+        case WebGL2RenderingContext.RGBA32I:
+        case WebGL2RenderingContext.RGBA32F:
+        case WebGL2RenderingContext.RG32UI:
+        case WebGL2RenderingContext.R32UI:
+        case WebGL2RenderingContext.RG32F:
+        case WebGL2RenderingContext.R32F:
+            return true;
+        default:
+            return false;
+    }
+}
 const parameterToString = new Map([
     [WebGL2RenderingContext.LINEAR, "linear"],
     [WebGL2RenderingContext.NEAREST, "nearest"],
@@ -623,6 +879,13 @@ const pnameToString = new Map([
     [WebGL2RenderingContext.TEXTURE_WRAP_R, "wrapR"],
 ]);
 function textureFormatLookup(internalFormat, format, type) {
+    if (((internalFormat === GL_SRGB_EXT && format === GL_SRGB_EXT) ||
+        (internalFormat === GL_SRGB_ALPHA_EXT && format === GL_SRGB_ALPHA_EXT) ||
+        (internalFormat === WebGL2RenderingContext.SRGB8 && format === WebGL2RenderingContext.RGB) ||
+        (internalFormat === WebGL2RenderingContext.SRGB8_ALPHA8 && format === WebGL2RenderingContext.RGBA)) &&
+        type === WebGL2RenderingContext.UNSIGNED_BYTE) {
+        return "rgba8unorm-srgb";
+    }
     if ((internalFormat === WebGL2RenderingContext.RGBA || internalFormat === WebGL2RenderingContext.RGBA8) && format === WebGL2RenderingContext.RGBA && type === WebGL2RenderingContext.UNSIGNED_BYTE) {
         return "rgba8unorm";
     }
@@ -657,7 +920,7 @@ function textureFormatLookup(internalFormat, format, type) {
         return "rgba32float";
     }
     if (internalFormat === WebGL2RenderingContext.LUMINANCE && format === WebGL2RenderingContext.LUMINANCE && type === WebGL2RenderingContext.UNSIGNED_BYTE) {
-        return "r8unorm";
+        return "rgba8unorm";
     }
     if (internalFormat === WebGL2RenderingContext.DEPTH_COMPONENT32F && format === WebGL2RenderingContext.DEPTH_COMPONENT && type === WebGL2RenderingContext.FLOAT) {
         return "depth32float";
@@ -672,6 +935,15 @@ function textureFormatLookup(internalFormat, format, type) {
     if (internalFormat === WebGL2RenderingContext.RGB && format === WebGL2RenderingContext.RGB && type === WebGL2RenderingContext.UNSIGNED_BYTE) {
         return "rgba8unorm";
     }
+    if (internalFormat === WebGL2RenderingContext.RGB && format === WebGL2RenderingContext.RGB &&
+        type === WebGL2RenderingContext.UNSIGNED_SHORT_5_6_5) {
+        return "rgba8unorm";
+    }
+    if (internalFormat === WebGL2RenderingContext.RGBA && format === WebGL2RenderingContext.RGBA &&
+        (type === WebGL2RenderingContext.UNSIGNED_SHORT_4_4_4_4 ||
+            type === WebGL2RenderingContext.UNSIGNED_SHORT_5_5_5_1)) {
+        return "rgba8unorm";
+    }
     if ((internalFormat === WebGL2RenderingContext.ALPHA && format === WebGL2RenderingContext.ALPHA && type === WebGL2RenderingContext.UNSIGNED_BYTE) ||
         (internalFormat === WebGL2RenderingContext.LUMINANCE_ALPHA && format === WebGL2RenderingContext.LUMINANCE_ALPHA && type === WebGL2RenderingContext.UNSIGNED_BYTE)) {
         return "rgba8unorm";
@@ -681,15 +953,31 @@ function textureFormatLookup(internalFormat, format, type) {
 function alignTo(value, alignment) {
     return Math.ceil(value / alignment) * alignment;
 }
+function packedPixelLayout(width, height, bytesPerPixel, alignment) {
+    const rowBytes = width * bytesPerPixel;
+    const rowStride = alignTo(rowBytes, alignment);
+    return {
+        rowBytes,
+        rowStride,
+        requiredBytes: width === 0 || height === 0 ? 0 : rowStride * (height - 1) + rowBytes,
+    };
+}
 function byteView(data) {
     return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
 }
 function textureUploadBytesPerPixel(format, type) {
+    if (type === WebGL2RenderingContext.UNSIGNED_SHORT_5_6_5 ||
+        type === WebGL2RenderingContext.UNSIGNED_SHORT_4_4_4_4 ||
+        type === WebGL2RenderingContext.UNSIGNED_SHORT_5_5_5_1) {
+        return 2;
+    }
     if (type === WebGL2RenderingContext.UNSIGNED_BYTE) {
         switch (format) {
             case WebGL2RenderingContext.RGBA:
+            case GL_SRGB_ALPHA_EXT:
                 return 4;
             case WebGL2RenderingContext.RGB:
+            case GL_SRGB_EXT:
                 return 3;
             case WebGL2RenderingContext.LUMINANCE:
             case WebGL2RenderingContext.ALPHA:
@@ -742,27 +1030,33 @@ function getSourceBytesPerRow(byteLength, width, height, sourceBytesPerPixel, al
     if (byteLength >= minimumRequired) {
         return aligned;
     }
-    const tight = width * sourceBytesPerPixel;
-    if (byteLength >= tight * height) {
-        return tight;
-    }
     throw new Error(`Texture upload data is too small: ${byteLength} bytes for ${width}x${height}`);
 }
 function prepareTypedTextureUpload(data, width, height, internalformat, format, type, unpack) {
     const sourceBytes = byteView(data);
     const sourceBytesPerPixel = textureUploadBytesPerPixel(format, type);
     const sourceBytesPerRow = getSourceBytesPerRow(sourceBytes.byteLength, width, height, sourceBytesPerPixel, unpack.alignment);
-    const needsRgbaExpansion = type === WebGL2RenderingContext.UNSIGNED_BYTE &&
-        (format === WebGL2RenderingContext.RGB ||
-            format === WebGL2RenderingContext.LUMINANCE ||
-            format === WebGL2RenderingContext.ALPHA ||
+    const packed16 = type === WebGL2RenderingContext.UNSIGNED_SHORT_5_6_5 ||
+        type === WebGL2RenderingContext.UNSIGNED_SHORT_4_4_4_4 ||
+        type === WebGL2RenderingContext.UNSIGNED_SHORT_5_5_5_1;
+    const needsRgbaExpansion = packed16 ||
+        type === WebGL2RenderingContext.UNSIGNED_BYTE &&
+            (format === WebGL2RenderingContext.RGB ||
+                format === GL_SRGB_EXT ||
+                format === WebGL2RenderingContext.LUMINANCE ||
+                format === WebGL2RenderingContext.ALPHA ||
+                format === WebGL2RenderingContext.LUMINANCE_ALPHA);
+    const needsPremultiply = unpack.premultiplyAlpha &&
+        (format === WebGL2RenderingContext.RGBA ||
+            format === GL_SRGB_ALPHA_EXT ||
             format === WebGL2RenderingContext.LUMINANCE_ALPHA);
-    const uploadInternalformat = needsRgbaExpansion ? WebGL2RenderingContext.RGBA : internalformat;
-    const uploadFormat = needsRgbaExpansion ? WebGL2RenderingContext.RGBA : format;
-    const uploadType = type;
+    const preserveSrgbFormat = internalformat === GL_SRGB_EXT || internalformat === GL_SRGB_ALPHA_EXT;
+    const uploadInternalformat = needsRgbaExpansion && !preserveSrgbFormat ? WebGL2RenderingContext.RGBA : internalformat;
+    const uploadFormat = needsRgbaExpansion && !preserveSrgbFormat ? WebGL2RenderingContext.RGBA : format;
+    const uploadType = needsRgbaExpansion ? WebGL2RenderingContext.UNSIGNED_BYTE : type;
     const destinationBytesPerPixel = needsRgbaExpansion ? 4 : sourceBytesPerPixel;
     const destinationBytesPerRow = width * destinationBytesPerPixel;
-    if (!unpack.flipY && !needsRgbaExpansion && sourceBytesPerRow === destinationBytesPerRow) {
+    if (!unpack.flipY && !needsRgbaExpansion && !needsPremultiply && sourceBytesPerRow === destinationBytesPerRow) {
         return {
             data,
             bytesPerRow: sourceBytesPerRow,
@@ -778,12 +1072,43 @@ function prepareTypedTextureUpload(data, width, height, internalformat, format, 
         const destinationOffset = y * destinationBytesPerRow;
         if (!needsRgbaExpansion) {
             uploadBytes.set(sourceBytes.subarray(sourceOffset, sourceOffset + destinationBytesPerRow), destinationOffset);
+            if (needsPremultiply && type === WebGL2RenderingContext.UNSIGNED_BYTE) {
+                for (let x = 0; x < width; x++) {
+                    const dst = destinationOffset + x * 4;
+                    const alpha = uploadBytes[dst + 3];
+                    uploadBytes[dst] = Math.round(uploadBytes[dst] * alpha / 255);
+                    uploadBytes[dst + 1] = Math.round(uploadBytes[dst + 1] * alpha / 255);
+                    uploadBytes[dst + 2] = Math.round(uploadBytes[dst + 2] * alpha / 255);
+                }
+            }
             continue;
         }
         for (let x = 0; x < width; x++) {
             const src = sourceOffset + x * sourceBytesPerPixel;
             const dst = destinationOffset + x * 4;
-            if (format === WebGL2RenderingContext.LUMINANCE) {
+            if (packed16) {
+                const packed = sourceBytes[src] | (sourceBytes[src + 1] << 8);
+                const expand = (value, bits) => Math.round(value * 255 / ((1 << bits) - 1));
+                if (type === WebGL2RenderingContext.UNSIGNED_SHORT_5_6_5) {
+                    uploadBytes[dst] = expand((packed >> 11) & 0x1f, 5);
+                    uploadBytes[dst + 1] = expand((packed >> 5) & 0x3f, 6);
+                    uploadBytes[dst + 2] = expand(packed & 0x1f, 5);
+                    uploadBytes[dst + 3] = 255;
+                }
+                else if (type === WebGL2RenderingContext.UNSIGNED_SHORT_4_4_4_4) {
+                    uploadBytes[dst] = expand((packed >> 12) & 0xf, 4);
+                    uploadBytes[dst + 1] = expand((packed >> 8) & 0xf, 4);
+                    uploadBytes[dst + 2] = expand((packed >> 4) & 0xf, 4);
+                    uploadBytes[dst + 3] = expand(packed & 0xf, 4);
+                }
+                else {
+                    uploadBytes[dst] = expand((packed >> 11) & 0x1f, 5);
+                    uploadBytes[dst + 1] = expand((packed >> 6) & 0x1f, 5);
+                    uploadBytes[dst + 2] = expand((packed >> 1) & 0x1f, 5);
+                    uploadBytes[dst + 3] = (packed & 1) ? 255 : 0;
+                }
+            }
+            else if (format === WebGL2RenderingContext.LUMINANCE) {
                 const luminance = sourceBytes[src];
                 uploadBytes[dst] = luminance;
                 uploadBytes[dst + 1] = luminance;
@@ -808,6 +1133,12 @@ function prepareTypedTextureUpload(data, width, height, internalformat, format, 
                 uploadBytes[dst + 1] = sourceBytes[src + 1];
                 uploadBytes[dst + 2] = sourceBytes[src + 2];
                 uploadBytes[dst + 3] = 255;
+            }
+            if (needsPremultiply) {
+                const alpha = uploadBytes[dst + 3];
+                uploadBytes[dst] = Math.round(uploadBytes[dst] * alpha / 255);
+                uploadBytes[dst + 1] = Math.round(uploadBytes[dst + 1] * alpha / 255);
+                uploadBytes[dst + 2] = Math.round(uploadBytes[dst + 2] * alpha / 255);
             }
         }
     }
@@ -837,6 +1168,7 @@ function sampleTypeLookup(internalFormat, format, type) {
 class HydTexture {
     onDestroy = [];
     onDelete = [];
+    onStorageChange = [];
     static __total__ = 0;
     static isDestroyedTexture = false;
     label;
@@ -858,6 +1190,10 @@ class HydTexture {
     _attachmentViews = new Map();
     _hash;
     sourceOrigin = "uninitialized";
+    imageStates = new Map();
+    residentImages = new Set();
+    archivedImages = new Map();
+    imageGeneration = 0;
     get isDepthStencil() {
         return this._textureDescriptor.isDepthStencil;
     }
@@ -875,6 +1211,8 @@ class HydTexture {
     _viewDimension = undefined;
     state = {
         minFilter: "nearest",
+        mipmapFilter: "linear",
+        mipmapped: true,
         magFilter: "linear",
         wrapS: "repeat",
         wrapT: "repeat",
@@ -890,6 +1228,8 @@ class HydTexture {
     webglParameters = new Map();
     static __samplerCount = 0;
     static __viewCount = 0;
+    static mipmapPipelines = new WeakMap();
+    static mipmapSamplers = new WeakMap();
     get isConfigured() {
         return Boolean(this._textureDescriptor.format &&
             this._textureDescriptor.dimension &&
@@ -906,6 +1246,93 @@ class HydTexture {
     }
     get height() {
         return Number(this._textureDescriptor.size.height) || 0;
+    }
+    get mipLevelCount() {
+        return this._textureDescriptor.mipLevelCount || 1;
+    }
+    imageKey(level, layer) {
+        return `${level}:${layer}`;
+    }
+    getImageState(target, level = 0, layer) {
+        const imageLayer = layer === undefined ? HydTexture.getArrayLayer(target) : layer;
+        return this.imageStates.get(this.imageKey(level, imageLayer)) || null;
+    }
+    defineImageState(target, level, width, height, depth, internalFormat, format, type, sourceOrigin, layer) {
+        const imageLayer = layer === undefined ? HydTexture.getArrayLayer(target) : layer;
+        const state = {
+            level,
+            layer: imageLayer,
+            width,
+            height,
+            depth,
+            internalFormat,
+            format,
+            type,
+            sourceOrigin,
+            generation: ++this.imageGeneration,
+        };
+        const key = this.imageKey(level, imageLayer);
+        this.imageStates.set(key, state);
+        this.residentImages.add(key);
+        this._hash = null;
+        return state;
+    }
+    initializeNullImage(target, level, width, height, internalFormat) {
+        if (width <= 0 || height <= 0 ||
+            (this.format !== "rgba8unorm" && this.format !== "rgba8unorm-srgb"))
+            return;
+        const pixels = new Uint8Array(width * height * 4);
+        if (internalFormat === WebGL2RenderingContext.RGB ||
+            internalFormat === GL_SRGB_EXT ||
+            internalFormat === WebGL2RenderingContext.LUMINANCE) {
+            for (let offset = 3; offset < pixels.length; offset += 4)
+                pixels[offset] = 255;
+        }
+        this.device.queue.writeTexture({
+            texture: this.texture,
+            mipLevel: level,
+            origin: targetToOrigin.get(target) || { x: 0, y: 0, z: 0 },
+        }, pixels, { bytesPerRow: width * 4, rowsPerImage: height }, { width, height, depthOrArrayLayers: 1 });
+    }
+    isCubeCompleteAtLevel(level = 0) {
+        const faces = CUBE_FACE_TARGETS.map((target) => this.getImageState(target, level));
+        const first = faces[0];
+        return Boolean(first && first.width > 0 && first.height > 0 && first.width === first.height &&
+            faces.every((face) => face && face.width === first.width && face.height === first.height &&
+                face.internalFormat === first.internalFormat && face.type === first.type));
+    }
+    isSamplingComplete(viewDimension, webglVersion = 1) {
+        const layers = viewDimension === "cube" ? 6 : 1;
+        const baseImages = Array.from({ length: layers }, (_, layer) => this.imageStates.get(this.imageKey(0, layer)) || null);
+        const base = baseImages[0];
+        if (!base || base.width <= 0 || base.height <= 0)
+            return false;
+        if (viewDimension === "cube" && !this.isCubeCompleteAtLevel(0))
+            return false;
+        const powerOfTwo = (value) => (value & (value - 1)) === 0;
+        if (webglVersion === 1 && (!powerOfTwo(base.width) || !powerOfTwo(base.height))) {
+            const clamp = WebGL2RenderingContext.CLAMP_TO_EDGE;
+            if (this.state.mipmapped ||
+                this.webglParameters.get(WebGL2RenderingContext.TEXTURE_WRAP_S) !== clamp ||
+                this.webglParameters.get(WebGL2RenderingContext.TEXTURE_WRAP_T) !== clamp) {
+                return false;
+            }
+        }
+        if (!this.state.mipmapped)
+            return true;
+        const requiredLevels = Math.floor(Math.log2(Math.max(base.width, base.height))) + 1;
+        for (let level = 1; level < requiredLevels; level++) {
+            const expectedWidth = Math.max(1, base.width >> level);
+            const expectedHeight = Math.max(1, base.height >> level);
+            for (let layer = 0; layer < layers; layer++) {
+                const image = this.imageStates.get(this.imageKey(level, layer));
+                if (!image || image.width !== expectedWidth || image.height !== expectedHeight ||
+                    image.internalFormat !== base.internalFormat || image.type !== base.type) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
     set viewDimension(viewDimension) {
         if (this._viewDimension === viewDimension) {
@@ -933,12 +1360,17 @@ class HydTexture {
             const desc = {
                 minFilter: this.state.minFilter,
                 magFilter: this.state.magFilter,
+                mipmapFilter: this.state.mipmapFilter,
                 addressModeU: this.state.wrapS,
                 addressModeV: this.state.wrapT,
                 addressModeW: this.state.wrapR,
                 maxAnisotropy: this.state.maxAnisotropy,
                 label: "sampler-" + (HydTexture.__samplerCount++),
             };
+            if (!this.state.mipmapped) {
+                desc.lodMinClamp = 0;
+                desc.lodMaxClamp = 0;
+            }
             this._sampler = this.device.createSampler(desc);
         }
         return this._sampler;
@@ -952,6 +1384,7 @@ class HydTexture {
                 minFilter: "nearest",
                 magFilter: "nearest",
                 mipmapFilter: "nearest",
+                ...(!this.state.mipmapped ? { lodMinClamp: 0, lodMaxClamp: 0 } : {}),
                 addressModeU: this.state.wrapS,
                 addressModeV: this.state.wrapT,
                 addressModeW: this.state.wrapR,
@@ -962,7 +1395,10 @@ class HydTexture {
     }
     get hash() {
         if (!this._view) {
-            return this.state.minFilter +
+            return this.label + '|' +
+                this.state.minFilter +
+                this.state.mipmapFilter +
+                this.state.mipmapped +
                 this.state.magFilter +
                 this.state.wrapS +
                 this.state.wrapT +
@@ -977,16 +1413,20 @@ class HydTexture {
                 this._textureDescriptor.isDepthStencil +
                 this._textureDescriptor.size.width +
                 this._textureDescriptor.size.height +
-                this._textureDescriptor.size.depthOrArrayLayers;
+                this._textureDescriptor.size.depthOrArrayLayers +
+                this.imageGeneration;
         }
         if (!this._hash) {
             this._hash = this.state.minFilter +
+                this.state.mipmapFilter +
+                this.state.mipmapped +
                 this.state.magFilter +
                 this.state.wrapS +
                 this.state.wrapT +
                 this.state.wrapR +
                 this.state.compare +
                 this.state.maxAnisotropy +
+                this.imageGeneration +
                 this.view.label;
         }
         return this._hash;
@@ -1013,7 +1453,8 @@ class HydTexture {
             || this._textureDescriptor.size.depthOrArrayLayers !== this._currentTextureDescriptor.size.depthOrArrayLayers
             || this._textureDescriptor.format !== this._currentTextureDescriptor.format
             || this._textureDescriptor.dimension !== this._currentTextureDescriptor.dimension
-            || this._textureDescriptor.usage !== this._currentTextureDescriptor.usage)) {
+            || this._textureDescriptor.usage !== this._currentTextureDescriptor.usage
+            || this._textureDescriptor.mipLevelCount !== this._currentTextureDescriptor.mipLevelCount)) {
             this.destroy();
         }
         if (!this._texture) {
@@ -1023,6 +1464,10 @@ class HydTexture {
                 format: this._textureDescriptor.format,
                 usage: this._textureDescriptor.usage,
                 dimension: this._textureDescriptor.dimension,
+                mipLevelCount: this._textureDescriptor.mipLevelCount,
+                viewFormats: this._textureDescriptor.format === "rgba8unorm-srgb"
+                    ? ["rgba8unorm"]
+                    : undefined,
             });
             this._currentTextureDescriptor = Object.assign({}, this._textureDescriptor);
         }
@@ -1093,12 +1538,137 @@ class HydTexture {
         return targetToOrigin.get(target)?.z || 0;
     }
     markFramebufferRenderTarget() {
+        if (this.sourceOrigin === "render-target") {
+            return false;
+        }
         this.sourceOrigin = "render-target";
         this._hash = null;
+        return true;
     }
     markCopyDestination() {
         this.sourceOrigin = "copy";
         this._hash = null;
+    }
+    mipmapPipeline() {
+        if (!this.format || /(?:uint|sint|depth|stencil)/.test(this.format))
+            return null;
+        let pipelines = HydTexture.mipmapPipelines.get(this.device);
+        if (!pipelines) {
+            pipelines = new Map();
+            HydTexture.mipmapPipelines.set(this.device, pipelines);
+        }
+        let pipeline = pipelines.get(this.format);
+        if (pipeline)
+            return pipeline;
+        const module = this.device.createShaderModule({
+            label: "HydTexture-mipmap-shader",
+            code: `
+struct VertexOutput {
+  @builtin(position) position: vec4f,
+  @location(0) uv: vec2f,
+}
+
+@vertex
+fn vertexMain(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+  let positions = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  let position = positions[vertexIndex];
+  var output: VertexOutput;
+  output.position = vec4f(position, 0.0, 1.0);
+  output.uv = position * vec2f(0.5, -0.5) + vec2f(0.5);
+  return output;
+}
+
+@group(0) @binding(0) var sourceTexture: texture_2d<f32>;
+@group(0) @binding(1) var sourceSampler: sampler;
+
+@fragment
+fn fragmentMain(@location(0) uv: vec2f) -> @location(0) vec4f {
+  return textureSampleLevel(sourceTexture, sourceSampler, uv, 0.0);
+}
+`,
+        });
+        pipeline = this.device.createRenderPipeline({
+            label: `HydTexture-mipmap-pipeline-${this.format}`,
+            layout: "auto",
+            vertex: { module, entryPoint: "vertexMain" },
+            fragment: {
+                module,
+                entryPoint: "fragmentMain",
+                targets: [{ format: this.format }],
+            },
+            primitive: { topology: "triangle-list" },
+        });
+        pipelines.set(this.format, pipeline);
+        return pipeline;
+    }
+    generateMipmap(target) {
+        const pipeline = this.mipmapPipeline();
+        if (!pipeline || this.mipLevelCount <= 1 || !this.isConfigured)
+            return Boolean(pipeline);
+        let sampler = HydTexture.mipmapSamplers.get(this.device);
+        if (!sampler) {
+            sampler = this.device.createSampler({
+                minFilter: "linear",
+                magFilter: "linear",
+                mipmapFilter: "nearest",
+                addressModeU: "clamp-to-edge",
+                addressModeV: "clamp-to-edge",
+                lodMinClamp: 0,
+                lodMaxClamp: 0,
+                label: "HydTexture-mipmap-sampler",
+            });
+            HydTexture.mipmapSamplers.set(this.device, sampler);
+        }
+        const layers = target === WebGL2RenderingContext.TEXTURE_CUBE_MAP ? 6 : 1;
+        const encoder = this.device.createCommandEncoder({ label: `${this.label}-generateMipmap` });
+        for (let layer = 0; layer < layers; layer++) {
+            for (let level = 1; level < this.mipLevelCount; level++) {
+                const sourceView = this.texture.createView({
+                    dimension: "2d",
+                    baseMipLevel: level - 1,
+                    mipLevelCount: 1,
+                    baseArrayLayer: layer,
+                    arrayLayerCount: 1,
+                });
+                const destinationView = this.texture.createView({
+                    dimension: "2d",
+                    baseMipLevel: level,
+                    mipLevelCount: 1,
+                    baseArrayLayer: layer,
+                    arrayLayerCount: 1,
+                });
+                const bindGroup = this.device.createBindGroup({
+                    layout: pipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: sourceView },
+                        { binding: 1, resource: sampler },
+                    ],
+                });
+                const pass = encoder.beginRenderPass({
+                    colorAttachments: [{
+                            view: destinationView,
+                            loadOp: "clear",
+                            storeOp: "store",
+                            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                        }],
+                });
+                pass.setPipeline(pipeline);
+                pass.setBindGroup(0, bindGroup);
+                pass.draw(3);
+                pass.end();
+            }
+        }
+        this.device.queue.submit([encoder.finish()]);
+        const base = this.imageStates.get(this.imageKey(0, 0));
+        if (base) {
+            for (let layer = 0; layer < layers; layer++) {
+                for (let level = 1; level < this.mipLevelCount; level++) {
+                    this.defineImageState(target, level, Math.max(1, base.width >> level), Math.max(1, base.height >> level), 1, base.internalFormat, base.format, base.type, base.sourceOrigin, layer);
+                }
+            }
+        }
+        this._hash = null;
+        return true;
     }
     getFramebufferView(target, mipLevel = 0, layer) {
         const baseMipLevel = mipLevel || 0;
@@ -1121,6 +1691,9 @@ class HydTexture {
     }
     texImage2D(data, target, mipLevel, internalformat, width, height, border, format, type, unpack = DEFAULT_PIXEL_UNPACK_STATE) {
         this.label += ' 2D';
+        const logicalInternalFormat = internalformat;
+        const logicalFormat = format;
+        const logicalType = type;
         let uploadData = data;
         let uploadBytesPerRow = undefined;
         if (data !== null && "byteLength" in data) {
@@ -1131,28 +1704,54 @@ class HydTexture {
             format = prepared.format;
             type = prepared.type;
         }
+        const baseWidth = Math.max(1, width * Math.pow(2, mipLevel));
+        const baseHeight = Math.max(1, height * Math.pow(2, mipLevel));
+        const mipLevelCount = Math.floor(Math.log2(Math.max(baseWidth, baseHeight))) + 1;
+        const gpuFormat = textureFormatLookup(internalformat, format, type);
         this.configureTexture({
-            size: { width, height, depthOrArrayLayers: HydTexture.getDepthOrArrayLayers(target) },
-            format: textureFormatLookup(internalformat, format, type),
+            size: { width: baseWidth, height: baseHeight, depthOrArrayLayers: HydTexture.getDepthOrArrayLayers(target) },
+            mipLevelCount,
+            format: gpuFormat,
             dimension: "2d",
             usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
             isDepthStencil: format === WebGL2RenderingContext.DEPTH_COMPONENT,
         });
+        const imageOrigin = uploadData === null || (uploadData && "byteLength" in uploadData)
+            ? "typed-upload"
+            : "external-upload";
+        this.defineImageState(target, mipLevel, width, height, 1, logicalInternalFormat, logicalFormat, logicalType, imageOrigin);
         if (uploadData === null) {
+            this.initializeNullImage(target, mipLevel, width, height, logicalInternalFormat);
             this.sourceOrigin = "typed-upload";
             return;
         }
-        if (uploadData instanceof HTMLImageElement ||
-            (typeof ImageBitmap !== "undefined" && uploadData instanceof ImageBitmap) ||
-            uploadData instanceof ImageData ||
-            uploadData instanceof HTMLCanvasElement ||
-            uploadData instanceof HTMLVideoElement ||
-            (typeof OffscreenCanvas !== "undefined" && uploadData instanceof OffscreenCanvas)) {
-            this.device.queue.copyExternalImageToTexture({ source: uploadData, flipY: shouldApplyExternalFlipY(uploadData, unpack) }, { texture: this.texture, origin: targetToOrigin.get(target) }, [width, height]);
+        if (width === 0 || height === 0) {
+            this.sourceOrigin = imageOrigin;
+            return;
+        }
+        if (isExternalTextureSource(uploadData)) {
+            const converted = gpuFormat === "rgba8unorm" || gpuFormat === "rgba8unorm-srgb"
+                ? convertExternalTextureSource(uploadData, width, height, logicalFormat, logicalType, unpack)
+                : null;
+            if (globalThis.__HYD_DEBUG_TEXTURE_UPLOAD) {
+                console.debug("[HYD] external texImage2D", JSON.stringify({
+                    mipLevel,
+                    width,
+                    height,
+                    gpuFormat,
+                    converted: Boolean(converted),
+                }));
+            }
+            if (converted) {
+                this.device.queue.writeTexture({ texture: this.texture, mipLevel, origin: targetToOrigin.get(target) }, converted, { offset: 0, bytesPerRow: width * 4, rowsPerImage: height }, [width, height]);
+            }
+            else {
+                this.device.queue.copyExternalImageToTexture({ source: uploadData, flipY: shouldApplyExternalFlipY(uploadData, unpack) }, { texture: this.texture, mipLevel, origin: targetToOrigin.get(target) }, [width, height]);
+            }
             this.sourceOrigin = "external-upload";
         }
         else if ("byteLength" in uploadData) {
-            this.device.queue.writeTexture({ texture: this.texture, origin: targetToOrigin.get(target) }, uploadData, {
+            this.device.queue.writeTexture({ texture: this.texture, mipLevel, origin: targetToOrigin.get(target) }, uploadData, {
                 offset: 0,
                 bytesPerRow: uploadBytesPerRow,
                 rowsPerImage: height,
@@ -1181,13 +1780,18 @@ class HydTexture {
             mipLevel,
             origin,
         };
-        if (uploadData instanceof HTMLImageElement ||
-            (typeof ImageBitmap !== "undefined" && uploadData instanceof ImageBitmap) ||
-            uploadData instanceof ImageData ||
-            uploadData instanceof HTMLCanvasElement ||
-            uploadData instanceof HTMLVideoElement ||
-            (typeof OffscreenCanvas !== "undefined" && uploadData instanceof OffscreenCanvas)) {
-            this.device.queue.copyExternalImageToTexture({ source: uploadData, flipY: shouldApplyExternalFlipY(uploadData, unpack) }, destination, [width, height]);
+        if (width === 0 || height === 0)
+            return;
+        if (isExternalTextureSource(uploadData)) {
+            const converted = this.format === "rgba8unorm" || this.format === "rgba8unorm-srgb"
+                ? convertExternalTextureSource(uploadData, width, height, format, type, unpack)
+                : null;
+            if (converted) {
+                this.device.queue.writeTexture(destination, converted, { offset: 0, bytesPerRow: width * 4, rowsPerImage: height }, [width, height]);
+            }
+            else {
+                this.device.queue.copyExternalImageToTexture({ source: uploadData, flipY: shouldApplyExternalFlipY(uploadData, unpack) }, destination, [width, height]);
+            }
             this.sourceOrigin = "external-upload";
         }
         else if (uploadData && "byteLength" in uploadData) {
@@ -1284,12 +1888,27 @@ class HydTexture {
     texParameteri(pname, param) {
         console.assert(pnameToString.has(pname) && parameterToString.has(param));
         this.state[pnameToString.get(pname)] = parameterToString.get(param);
+        if (pname === WebGL2RenderingContext.TEXTURE_MIN_FILTER) {
+            this.state.mipmapFilter = param === WebGL2RenderingContext.LINEAR_MIPMAP_LINEAR ||
+                param === WebGL2RenderingContext.NEAREST_MIPMAP_LINEAR
+                ? "linear"
+                : "nearest";
+            this.state.mipmapped = param !== WebGL2RenderingContext.LINEAR &&
+                param !== WebGL2RenderingContext.NEAREST;
+        }
         this.webglParameters.set(pname, param);
         this._sampler = null;
         this._nonFilteringSampler = null;
         this._hash = null;
     }
     renderbufferStorage(format, width, height) {
+        const sameDescriptor = this._textureDescriptor.format === format &&
+            this._textureDescriptor.size.width === width &&
+            this._textureDescriptor.size.height === height &&
+            this._textureDescriptor.size.depthOrArrayLayers === 1;
+        if (sameDescriptor && this._texture) {
+            this.destroy();
+        }
         this.configureTexture({
             size: { width, height, depthOrArrayLayers: 1 },
             format,
@@ -1297,7 +1916,142 @@ class HydTexture {
             usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
             isDepthStencil: format.startsWith("depth") || format === "stencil8",
         });
+        if (sameDescriptor) {
+            this.onStorageChange.forEach((callback) => callback());
+        }
         this.sourceOrigin = "render-target";
+        if (width > 0 && height > 0 && typeof this.device.createCommandEncoder === "function") {
+            this.initializeRenderbufferStorage();
+        }
+    }
+    initializeRenderbufferStorage() {
+        const encoder = this.device.createCommandEncoder({ label: `${this.label}-initialize-renderbuffer` });
+        const view = this.getFramebufferView();
+        let passDescriptor;
+        if (this.format.includes("depth") || this.format.includes("stencil")) {
+            const depthStencilAttachment = { view };
+            if (this.format.includes("depth")) {
+                depthStencilAttachment.depthLoadOp = "clear";
+                depthStencilAttachment.depthStoreOp = "store";
+                depthStencilAttachment.depthClearValue = 1;
+            }
+            if (this.format.includes("stencil")) {
+                depthStencilAttachment.stencilLoadOp = "clear";
+                depthStencilAttachment.stencilStoreOp = "store";
+                depthStencilAttachment.stencilClearValue = 0;
+            }
+            passDescriptor = { colorAttachments: [], depthStencilAttachment };
+        }
+        else {
+            passDescriptor = {
+                colorAttachments: [{
+                        view,
+                        loadOp: "clear",
+                        storeOp: "store",
+                        clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                    }],
+            };
+        }
+        encoder.beginRenderPass(passDescriptor).end();
+        this.device.queue.submit([encoder.finish()]);
+    }
+    migrateTextureStorage(descriptor) {
+        const oldTexture = this._texture;
+        if (!oldTexture || this.imageStates.size === 0 ||
+            this._textureDescriptor.format !== descriptor.format ||
+            this._textureDescriptor.dimension !== descriptor.dimension ||
+            typeof this.device.createCommandEncoder !== "function") {
+            return false;
+        }
+        const oldWidth = Number(this._textureDescriptor.size.width) || 0;
+        const oldHeight = Number(this._textureDescriptor.size.height) || 0;
+        const oldLayers = Number(this._textureDescriptor.size.depthOrArrayLayers) || 1;
+        const oldMipLevels = this._textureDescriptor.mipLevelCount || 1;
+        const newWidth = Number(descriptor.size.width) || 0;
+        const newHeight = Number(descriptor.size.height) || 0;
+        const newLayers = Number(descriptor.size.depthOrArrayLayers) || 1;
+        const newMipLevels = descriptor.mipLevelCount || 1;
+        if (newWidth <= 0 || newHeight <= 0)
+            return false;
+        const replacement = this.device.createTexture({
+            label: this.label,
+            size: descriptor.size,
+            format: descriptor.format,
+            usage: descriptor.usage,
+            dimension: descriptor.dimension,
+            mipLevelCount: descriptor.mipLevelCount,
+            viewFormats: descriptor.format === "rgba8unorm-srgb"
+                ? ["rgba8unorm"]
+                : undefined,
+        });
+        const encoder = this.device.createCommandEncoder({ label: `${this.label}-migrate-images` });
+        const nextResident = new Set();
+        const staleArchives = [];
+        for (const image of this.imageStates.values()) {
+            if (image.width <= 0 || image.height <= 0)
+                continue;
+            const key = this.imageKey(image.level, image.layer);
+            const oldLevelWidth = Math.max(1, oldWidth >> image.level);
+            const oldLevelHeight = Math.max(1, oldHeight >> image.level);
+            const newLevelWidth = Math.max(1, newWidth >> image.level);
+            const newLevelHeight = Math.max(1, newHeight >> image.level);
+            const fitsOld = image.layer < oldLayers && image.level < oldMipLevels &&
+                image.width <= oldLevelWidth && image.height <= oldLevelHeight;
+            const fitsNew = image.layer < newLayers && image.level < newMipLevels &&
+                image.width <= newLevelWidth && image.height <= newLevelHeight;
+            if (this.residentImages.has(key) && fitsOld) {
+                if (fitsNew) {
+                    encoder.copyTextureToTexture({ texture: oldTexture, mipLevel: image.level, origin: { x: 0, y: 0, z: image.layer } }, { texture: replacement, mipLevel: image.level, origin: { x: 0, y: 0, z: image.layer } }, { width: image.width, height: image.height, depthOrArrayLayers: 1 });
+                    nextResident.add(key);
+                }
+                else {
+                    const archive = this.device.createTexture({
+                        label: `${this.label}-archive-${key}`,
+                        size: { width: image.width, height: image.height, depthOrArrayLayers: 1 },
+                        format: this._textureDescriptor.format,
+                        dimension: "2d",
+                        usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+                    });
+                    encoder.copyTextureToTexture({ texture: oldTexture, mipLevel: image.level, origin: { x: 0, y: 0, z: image.layer } }, { texture: archive }, { width: image.width, height: image.height, depthOrArrayLayers: 1 });
+                    const stale = this.archivedImages.get(key);
+                    if (stale)
+                        staleArchives.push(stale.texture);
+                    this.archivedImages.set(key, {
+                        texture: archive,
+                        width: image.width,
+                        height: image.height,
+                        format: this._textureDescriptor.format,
+                    });
+                }
+                continue;
+            }
+            const archive = this.archivedImages.get(key);
+            if (archive && archive.format === descriptor.format && fitsNew &&
+                archive.width === image.width && archive.height === image.height) {
+                encoder.copyTextureToTexture({ texture: archive.texture }, { texture: replacement, mipLevel: image.level, origin: { x: 0, y: 0, z: image.layer } }, { width: image.width, height: image.height, depthOrArrayLayers: 1 });
+                nextResident.add(key);
+            }
+        }
+        this.device.queue.submit([encoder.finish()]);
+        for (const stale of staleArchives)
+            stale.destroy();
+        oldTexture.destroy();
+        this.residentImages.clear();
+        for (const key of nextResident)
+            this.residentImages.add(key);
+        this._texture = replacement;
+        this._currentTextureDescriptor = {
+            ...descriptor,
+            size: { ...descriptor.size },
+        };
+        this._view = null;
+        this._attachmentViews.clear();
+        this._hash = null;
+        HydTexture.isDestroyedTexture = true;
+        for (const callback of this.onDestroy)
+            callback();
+        this.onDestroy = [];
+        return true;
     }
     configureTexture(descriptor) {
         const descriptorChanged = this._textureDescriptor.dimension !== descriptor.dimension ||
@@ -1306,13 +2060,16 @@ class HydTexture {
             this._textureDescriptor.isDepthStencil !== descriptor.isDepthStencil ||
             this._textureDescriptor.size.width !== descriptor.size.width ||
             this._textureDescriptor.size.height !== descriptor.size.height ||
-            this._textureDescriptor.size.depthOrArrayLayers !== descriptor.size.depthOrArrayLayers;
-        if (descriptorChanged && this._texture) {
+            this._textureDescriptor.size.depthOrArrayLayers !== descriptor.size.depthOrArrayLayers ||
+            this._textureDescriptor.mipLevelCount !== descriptor.mipLevelCount;
+        if (descriptorChanged && this._texture && !this.migrateTextureStorage(descriptor)) {
             this.destroy();
+            this.residentImages.clear();
         }
         this._textureDescriptor.dimension = descriptor.dimension;
         this._textureDescriptor.format = descriptor.format;
         this._textureDescriptor.size = descriptor.size;
+        this._textureDescriptor.mipLevelCount = descriptor.mipLevelCount;
         this._textureDescriptor.usage = descriptor.usage;
         this._textureDescriptor.isDepthStencil = descriptor.isDepthStencil;
         if (descriptorChanged) {
@@ -1320,88 +2077,132 @@ class HydTexture {
             this._attachmentViews.clear();
             this._hash = null;
             this.sourceOrigin = "uninitialized";
+            this.onStorageChange.forEach((callback) => callback());
         }
     }
 }
 
-;// ./src/components/hydShader.ts
-window.hydTmp = new Set();
-class HydShader {
-    shaderTranslator;
-    glsl_shader = "";
-    shader_info;
-    translated_glsl_shader = "";
-    infoLog = "";
-    validationShader = null;
-    ownerToken;
-    device;
-    deleted = false;
-    destroyed = false;
-    attachmentCount = 0;
-    compiled = false;
-    type;
-    sourceLength = 0;
-    static errorShaderCount = 0;
-    constructor(device, target, shaderTranslator, ownerToken) {
-        this.type = target;
-        this.device = device;
-        this.shaderTranslator = shaderTranslator;
-        this.ownerToken = ownerToken;
-    }
-    compileShader() {
-        this.shader_info = this.shaderTranslator.inspectShader(this.type, this.glsl_shader);
-        if (!this.shader_info.wgsl) {
-            console.warn("[HYD] shader WGSL deferred to runtime translator.");
-        }
-    }
-}
+;// ./src/components/hydFramebuffer.ts
 
-;// ./src/types.ts
-
-class HydVertexArrayAttribute {
-    __hash__ = '';
-    __layoutHash__ = '';
-    enabled = false;
-    size;
-    type;
-    int;
-    normalized = false;
-    stride = 0;
-    webglStride = 0;
-    offset = 0;
-    divisor = 0;
-    buffer;
-    shaderLocation;
-    format;
-    updateHash() {
-        const bufferHash = this.buffer ? this.buffer.hash : '-_-';
-        const tmp = `${this.size}_${this.type}_${this.int}_${this.normalized}_${this.stride}_${this.offset}_${this.divisor}`;
-        this.__layoutHash__ = this.enabled ? tmp : './.';
-        this.__hash__ = `${this.__layoutHash__}@${bufferHash}`;
+class FramebufferAttributes {
+    attachmentPoint;
+    level;
+    face;
+    layer;
+    attachment;
+    objectType;
+    constructor(attachmentPoint, level, face, attachment, layer, objectType = WebGL2RenderingContext.TEXTURE) {
+        this.attachmentPoint = attachmentPoint;
+        this.level = level;
+        this.face = face;
+        this.layer = layer;
+        this.attachment = attachment;
+        this.objectType = objectType;
     }
     get hash() {
-        return this.__hash__;
+        return `${this.attachmentPoint}-${this.level}-${this.face}-${this.layer}-${this.objectType}-${this.attachment.hash}`;
     }
-    get layoutHash() {
-        return this.__layoutHash__;
+    get view() {
+        return this.attachment.getFramebufferView(this.face, this.level, this.layer);
+    }
+    get format() {
+        return this.attachment.format;
+    }
+    get image() {
+        if (this.objectType !== WebGL2RenderingContext.TEXTURE)
+            return null;
+        return this.attachment.getImageState(this.face, this.level || 0, this.layer);
+    }
+    get isCubeFace() {
+        return this.face >= WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X &&
+            this.face <= WebGL2RenderingContext.TEXTURE_CUBE_MAP_NEGATIVE_Z;
+    }
+    get colorRenderable() {
+        if (this.objectType === WebGL2RenderingContext.RENDERBUFFER) {
+            return !this.format?.includes("depth") && !this.format?.includes("stencil");
+        }
+        const image = this.image;
+        if (!image || !isWebGlColorRenderableInternalFormat(image.internalFormat))
+            return false;
+        if (image.internalFormat === WebGL2RenderingContext.RGB565 ||
+            image.internalFormat === WebGL2RenderingContext.RGBA4 ||
+            image.internalFormat === WebGL2RenderingContext.RGB5_A1)
+            return false;
+        return image.internalFormat !== WebGL2RenderingContext.RGBA ||
+            image.type === WebGL2RenderingContext.UNSIGNED_BYTE;
+    }
+    get internalFormat() {
+        return this.objectType === WebGL2RenderingContext.RENDERBUFFER
+            ? this.attachment.renderbufferInternalFormat
+            : this.image?.internalFormat || 0;
+    }
+    get colorBits() {
+        switch (this.internalFormat) {
+            case WebGL2RenderingContext.RGBA4:
+                return [4, 4, 4, 4];
+            case WebGL2RenderingContext.RGB565:
+                return [5, 6, 5, 0];
+            case WebGL2RenderingContext.RGB5_A1:
+                return [5, 5, 5, 1];
+            case WebGL2RenderingContext.RGB:
+            case WebGL2RenderingContext.RGB8:
+                return [8, 8, 8, 0];
+            case WebGL2RenderingContext.RGBA:
+            case WebGL2RenderingContext.RGBA8:
+                return [8, 8, 8, 8];
+            default:
+                return this.colorRenderable ? [8, 8, 8, 8] : [0, 0, 0, 0];
+        }
+    }
+    get depthBits() {
+        if (this.format?.includes("depth16"))
+            return 16;
+        if (this.format?.includes("depth32"))
+            return 32;
+        return this.format?.includes("depth") ? 24 : 0;
+    }
+    get stencilBits() {
+        return this.format?.includes("stencil") ? 8 : 0;
+    }
+    get width() {
+        return this.image?.width ?? (this.objectType === WebGL2RenderingContext.RENDERBUFFER ? this.attachment.width : 0);
+    }
+    get height() {
+        return this.image?.height ?? (this.objectType === WebGL2RenderingContext.RENDERBUFFER ? this.attachment.height : 0);
     }
 }
-const nativeFunctionHasInstance = Function.prototype[Symbol.hasInstance];
-function installHydHasInstance(constructor, predicate) {
-    try {
-        Object.defineProperty(constructor, Symbol.hasInstance, {
-            configurable: true,
-            value(instance) {
-                return predicate(instance) || nativeFunctionHasInstance.call(constructor, instance);
-            },
-        });
+class HydFramebuffer {
+    ownerToken;
+    initialized = false;
+    deleted = false;
+    attachments = new Map();
+    drawBuffers = [
+        WebGL2RenderingContext.COLOR_ATTACHMENT0
+    ];
+    readBuffer = WebGL2RenderingContext.COLOR_ATTACHMENT0;
+    _hash = null;
+    constructor(ownerToken) {
+        this.ownerToken = ownerToken;
     }
-    catch (_) {
+    get hash() {
+        if (!this._hash) {
+            this._hash = '';
+            const sortedKeys = Array.from(this.attachments.keys()).sort();
+            for (const key of sortedKeys) {
+                const value = this.attachments.get(key);
+                this._hash += key.toString() + '-' + value.hash.toString() + '|';
+            }
+            for (const drawBuffer of this.drawBuffers) {
+                this._hash += drawBuffer.toString() + '|';
+            }
+            this._hash += this.readBuffer.toString();
+        }
+        return this._hash;
+    }
+    resetHash() {
+        this._hash = null;
     }
 }
-installHydHasInstance(WebGLShader, (instance) => instance instanceof HydShader);
-installHydHasInstance(WebGLRenderingContext, (instance) => instance?.hydContextType === "webgl" || instance?.hydContextType === "experimental-webgl");
-installHydHasInstance(WebGL2RenderingContext, (instance) => instance?.hydContextType === "webgl2");
 
 ;// ./src/components/hydVertexArray.ts
 
@@ -1513,6 +2314,7 @@ class CommonState {
 class DepthState {
     enabled;
     func;
+    funcEnum;
     range;
     writeMask;
     get hash() {
@@ -1521,6 +2323,7 @@ class DepthState {
     constructor() {
         this.enabled = false;
         this.func = 'less';
+        this.funcEnum = WebGL2RenderingContext.LESS;
         this.range = [0, 1];
         this.writeMask = true;
     }
@@ -1528,7 +2331,9 @@ class DepthState {
 class PolygonState {
     cullFace;
     cullFaceMode;
+    cullFaceModeEnum;
     frontFace;
+    frontFaceEnum;
     polygonOffsetFill;
     polygonOffsetUnits;
     polygonOffsetFactor;
@@ -1538,7 +2343,9 @@ class PolygonState {
     constructor() {
         this.cullFace = false;
         this.cullFaceMode = 'back';
+        this.cullFaceModeEnum = WebGL2RenderingContext.BACK;
         this.frontFace = 'ccw';
+        this.frontFaceEnum = WebGL2RenderingContext.CCW;
         this.polygonOffsetFill = false;
         this.polygonOffsetUnits = 0;
         this.polygonOffsetFactor = 0;
@@ -1563,23 +2370,35 @@ class BlendState {
     enabled;
     color;
     dstRGB;
+    dstRGBEnum;
     srcRGB;
+    srcRGBEnum;
     dstAlpha;
+    dstAlphaEnum;
     srcAlpha;
+    srcAlphaEnum;
     equationRGB;
+    equationRGBEnum;
     equationAlpha;
+    equationAlphaEnum;
     get hash() {
         return this.enabled.toString() + this.color.toString() + this.dstRGB.toString() + this.srcRGB.toString() + this.dstAlpha.toString() + this.srcAlpha.toString() + this.equationRGB.toString() + this.equationAlpha.toString();
     }
     constructor() {
         this.enabled = false;
         this.dstRGB = 'zero';
+        this.dstRGBEnum = WebGL2RenderingContext.ZERO;
         this.dstAlpha = 'zero';
+        this.dstAlphaEnum = WebGL2RenderingContext.ZERO;
         this.srcRGB = 'one';
+        this.srcRGBEnum = WebGL2RenderingContext.ONE;
         this.srcAlpha = 'one';
+        this.srcAlphaEnum = WebGL2RenderingContext.ONE;
         this.color = [0.0, 0.0, 0.0, 0.0];
         this.equationRGB = 'add';
+        this.equationRGBEnum = WebGL2RenderingContext.FUNC_ADD;
         this.equationAlpha = 'add';
+        this.equationAlphaEnum = WebGL2RenderingContext.FUNC_ADD;
     }
 }
 class MiscState {
@@ -1589,19 +2408,27 @@ class MiscState {
     unpackFlipYWebGL;
     unpackPremultiplyAlphaWebGL;
     unpackColorSpaceConversionWebGL;
+    unpackColorSpace;
     unpackAlignment;
     packAlignment;
     sampleAlphaToCoverage;
+    sampleCoverage;
+    sampleCoverageValue;
+    sampleCoverageInvert;
+    dither;
+    lineWidth;
+    generateMipmapHint;
     get unpackState() {
         return {
             flipY: this.unpackFlipYWebGL,
             alignment: this.unpackAlignment,
             premultiplyAlpha: this.unpackPremultiplyAlphaWebGL,
             colorspaceConversion: this.unpackColorSpaceConversionWebGL,
+            unpackColorSpace: this.unpackColorSpace,
         };
     }
     get hash() {
-        return this.scissorTest.toString() + this.scissorBox.toString() + this.colorWriteMask.toString() + this.unpackFlipYWebGL.toString() + this.unpackPremultiplyAlphaWebGL.toString() + this.unpackColorSpaceConversionWebGL.toString() + this.unpackAlignment.toString() + this.packAlignment.toString() + this.sampleAlphaToCoverage.toString();
+        return this.scissorTest.toString() + this.scissorBox.toString() + this.colorWriteMask.toString() + this.unpackFlipYWebGL.toString() + this.unpackPremultiplyAlphaWebGL.toString() + this.unpackColorSpaceConversionWebGL.toString() + this.unpackColorSpace + this.unpackAlignment.toString() + this.packAlignment.toString() + this.sampleAlphaToCoverage.toString();
     }
     constructor() {
         this.scissorTest = false;
@@ -1610,24 +2437,39 @@ class MiscState {
         this.unpackFlipYWebGL = false;
         this.unpackPremultiplyAlphaWebGL = false;
         this.unpackColorSpaceConversionWebGL = WebGL2RenderingContext.BROWSER_DEFAULT_WEBGL;
+        this.unpackColorSpace = "srgb";
         this.unpackAlignment = 4;
         this.packAlignment = 4;
         this.sampleAlphaToCoverage = false;
+        this.sampleCoverage = false;
+        this.sampleCoverageValue = 1;
+        this.sampleCoverageInvert = false;
+        this.dither = true;
+        this.lineWidth = 1;
+        this.generateMipmapHint = WebGL2RenderingContext.DONT_CARE;
     }
 }
 class StencilState {
     enabled;
     frontFunc;
+    frontFuncEnum;
     frontFail;
+    frontFailEnum;
     frontPassDepthFail;
+    frontPassDepthFailEnum;
     frontPassDepthPass;
+    frontPassDepthPassEnum;
     frontRef;
     frontValueMask;
     frontWriteMask;
     backFunc;
+    backFuncEnum;
     backFail;
+    backFailEnum;
     backPassDepthFail;
+    backPassDepthFailEnum;
     backPassDepthPass;
+    backPassDepthPassEnum;
     backRef;
     backValueMask;
     backWriteMask;
@@ -1637,16 +2479,24 @@ class StencilState {
     constructor() {
         this.enabled = false;
         this.frontFunc = 'always';
+        this.frontFuncEnum = WebGL2RenderingContext.ALWAYS;
         this.frontFail = 'keep';
+        this.frontFailEnum = WebGL2RenderingContext.KEEP;
         this.frontPassDepthFail = 'keep';
+        this.frontPassDepthFailEnum = WebGL2RenderingContext.KEEP;
         this.frontPassDepthPass = 'keep';
+        this.frontPassDepthPassEnum = WebGL2RenderingContext.KEEP;
         this.frontRef = 0;
         this.frontValueMask = 0xFFFFFFFF;
         this.frontWriteMask = 0xFFFFFFFF;
         this.backFunc = 'always';
+        this.backFuncEnum = WebGL2RenderingContext.ALWAYS;
         this.backFail = 'keep';
+        this.backFailEnum = WebGL2RenderingContext.KEEP;
         this.backPassDepthPass = 'keep';
+        this.backPassDepthPassEnum = WebGL2RenderingContext.KEEP;
         this.backPassDepthFail = 'keep';
+        this.backPassDepthFailEnum = WebGL2RenderingContext.KEEP;
         this.backRef = 0;
         this.backValueMask = 0xFFFFFFFF;
         this.backWriteMask = 0xFFFFFFFF;
@@ -1664,22 +2514,27 @@ class HydGlobalState {
     stencilState = new StencilState();
     textureUnits = [];
     topology = null;
+    stripIndexFormat;
+    drawingBufferGeneration = 0;
     currentVertexAttribValues = Array.from({ length: 16 }, () => new Float32Array([0, 0, 0, 1]));
     defaultVertexArrayBinding = new HydVertexArray();
     defaultFramebuffer;
+    __canvasTexture;
     __canvasView;
     device;
     __bindGroupCount = 0;
     __pipelineCount = 0;
     uniformBuffer;
     defaultSampleTextures = new Map();
-    constructor(attributes, uniform, device) {
+    webglVersion;
+    constructor(attributes, uniform, device, webglVersion = 1) {
         this.contextAttributes = attributes;
         this.defaultFramebuffer = new HydFramebuffer();
         this.defaultFramebuffer.drawBuffers = [WebGL2RenderingContext.BACK];
         this.defaultFramebuffer.readBuffer = WebGL2RenderingContext.BACK;
         this.defaultFramebuffer.attachments = new Map();
         this.device = device;
+        this.webglVersion = webglVersion;
         this.commonState = new CommonState(0, [0, 0, -1, -1, 0, 1], null, null, this.defaultVertexArrayBinding, this.defaultFramebuffer, this.defaultFramebuffer, null);
         this.uniformBuffer = uniform;
     }
@@ -1733,18 +2588,21 @@ class HydGlobalState {
     }
     getSamplerTexture(textureUnit, viewDimension, sampleType) {
         const texture = this.getTextureUnitBinding(textureUnit, viewDimension);
-        if (!texture) {
+        if (!texture || !texture.isSamplingComplete(viewDimension, this.webglVersion)) {
             return this.getDefaultSampleTexture(viewDimension, sampleType);
         }
         texture.ensureSampleable(viewDimension, sampleType);
         return texture;
     }
-    getColorWriteMask() {
+    getColorWriteMask(attachment) {
         const [r, g, b, a] = this.miscState.colorWriteMask;
+        const writesDefaultFramebuffer = this.commonState.drawFramebufferBinding === this.defaultFramebuffer;
+        const targetHasAlpha = !attachment || attachment.colorBits[3] > 0;
+        const writeAlpha = a && targetHasAlpha && !(writesDefaultFramebuffer && this.contextAttributes.alpha === false);
         return (r ? GPUColorWrite.RED : 0) |
             (g ? GPUColorWrite.GREEN : 0) |
             (b ? GPUColorWrite.BLUE : 0) |
-            (a ? GPUColorWrite.ALPHA : 0);
+            (writeAlpha ? GPUColorWrite.ALPHA : 0);
     }
     getPipelineDescriptor(topology, vertexBufferLayout) {
         const haveFragmentState = this.commonState.drawFramebufferBinding.drawBuffers.some((value) => value === WebGL2RenderingContext.BACK || (WebGL2RenderingContext.COLOR_ATTACHMENT0 <= value && value <= WebGL2RenderingContext.COLOR_ATTACHMENT15));
@@ -1758,11 +2616,14 @@ class HydGlobalState {
             vertex: vertexState,
             primitive: {
                 topology: topology,
+                stripIndexFormat: topology === "line-strip" || topology === "triangle-strip"
+                    ? this.stripIndexFormat
+                    : undefined,
                 cullMode: this.polygonState.cullFace ? this.polygonState.cullFaceMode : undefined,
                 frontFace: this.polygonState.frontFace,
             },
         };
-        let cacheKey = this.commonState.currentProgram.hash + this.polygonState.cullFace.toString() + this.polygonState.cullFaceMode.toString() + this.polygonState.frontFace.toString() + this.polygonState.polygonOffsetFill.toString() + this.polygonState.polygonOffsetUnits.toString() + this.polygonState.polygonOffsetFactor.toString() + this.topology.toString();
+        let cacheKey = this.commonState.currentProgram.hash + this.polygonState.cullFace.toString() + this.polygonState.cullFaceMode.toString() + this.polygonState.frontFace.toString() + this.polygonState.polygonOffsetFill.toString() + this.polygonState.polygonOffsetUnits.toString() + this.polygonState.polygonOffsetFactor.toString() + this.topology.toString() + (this.stripIndexFormat || "none");
         if (haveFragmentState) {
             const blend = this.blendState.enabled ? {
                 color: {
@@ -1786,10 +2647,15 @@ class HydGlobalState {
                     .map((value) => {
                     cacheKey += value.toString();
                     if (value === WebGL2RenderingContext.BACK) {
-                        return { format: 'bgra8unorm', blend, writeMask: this.getColorWriteMask() };
+                        const writeMask = this.getColorWriteMask();
+                        cacheKey += `:${writeMask}`;
+                        return { format: 'bgra8unorm', blend, writeMask };
                     }
                     else if (WebGL2RenderingContext.COLOR_ATTACHMENT0 <= value && value <= WebGL2RenderingContext.COLOR_ATTACHMENT15) {
-                        return { format: this.commonState.drawFramebufferBinding.attachments.get(value).format, blend, writeMask: this.getColorWriteMask() };
+                        const attachment = this.commonState.drawFramebufferBinding.attachments.get(value);
+                        const writeMask = this.getColorWriteMask(attachment);
+                        cacheKey += `:${writeMask}`;
+                        return { format: attachment.format, blend, writeMask };
                     }
                     else {
                         return null;
@@ -1799,27 +2665,35 @@ class HydGlobalState {
         }
         const depthStencilAttachment = this.getDepthStencilAttachment();
         if (depthStencilAttachment) {
-            pipelineDescriptor.depthStencil = {
+            cacheKey += depthStencilAttachment.format;
+            const hasDepth = depthStencilAttachment.format.startsWith("depth");
+            const hasStencil = depthStencilAttachment.format.includes("stencil");
+            const depthStencil = {
                 format: depthStencilAttachment.format,
-                depthWriteEnabled: this.depthState.enabled && this.depthState.writeMask,
-                depthCompare: this.depthState.enabled ? this.depthState.func : 'always',
-                stencilFront: {
+            };
+            if (hasDepth) {
+                depthStencil.depthWriteEnabled = this.depthState.enabled && this.depthState.writeMask;
+                depthStencil.depthCompare = this.depthState.enabled ? this.depthState.func : 'always';
+            }
+            if (hasStencil) {
+                depthStencil.stencilFront = {
                     compare: this.stencilState.frontFunc,
                     failOp: this.stencilState.frontFail,
                     depthFailOp: this.stencilState.frontPassDepthFail,
                     passOp: this.stencilState.frontPassDepthPass,
-                },
-                stencilBack: {
+                };
+                depthStencil.stencilBack = {
                     compare: this.stencilState.backFunc,
                     failOp: this.stencilState.backFail,
                     depthFailOp: this.stencilState.backPassDepthFail,
                     passOp: this.stencilState.backPassDepthPass,
-                },
-                stencilWriteMask: this.stencilState.frontWriteMask,
-                stencilReadMask: this.stencilState.frontValueMask,
-                depthBias: this.polygonState.polygonOffsetFill ? this.polygonState.polygonOffsetUnits : undefined,
-                depthBiasSlopeScale: this.polygonState.polygonOffsetFill ? this.polygonState.polygonOffsetFactor : undefined,
-            };
+                };
+                depthStencil.stencilWriteMask = this.stencilState.frontWriteMask;
+                depthStencil.stencilReadMask = this.stencilState.frontValueMask;
+            }
+            depthStencil.depthBias = this.polygonState.polygonOffsetFill ? this.polygonState.polygonOffsetUnits : undefined;
+            depthStencil.depthBiasSlopeScale = this.polygonState.polygonOffsetFill ? this.polygonState.polygonOffsetFactor : undefined;
+            pipelineDescriptor.depthStencil = depthStencil;
             cacheKey += this.depthState.hash + this.stencilState.hash;
         }
         return [(0,dist/* default */.Ay)(cacheKey).toString(), pipelineDescriptor];
@@ -1882,22 +2756,29 @@ class HydGlobalState {
             colorAttachments: this.commonState.drawFramebufferBinding.drawBuffers
                 .map((value) => {
                 if (value === WebGL2RenderingContext.BACK) {
+                    const clearValue = this.contextAttributes.alpha === false
+                        ? [this.clearState.color[0], this.clearState.color[1], this.clearState.color[2], 1]
+                        : this.clearState.color;
                     return {
                         view: this.__canvasView,
                         label: this.__canvasView.label,
                         loadOp: (this.clearState.target & WebGL2RenderingContext.COLOR_BUFFER_BIT) ? 'clear' : 'load',
                         storeOp: 'store',
-                        clearValue: this.clearState.color,
+                        clearValue,
                     };
                 }
                 else if (WebGL2RenderingContext.COLOR_ATTACHMENT0 <= value && value <= WebGL2RenderingContext.COLOR_ATTACHMENT15) {
-                    const view = this.commonState.drawFramebufferBinding.attachments.get(value).view;
+                    const attachment = this.commonState.drawFramebufferBinding.attachments.get(value);
+                    const view = attachment.view;
+                    const clearValue = attachment.colorBits[3] === 0
+                        ? [this.clearState.color[0], this.clearState.color[1], this.clearState.color[2], 1]
+                        : this.clearState.color;
                     return {
                         view,
                         label: view.label,
                         loadOp: (this.clearState.target & WebGL2RenderingContext.COLOR_BUFFER_BIT) ? 'clear' : 'load',
                         storeOp: 'store',
-                        clearValue: this.clearState.color,
+                        clearValue,
                     };
                 }
                 else {
@@ -1912,19 +2793,28 @@ class HydGlobalState {
             const clearStencil = Boolean(this.clearState.target & WebGL2RenderingContext.STENCIL_BUFFER_BIT);
             const useDepth = this.depthState.enabled || clearDepth;
             const useStencil = this.stencilState.enabled || clearStencil;
+            const hasDepth = dsa.format.startsWith("depth");
+            const hasStencil = dsa.format.includes("stencil");
             renderPassDescriptor.depthStencilAttachment = {
                 view: dsa.view,
                 depthClearValue: this.clearState.depth,
-                depthLoadOp: (useDepth ? (clearDepth ? 'clear' : 'load') : undefined),
-                depthStoreOp: (useDepth ? 'store' : undefined),
-                depthReadOnly: false,
+                depthLoadOp: hasDepth ? (useDepth && clearDepth ? 'clear' : 'load') : undefined,
+                depthStoreOp: hasDepth ? 'store' : undefined,
+                depthReadOnly: hasDepth ? false : undefined,
                 stencilClearValue: this.clearState.stencil,
-                stencilLoadOp: (useStencil ? (clearStencil ? 'clear' : 'load') : undefined),
-                stencilStoreOp: (useStencil ? 'store' : undefined),
-                stencilReadOnly: false,
+                stencilLoadOp: hasStencil ? (useStencil && clearStencil ? 'clear' : 'load') : undefined,
+                stencilStoreOp: hasStencil ? 'store' : undefined,
+                stencilReadOnly: hasStencil ? false : undefined,
             };
         }
         return renderPassDescriptor;
+    }
+    getCurrentRenderPassInfo() {
+        return {
+            hash: (0,dist/* default */.Ay)(this.getRenderPassDescriptorCacheKey()).toString(),
+            bundleDescriptor: this.getRenderBundleEncoderDescriptor(),
+            passDescriptor: this.getRenderPassDescriptor(),
+        };
     }
     _bindGroupCache = new Map();
     _bindGroupLayoutCache = new Map();
@@ -1954,6 +2844,9 @@ class HydGlobalState {
             this._currentVertexAttribBufferKeys[index] = key;
         }
         return [this._currentVertexAttribBuffers[index], key];
+    }
+    updateCurrentVertexAttribBuffer(index) {
+        this.getCurrentVertexAttribBuffer(index);
     }
     getPBV() {
         const [vertexBufferHashes, vertexBuffers, vertexBufferOffsets, vertexBufferLayoutHash, vertexBufferLayout] = this.getVertexBuffer();
@@ -2019,22 +2912,33 @@ class HydGlobalState {
         };
     }
     getDepthStencilAttachment() {
-        const needsDepth = this.depthState.enabled || Boolean(this.clearState.target & WebGL2RenderingContext.DEPTH_BUFFER_BIT);
-        const needsStencil = this.stencilState.enabled || Boolean(this.clearState.target & WebGL2RenderingContext.STENCIL_BUFFER_BIT);
+        const framebuffer = this.commonState.drawFramebufferBinding;
+        let needsDepth = this.depthState.enabled || Boolean(this.clearState.target & WebGL2RenderingContext.DEPTH_BUFFER_BIT);
+        let needsStencil = this.stencilState.enabled || Boolean(this.clearState.target & WebGL2RenderingContext.STENCIL_BUFFER_BIT);
+        if (framebuffer === this.defaultFramebuffer) {
+            needsDepth = needsDepth && this.contextAttributes.depth !== false;
+            needsStencil = needsStencil && this.contextAttributes.stencil === true;
+            if ((needsDepth || needsStencil) && this.contextAttributes.depth !== false && this.contextAttributes.stencil === true) {
+                const attachment = framebuffer.attachments.get(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT);
+                return attachment ? { view: attachment.view, format: attachment.format } : null;
+            }
+        }
         if (needsDepth && needsStencil) {
-            const attachment = this.commonState.drawFramebufferBinding.attachments.get(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT);
+            const attachment = framebuffer.attachments.get(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT);
             if (!attachment)
                 return null;
             return { view: attachment.view, format: attachment.format };
         }
         if (needsDepth) {
-            const attachment = this.commonState.drawFramebufferBinding.attachments.get(WebGL2RenderingContext.DEPTH_ATTACHMENT);
+            const attachment = framebuffer.attachments.get(WebGL2RenderingContext.DEPTH_ATTACHMENT) ||
+                framebuffer.attachments.get(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT);
             if (!attachment)
                 return null;
             return { view: attachment.view, format: attachment.format };
         }
         if (needsStencil) {
-            const attachment = this.commonState.drawFramebufferBinding.attachments.get(WebGL2RenderingContext.STENCIL_ATTACHMENT);
+            const attachment = framebuffer.attachments.get(WebGL2RenderingContext.STENCIL_ATTACHMENT) ||
+                framebuffer.attachments.get(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT);
             if (!attachment)
                 return null;
             return { view: attachment.view, format: attachment.format };
@@ -2104,10 +3008,25 @@ class HydGlobalState {
         const bufferAttributeMap = new Map();
         const vao = this.commonState.vertexArrayBinding;
         const activeAttributeLocations = this.commonState.currentProgram.hydAttributeLocations;
+        const divisorGroupBaseOffsets = new WeakMap();
         const buffers = [];
         const layouts = [];
         const offsets = [];
         const vbKeys = [];
+        for (let location = 0; location < vao.attributes.length; location++) {
+            if (!activeAttributeLocations.has(location))
+                continue;
+            const attribute = vao.attributes[location];
+            if (!attribute.enabled || !attribute.buffer || !attribute.format || attribute.divisor <= 1)
+                continue;
+            let offsetsByLayout = divisorGroupBaseOffsets.get(attribute.buffer);
+            if (!offsetsByLayout) {
+                offsetsByLayout = new Map();
+                divisorGroupBaseOffsets.set(attribute.buffer, offsetsByLayout);
+            }
+            const key = `${attribute.stride}:${attribute.divisor}`;
+            offsetsByLayout.set(key, Math.min(offsetsByLayout.get(key) ?? attribute.offset, attribute.offset));
+        }
         for (let location = 0; location < vao.attributes.length; location++) {
             if (!activeAttributeLocations.has(location))
                 continue;
@@ -2117,20 +3036,41 @@ class HydGlobalState {
                     this.setError(WebGL2RenderingContext.INVALID_OPERATION);
                     return;
                 }
+                let vertexBuffer = attribute.buffer.buffer;
+                let arrayStride = attribute.stride;
+                let attributeOffset = attribute.offset;
+                let format = attribute.format;
+                let bufferHash = attribute.buffer.hash;
+                if (!format) {
+                    const converted = attribute.buffer.getFloatVertexBuffer(attribute.type, attribute.size, attribute.normalized, attribute.webglStride, attribute.offset, attribute.divisor > 1 ? attribute.divisor : 1);
+                    vertexBuffer = converted.buffer;
+                    arrayStride = converted.arrayStride;
+                    attributeOffset = 0;
+                    format = converted.format;
+                    bufferHash = converted.key;
+                }
+                else if (attribute.divisor > 1) {
+                    const layoutKey = `${attribute.stride}:${attribute.divisor}`;
+                    const sourceOffset = divisorGroupBaseOffsets.get(attribute.buffer)?.get(layoutKey) ?? attribute.offset;
+                    const expanded = attribute.buffer.getDivisorVertexBuffer(attribute.stride, attribute.divisor, sourceOffset);
+                    vertexBuffer = expanded.buffer;
+                    attributeOffset -= sourceOffset;
+                    bufferHash = expanded.key;
+                }
                 const stepMode = attribute.divisor > 0 ? 'instance' : 'vertex';
-                let hash = attribute.buffer.hash + '|' + attribute.stride + '|' + stepMode + '|' + Math.floor(attribute.offset / 2048);
+                let hash = bufferHash + '|' + arrayStride + '|' + stepMode + '|' + Math.floor(attributeOffset / 2048);
                 if (bufferAttributeMap.has(hash)) {
                     bufferAttributeMap.get(hash)[3].push({
                         shaderLocation: attribute.shaderLocation,
-                        offset: attribute.offset,
-                        format: attribute.format,
+                        offset: attributeOffset,
+                        format,
                     });
                 }
                 else {
-                    bufferAttributeMap.set(hash, [attribute.buffer.buffer, attribute.stride, stepMode, [{
+                    bufferAttributeMap.set(hash, [vertexBuffer, arrayStride, stepMode, [{
                                 shaderLocation: attribute.shaderLocation,
-                                offset: attribute.offset,
-                                format: attribute.format,
+                                offset: attributeOffset,
+                                format,
                             }]]);
                 }
             }
@@ -2190,6 +3130,9 @@ class HydHashPbv {
 class HydGlobalStateHashed extends HydGlobalState {
     _hashPbvCur = new HydHashPbv(null);
     _hashPbvCache = new Map();
+    get stateToken() {
+        return this._hashPbvCur;
+    }
     recordTransition(glFunc, ...glArgs) {
         this.recordTransitionOne(glFunc + '$' + glArgs.join(','));
     }
@@ -2231,7 +3174,9 @@ class HydGlobalStateHashed extends HydGlobalState {
             + this.stencilState.hash
             + textureUnitHash
             + this.clearState.target.toString()
-            + this.topology;
+            + this.drawingBufferGeneration.toString()
+            + this.topology
+            + (this.stripIndexFormat || "none");
     }
     getPBV() {
         const pbv = this._hashPbvCur;
@@ -2301,6 +3246,10 @@ const enumToViewDimension = new Map([
     [WebGL2RenderingContext.TEXTURE_CUBE_MAP_NEGATIVE_Z, 'cube'],
 ]);
 const enumToConstant = new Map([
+    [WebGL2RenderingContext.ALIASED_LINE_WIDTH_RANGE, new Float32Array([1, 1])],
+    [WebGL2RenderingContext.ALIASED_POINT_SIZE_RANGE, new Float32Array([1, 1])],
+    [WebGL2RenderingContext.COMPRESSED_TEXTURE_FORMATS, new Uint32Array(0)],
+    [WebGL2RenderingContext.SUBPIXEL_BITS, 4],
     [WebGL2RenderingContext.MAX_COMBINED_TEXTURE_IMAGE_UNITS, 16],
     [WebGL2RenderingContext.MAX_CUBE_MAP_TEXTURE_SIZE, 4096],
     [WebGL2RenderingContext.MAX_FRAGMENT_UNIFORM_VECTORS, 1024],
@@ -2311,7 +3260,7 @@ const enumToConstant = new Map([
     [WebGL2RenderingContext.MAX_VERTEX_ATTRIBS, 16],
     [WebGL2RenderingContext.MAX_VERTEX_TEXTURE_IMAGE_UNITS, 16],
     [WebGL2RenderingContext.MAX_VERTEX_UNIFORM_VECTORS, 1024],
-    [WebGL2RenderingContext.MAX_VIEWPORT_DIMS, [4096, 4096]],
+    [WebGL2RenderingContext.MAX_VIEWPORT_DIMS, new Int32Array([16384, 16384])],
     [WebGL2RenderingContext.MAX_3D_TEXTURE_SIZE, 256],
     [WebGL2RenderingContext.MAX_ARRAY_TEXTURE_LAYERS, 256],
     [WebGL2RenderingContext.MAX_CLIENT_WAIT_TIMEOUT_WEBGL, 0],
@@ -2339,13 +3288,13 @@ const enumToConstant = new Map([
     [WebGL2RenderingContext.MAX_VERTEX_OUTPUT_COMPONENTS, 64],
     [WebGL2RenderingContext.MAX_VERTEX_UNIFORM_BLOCKS, 12],
     [WebGL2RenderingContext.MAX_VERTEX_UNIFORM_COMPONENTS, 4096],
-    [WebGL2RenderingContext.VERSION, "WebGL 2.0 (OpenGL ES 3.0 Chromium)"],
 ]);
 const enumToIndexFormat = new Map([
     [WebGL2RenderingContext.UNSIGNED_SHORT, 'uint16'],
     [WebGL2RenderingContext.UNSIGNED_INT, 'uint32'],
 ]);
 const indexEnumToBytes = new Map([
+    [WebGL2RenderingContext.UNSIGNED_BYTE, 1],
     [WebGL2RenderingContext.UNSIGNED_SHORT, 2],
     [WebGL2RenderingContext.UNSIGNED_INT, 4],
 ]);
@@ -2402,10 +3351,51 @@ function getVertexFormat(type, size, normalized) {
     throw new Error(`Unsupported vertex format: ${type}, ${size}, ${normalized}`);
 }
 
+;// ./src/components/hydShader.ts
+window.hydTmp = new Set();
+class HydShader {
+    shaderTranslator;
+    glsl_shader = "";
+    compiled_glsl_shader = "";
+    shader_info;
+    translated_glsl_shader = "";
+    infoLog = "";
+    validationShader = null;
+    validationContext = null;
+    ownerToken;
+    device;
+    deleted = false;
+    destroyed = false;
+    attachmentCount = 0;
+    compiled = false;
+    type;
+    webglVersion;
+    sourceLength = 0;
+    static errorShaderCount = 0;
+    constructor(device, target, shaderTranslator, ownerToken, webglVersion = 1) {
+        this.type = target;
+        this.webglVersion = webglVersion;
+        this.device = device;
+        this.shaderTranslator = shaderTranslator;
+        this.ownerToken = ownerToken;
+    }
+    compileShader() {
+        this.compiled_glsl_shader = this.glsl_shader;
+        this.shader_info = this.shaderTranslator.inspectShader(this.type, this.glsl_shader);
+        if (!this.shader_info.wgsl) {
+            console.warn("[HYD] shader WGSL deferred to runtime translator.");
+        }
+    }
+}
+
 ;// ./src/components/shaderDB.ts
 
 
 
+function attributeLocationSpan(glslType) {
+    const matrix = /^mat([2-4])(?:x[2-4])?$/.exec(glslType);
+    return matrix ? Number(matrix[1]) : 1;
+}
 function samplerFlipYUniformName(samplerName) {
     return `_hyd_samplerFlipY_${samplerName}`;
 }
@@ -2481,7 +3471,9 @@ function MergeShaderInfo(shaderInfo) {
     for (const info of shaderInfo) {
         for (const uniform of info.uniforms) {
             if (uniformMap.has(uniform.name)) {
-                if (uniformMap.get(uniform.name).glsl_type !== uniform.glsl_type) {
+                const existing = uniformMap.get(uniform.name);
+                if (existing.glsl_type !== uniform.glsl_type ||
+                    existing.size !== uniform.size || existing.is_array !== uniform.is_array) {
                     throw new Error(`uniform ${uniform.name} type conflict`);
                 }
             }
@@ -2510,14 +3502,16 @@ function ShaderInfo2HydAus(shaderInfo) {
     return {
         attributes: shaderInfo.attributes.map((attr, idx) => {
             return {
-                name: attr.name,
+                name: attr.source_name || attr.name,
+                shaderName: attr.name,
                 location: idx,
+                locationSpan: attributeLocationSpan(attr.glsl_type),
                 type: Type2Constant.get(attr.glsl_type),
                 size: 1,
             };
         }),
         uniforms: shaderInfo.uniforms.map((uniform) => {
-            return new ProgramUniformBuffer(uniform.name, Type2Constant.get(uniform.glsl_type), 1, !!uniform.internal, uniform.source_name);
+            return new ProgramUniformBuffer(uniform.name, Type2Constant.get(uniform.glsl_type), uniform.size || 1, !!uniform.internal, uniform.source_name, !!uniform.is_array);
         }),
         samplers: shaderInfo.samplers.map((sampler) => {
             const webglType = Type2Constant.get(sampler.glsl_type);
@@ -2525,7 +3519,7 @@ function ShaderInfo2HydAus(shaderInfo) {
                 throw new Error(`unknown sampler type ${sampler.glsl_type}`);
             }
             const sampleType = samplerSampleType(sampler.wgsl_texture_type);
-            return new ProgramUniformSampler(sampler.name, webglType, samplerViewDimension(sampler.wgsl_texture_type), sampleType, samplerBindingType(sampleType), sampler.source_name);
+            return new ProgramUniformSampler(sampler.name, webglType, samplerViewDimension(sampler.wgsl_texture_type), sampleType, samplerBindingType(sampleType), sampler.source_name, sampler.size || 1, sampler.array_name, sampler.array_index, !!sampler.is_array);
         }),
     };
 }
@@ -2533,6 +3527,14 @@ function ShaderInfo2String(shaderInfo) {
     let res = "";
     let offset = 0;
     if (shaderInfo.uniforms.length > 0) {
+        const declarations = new Set();
+        for (const uniform of shaderInfo.uniforms) {
+            for (const declaration of uniform.wgsl_declarations || [])
+                declarations.add(declaration);
+        }
+        if (declarations.size > 0) {
+            res += `${Array.from(declarations).join("\n\n")}\n\n`;
+        }
         res += "struct HydUniformObject {\n";
         for (const uniform of shaderInfo.uniforms) {
             res += `  ${uniform.name}: ${uniform.wgsl_type},\n`;
@@ -2548,6 +3550,12 @@ function ShaderInfo2String(shaderInfo) {
     }
     return res;
 }
+
+;// ./src/components/shaderInternalUniforms.ts
+const FRAG_COORD_HEIGHT_UNIFORM_NAME = "hyd_internal_fragCoordHeight";
+const DEPTH_RANGE_NEAR_UNIFORM_NAME = "hyd_internal_depthRangeNear";
+const DEPTH_RANGE_FAR_UNIFORM_NAME = "hyd_internal_depthRangeFar";
+const DEPTH_RANGE_DIFF_UNIFORM_NAME = "hyd_internal_depthRangeDiff";
 
 ;// ./src/components/shaderCapture.ts
 
@@ -2627,7 +3635,324 @@ function emitShaderCapture(record) {
     }
 }
 
+;// ./src/components/shaderWgslTypes.ts
+function escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function replaceBareWgslIdentifier(source, from, to) {
+    const escaped = escapeRegExp(from);
+    return source.replace(new RegExp(`\\b${escaped}\\b`, "g"), (match, offset) => {
+        let previous = offset - 1;
+        while (previous >= 0 && /\s/.test(source[previous]))
+            previous--;
+        if (previous >= 0 && source[previous] === ".")
+            return match;
+        const openParen = source.lastIndexOf("(", offset);
+        const closeParen = source.lastIndexOf(")", offset);
+        if (openParen > closeParen) {
+            const attributePrefix = source.slice(Math.max(0, openParen - 64), openParen);
+            if (/@[A-Za-z_]\w*\s*$/.test(attributePrefix))
+                return match;
+        }
+        return to;
+    });
+}
+const WGSL_RESERVED_IDENTIFIERS = new Set(`
+NULL Self abstract active alignas alignof as asm asm_fragment async attribute auto await become cast catch class
+co_await co_return co_yield coherent column_major common compile compile_fragment concept const_cast consteval
+constexpr constinit crate debugger decltype delete demote demote_to_helper do dynamic_cast enum explicit export
+extends extern external fallthrough filter final finally friend from fxgroup get goto groupshared highp impl
+implements import inline instanceof interface layout lowp macro macro_rules match mediump meta mod module move mut
+mutable namespace new nil noexcept noinline nointerpolation non_coherent noncoherent noperspective null nullptr of
+operator package packoffset partition pass patch pixelfragment precise precision premerge priv protected pub public
+readonly ref regardless register reinterpret_cast require resource restrict self set shared sizeof smooth snorm static
+static_assert static_cast std subroutine super target template this thread_local throw trait try type typedef typeid
+typename typeof union unless unorm unsafe unsized use using varying virtual volatile wgsl where with writeonly yield
+`.trim().split(/\s+/));
+function isReservedWgslIdentifier(name) {
+    return WGSL_RESERVED_IDENTIFIERS.has(name);
+}
+function renameReservedWgslIdentifiers(wgsl) {
+    const declaredNames = new Set();
+    const declarationPatterns = [
+        /\b(?:alias|const|let|override|struct|fn)\s+([A-Za-z_]\w*)/g,
+        /\bvar(?:\s*<[^>]+>)?\s+([A-Za-z_]\w*)/g,
+        /(?:^|[({,])\s*(?:@[A-Za-z_]\w*(?:\([^)]*\))?\s*)*([A-Za-z_]\w*)\s*:/gm,
+    ];
+    for (const pattern of declarationPatterns) {
+        for (let match = pattern.exec(wgsl); match !== null; match = pattern.exec(wgsl)) {
+            if (WGSL_RESERVED_IDENTIFIERS.has(match[1]))
+                declaredNames.add(match[1]);
+        }
+    }
+    let out = wgsl;
+    for (const name of declaredNames) {
+        let replacement = `${name}_`;
+        while (new RegExp(`\\b${escapeRegExp(replacement)}\\b`).test(out))
+            replacement += "_";
+        out = out.replace(new RegExp(`\\b${escapeRegExp(name)}\\b`, "g"), replacement);
+    }
+    return out;
+}
+function wgslUniformVariableNames(source) {
+    const names = [];
+    const pattern = /\bvar\s*<\s*uniform\s*>\s+([A-Za-z_]\w*)\s*:/g;
+    for (let match = pattern.exec(source); match !== null; match = pattern.exec(source)) {
+        names.push(match[1]);
+    }
+    return names;
+}
+function replaceWgslMemberAccess(source, objectNames, member, to) {
+    let out = source;
+    for (const objectName of objectNames) {
+        out = out.replace(new RegExp(`\\b${escapeRegExp(objectName)}\\s*\\.\\s*${escapeRegExp(member)}\\b`, "g"), to);
+    }
+    return out;
+}
+function stableIdentifierHash(value) {
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < value.length; i++) {
+        hash ^= value.charCodeAt(i);
+        hash = Math.imul(hash, 0x01000193);
+    }
+    return (hash >>> 0).toString(36);
+}
+function findMatchingBrace(source, openIndex) {
+    let depth = 0;
+    let lineComment = false;
+    let blockComment = false;
+    for (let i = openIndex; i < source.length; i++) {
+        const ch = source[i];
+        const next = source[i + 1];
+        if (lineComment) {
+            if (ch === "\n")
+                lineComment = false;
+            continue;
+        }
+        if (blockComment) {
+            if (ch === "*" && next === "/") {
+                blockComment = false;
+                i++;
+            }
+            continue;
+        }
+        if (ch === "/" && next === "/") {
+            lineComment = true;
+            i++;
+            continue;
+        }
+        if (ch === "/" && next === "*") {
+            blockComment = true;
+            i++;
+            continue;
+        }
+        if (ch === "{") {
+            depth++;
+        }
+        else if (ch === "}") {
+            depth--;
+            if (depth === 0)
+                return i;
+        }
+    }
+    return -1;
+}
+function splitStructFields(body) {
+    const fields = [];
+    let start = 0;
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let braceDepth = 0;
+    let angleDepth = 0;
+    let lineComment = false;
+    let blockComment = false;
+    for (let i = 0; i < body.length; i++) {
+        const ch = body[i];
+        const next = body[i + 1];
+        if (lineComment) {
+            if (ch === "\n")
+                lineComment = false;
+            continue;
+        }
+        if (blockComment) {
+            if (ch === "*" && next === "/") {
+                blockComment = false;
+                i++;
+            }
+            continue;
+        }
+        if (ch === "/" && next === "/") {
+            lineComment = true;
+            i++;
+        }
+        else if (ch === "/" && next === "*") {
+            blockComment = true;
+            i++;
+        }
+        else if (ch === "(") {
+            parenDepth++;
+        }
+        else if (ch === ")") {
+            parenDepth--;
+        }
+        else if (ch === "[") {
+            bracketDepth++;
+        }
+        else if (ch === "]") {
+            bracketDepth--;
+        }
+        else if (ch === "{") {
+            braceDepth++;
+        }
+        else if (ch === "}") {
+            braceDepth--;
+        }
+        else if (ch === "<") {
+            angleDepth++;
+        }
+        else if (ch === ">" && angleDepth > 0) {
+            angleDepth--;
+        }
+        else if (ch === "," && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0 && angleDepth === 0) {
+            fields.push(body.slice(start, i));
+            start = i + 1;
+        }
+    }
+    if (body.slice(start).trim())
+        fields.push(body.slice(start));
+    return fields;
+}
+function parseStructs(wgsl) {
+    const structs = new Map();
+    const structRegex = /\bstruct\s+([A-Za-z_]\w*)\s*\{/g;
+    for (let match = structRegex.exec(wgsl); match !== null; match = structRegex.exec(wgsl)) {
+        const bodyOpen = structRegex.lastIndex - 1;
+        const bodyClose = findMatchingBrace(wgsl, bodyOpen);
+        if (bodyClose < 0)
+            continue;
+        const fields = [];
+        for (const rawField of splitStructFields(wgsl.slice(bodyOpen + 1, bodyClose))) {
+            const field = rawField
+                .replace(/\/\*[\s\S]*?\*\//g, " ")
+                .replace(/\/\/.*$/gm, " ")
+                .trim();
+            const fieldMatch = /^((?:\s*@[A-Za-z_]\w*(?:\([^)]*\))?\s*)*)([A-Za-z_]\w*)\s*:\s*([\s\S]+)$/.exec(field);
+            if (!fieldMatch)
+                continue;
+            fields.push({
+                attributes: fieldMatch[1].replace(/\s+/g, " ").trim(),
+                name: fieldMatch[2],
+                type: fieldMatch[3].trim(),
+            });
+        }
+        structs.set(match[1], { fields, start: match.index, end: bodyClose + 1 });
+        structRegex.lastIndex = bodyClose + 1;
+    }
+    return structs;
+}
+function parseAliases(wgsl) {
+    const aliases = new Map();
+    const aliasRegex = /\balias\s+([A-Za-z_]\w*)\s*=\s*([^;]+);/g;
+    for (let match = aliasRegex.exec(wgsl); match !== null; match = aliasRegex.exec(wgsl)) {
+        aliases.set(match[1], { type: match[2].trim(), start: match.index, end: aliasRegex.lastIndex });
+    }
+    return aliases;
+}
+function uniformStructNames(wgsl) {
+    const names = new Set();
+    const uniformVarRegex = /\bvar\s*<\s*uniform\s*>\s+[A-Za-z_]\w*\s*:\s*([A-Za-z_]\w*)\s*;/g;
+    for (let match = uniformVarRegex.exec(wgsl); match !== null; match = uniformVarRegex.exec(wgsl)) {
+        names.add(match[1]);
+    }
+    return names;
+}
+function synchronizeTintUniformTypes(wgsl, metadata) {
+    if (metadata.uniforms.length === 0)
+        return wgsl;
+    const structs = parseStructs(wgsl);
+    const aliases = parseAliases(wgsl);
+    const declarations = new Map();
+    const resolvedNames = new Map();
+    const resolving = new Set();
+    const resolveType = (type) => type.replace(/\b[A-Za-z_]\w*\b/g, (name) => {
+        if (!aliases.has(name) && !structs.has(name))
+            return name;
+        const cached = resolvedNames.get(name);
+        if (cached)
+            return cached;
+        if (resolving.has(name))
+            return name;
+        resolving.add(name);
+        let resolved = name;
+        const alias = aliases.get(name);
+        if (alias !== undefined) {
+            resolved = resolveType(alias.type);
+        }
+        else {
+            const parsed = structs.get(name);
+            if (parsed) {
+                const fields = parsed.fields.map((field) => ({ ...field, type: resolveType(field.type) }));
+                const shape = fields.map((field) => `${field.attributes}|${field.name}:${field.type}`).join(";");
+                resolved = `_hyd_uniform_layout_${stableIdentifierHash(shape)}`;
+                if (!declarations.has(resolved)) {
+                    const fieldLines = fields.map((field) => `  ${field.attributes ? `${field.attributes} ` : ""}${field.name}: ${field.type},`);
+                    declarations.set(resolved, `struct ${resolved} {\n${fieldLines.join("\n")}\n};`);
+                }
+            }
+        }
+        resolving.delete(name);
+        resolvedNames.set(name, resolved);
+        return resolved;
+    });
+    const tintFields = new Map();
+    for (const structName of uniformStructNames(wgsl)) {
+        const uniformStruct = structs.get(structName);
+        if (!uniformStruct)
+            continue;
+        for (const field of uniformStruct.fields)
+            tintFields.set(field.name, field.type);
+    }
+    for (const uniform of metadata.uniforms) {
+        const tintType = tintFields.get(uniform.name);
+        if (tintType)
+            uniform.wgsl_type = resolveType(tintType);
+    }
+    const emittedDeclarations = Array.from(declarations.values());
+    for (const uniform of metadata.uniforms) {
+        uniform.wgsl_declarations = emittedDeclarations;
+    }
+    const ranges = [];
+    for (const name of resolvedNames.keys()) {
+        const alias = aliases.get(name);
+        if (alias)
+            ranges.push({ start: alias.start, end: alias.end });
+        const struct = structs.get(name);
+        if (struct)
+            ranges.push({ start: struct.start, end: struct.end });
+    }
+    let out = wgsl;
+    for (const range of ranges.sort((a, b) => b.start - a.start)) {
+        out = out.slice(0, range.start) + out.slice(range.end);
+    }
+    for (const [name, resolved] of Array.from(resolvedNames.entries()).sort((a, b) => b[0].length - a[0].length)) {
+        if (name === resolved)
+            continue;
+        out = out.replace(new RegExp(`\\b${name}\\b`, "g"), resolved);
+    }
+    return out;
+}
+function composeShaderModuleWgsl(resourceDeclarations, shaderWgsl) {
+    const directivePrefix = shaderWgsl.match(/^\s*((?:(?:enable|requires)\s+[^;]+;\s*|diagnostic\s*\([^;]+\)\s*;\s*)+)/);
+    if (!directivePrefix)
+        return resourceDeclarations + shaderWgsl;
+    const directives = directivePrefix[1].trim();
+    const body = shaderWgsl.slice(directivePrefix[0].length).trimStart();
+    return `${directives}\n\n${resourceDeclarations}${body}`;
+}
+
 ;// ./src/components/hydProgram.ts
+
+
 
 
 
@@ -2686,6 +4011,20 @@ const glSizeToAlignedBytes = new Map([
     [WebGL2RenderingContext.FLOAT_MAT4x2, 2 * 4],
     [WebGL2RenderingContext.FLOAT_MAT4x3, 4 * 4],
 ]);
+const glMatrixDimensions = new Map([
+    [WebGL2RenderingContext.FLOAT_MAT2, { columns: 2, rows: 2 }],
+    [WebGL2RenderingContext.FLOAT_MAT3, { columns: 3, rows: 3 }],
+    [WebGL2RenderingContext.FLOAT_MAT4, { columns: 4, rows: 4 }],
+    [WebGL2RenderingContext.FLOAT_MAT2x3, { columns: 2, rows: 3 }],
+    [WebGL2RenderingContext.FLOAT_MAT2x4, { columns: 2, rows: 4 }],
+    [WebGL2RenderingContext.FLOAT_MAT3x2, { columns: 3, rows: 2 }],
+    [WebGL2RenderingContext.FLOAT_MAT3x4, { columns: 3, rows: 4 }],
+    [WebGL2RenderingContext.FLOAT_MAT4x2, { columns: 4, rows: 2 }],
+    [WebGL2RenderingContext.FLOAT_MAT4x3, { columns: 4, rows: 3 }],
+]);
+function uniformMatrixDimensions(type) {
+    return glMatrixDimensions.get(type) || null;
+}
 class ProgramUniformBuffer {
     name;
     size;
@@ -2693,25 +4032,39 @@ class ProgramUniformBuffer {
     offset;
     byteLength;
     alignedByteLength;
+    elementByteLength;
+    elementStride;
     internal;
     sourceName;
     dataView;
     float32View;
     int32View;
     uint32View;
+    writeFloat32View = null;
+    writeInt32View = null;
+    writeUint32View = null;
     wordOffset;
+    arrayStrideWords = 0;
+    remainingArrayElements = 1;
+    isArray;
     ownerToken;
     program;
     linkGeneration;
-    useToken = 0;
-    constructor(name, type, size, internal = false, sourceName) {
+    constructor(name, type, size, internal = false, sourceName, isArray = false) {
         this.name = name;
         this.size = size;
         this.webgl_type = type;
         this.internal = internal;
         this.sourceName = sourceName;
-        this.byteLength = glSizeToBytes.get(type);
-        this.alignedByteLength = glSizeToAlignedBytes.get(type);
+        this.isArray = isArray;
+        const matrix = uniformMatrixDimensions(type);
+        this.elementByteLength = matrix ? matrix.columns * 16 : glSizeToBytes.get(type);
+        const elementAlignment = matrix ? 16 : glSizeToAlignedBytes.get(type);
+        this.elementStride = isArray
+            ? Math.ceil(this.elementByteLength / Math.max(16, elementAlignment)) * Math.max(16, elementAlignment)
+            : this.elementByteLength;
+        this.byteLength = isArray ? this.elementStride * size : this.elementByteLength;
+        this.alignedByteLength = isArray ? Math.max(16, elementAlignment) : elementAlignment;
     }
 }
 class ProgramUniformSampler {
@@ -2728,16 +4081,25 @@ class ProgramUniformSampler {
     ownerToken;
     program;
     linkGeneration;
-    useToken = 0;
-    constructor(name, webgl_type, viewDimension, sampleType = "float", samplerBindingType = "filtering", sourceName) {
+    activeForUniformUpdates = false;
+    storage;
+    arrayName;
+    arrayIndex;
+    arrayElements;
+    remainingArrayElements = 1;
+    isArray;
+    constructor(name, webgl_type, viewDimension, sampleType = "float", samplerBindingType = "filtering", sourceName, size = 1, arrayName, arrayIndex, isArray = false) {
         this.name = name;
-        this.size = 1;
+        this.size = size;
         this.webgl_type = webgl_type;
         this.textureUnit = 0;
         this.sampleType = sampleType;
         this.samplerBindingType = samplerBindingType;
         this.viewDimension = viewDimension;
         this.sourceName = sourceName;
+        this.arrayName = arrayName;
+        this.arrayIndex = arrayIndex;
+        this.isArray = isArray;
     }
 }
 function cloneShaderInfo(info) {
@@ -2853,11 +4215,9 @@ function insertSamplerOriginFlipHelper(wgsl) {
         return wgsl;
     }
     const helper = `fn _hyd_samplerOriginCoordFlip(texCoord: vec2<f32>) -> vec2<f32> {\n    return vec2<f32>(texCoord.x, 1.0 - texCoord.y);\n}\n\n`;
-    const fragmentIndex = wgsl.indexOf("@fragment");
-    if (fragmentIndex < 0) {
-        return helper + wgsl;
-    }
-    return wgsl.slice(0, fragmentIndex) + helper + wgsl.slice(fragmentIndex);
+    const directivePrefix = wgsl.match(/^\s*(?:(?:(?:enable|requires)\s+[^;]+;|diagnostic\s*\([^;]+\)\s*;)\s*)+/);
+    const insertion = directivePrefix ? directivePrefix[0].length : 0;
+    return wgsl.slice(0, insertion) + helper + wgsl.slice(insertion);
 }
 function hasSamplerOriginCall(wgsl) {
     const callee = "_hyd_samplerOriginCoord";
@@ -2902,7 +4262,7 @@ class HydProgram {
         if (!this.samplerOriginVariantKey) {
             return this._hash;
         }
-        return `${this._hash}origin:${this.samplerOriginVariantKey}:${this.fragmentModule?.label || ""}|`;
+        return `${this._hash}origin:${this.samplerOriginVariantKey}:${this.vertexModule?.label || ""}:${this.fragmentModule?.label || ""}|`;
     }
     vertexShader;
     fragmentShader;
@@ -2910,6 +4270,7 @@ class HydProgram {
     shaderTranslator;
     vertexModule;
     fragmentModule;
+    vertexWgsl = "";
     fragmentWgsl = "";
     samplerOriginVariants = new Map();
     samplerOriginVariantKey = "";
@@ -2924,7 +4285,13 @@ class HydProgram {
     hydAttributes = [];
     hydAttributeLocations = new Set();
     hydUniforms = [];
+    fragCoordHeightUniform = null;
+    fragCoordHeightValue = Number.NaN;
+    depthRangeUniforms = [];
+    depthRangeValue = [Number.NaN, Number.NaN];
     hydSamplers = [];
+    uniformBufferLocations = [];
+    uniformSamplerLocations = [];
     hydSampler2D = [];
     originUniformStateVersion = -1;
     originVariantStateVersion = -1;
@@ -3054,8 +4421,30 @@ class HydProgram {
         const runtimeShaderInfo = this.staticSamplerOriginVariants ? baseShaderInfo : dynamicShaderInfo;
         const code = ShaderInfo2String(runtimeShaderInfo);
         const dynamicCode = this.staticSamplerOriginVariants ? ShaderInfo2String(dynamicShaderInfo) : code;
+        this.vertexWgsl = composeShaderModuleWgsl(code, this.vertexShader.shader_info.wgsl);
+        this.fragmentWgsl = composeShaderModuleWgsl(code, this.fragmentShader.shader_info.wgsl);
+        let vs = this.vertexWgsl;
+        let fs = this.fragmentWgsl;
+        if (this.staticSamplerOriginVariants) {
+            const defaultFlips = new Map();
+            for (const sampler of runtimeShaderInfo.samplers) {
+                if (sampler.glsl_type === "sampler2D") {
+                    defaultFlips.set(sampler.name, false);
+                }
+            }
+            vs = specializeSamplerOriginWgsl(this.vertexWgsl, defaultFlips);
+            fs = specializeSamplerOriginWgsl(this.fragmentWgsl, defaultFlips);
+            if (vs.includes("_hyd_samplerFlipY_") || fs.includes("_hyd_samplerFlipY_")) {
+                this.staticSamplerOriginVariants = false;
+                this.vertexWgsl = composeShaderModuleWgsl(dynamicCode, this.vertexShader.shader_info.wgsl);
+                this.fragmentWgsl = composeShaderModuleWgsl(dynamicCode, this.fragmentShader.shader_info.wgsl);
+                vs = this.vertexWgsl;
+                fs = this.fragmentWgsl;
+            }
+        }
+        this.samplerOriginVariants.clear();
+        this.samplerOriginVariantKey = "";
         if (this.vertexShader) {
-            const vs = code + this.vertexShader.shader_info.wgsl;
             console.debug('[HYD] linkProgram vertex:\n\n', vs);
             if (this.vertexShader.shader_info.shader_capture) {
                 emitShaderCapture({
@@ -3069,24 +4458,6 @@ class HydProgram {
             this._hash += this.vertexModule.label + '|';
         }
         if (this.fragmentShader) {
-            this.fragmentWgsl = code + this.fragmentShader.shader_info.wgsl;
-            let fs = this.fragmentWgsl;
-            if (this.staticSamplerOriginVariants) {
-                const defaultFlips = new Map();
-                for (const sampler of runtimeShaderInfo.samplers) {
-                    if (sampler.glsl_type === "sampler2D") {
-                        defaultFlips.set(sampler.name, false);
-                    }
-                }
-                fs = specializeSamplerOriginWgsl(this.fragmentWgsl, defaultFlips);
-                if (fs.includes("_hyd_samplerFlipY_")) {
-                    this.staticSamplerOriginVariants = false;
-                    fs = dynamicCode + this.fragmentShader.shader_info.wgsl;
-                    this.fragmentWgsl = fs;
-                }
-            }
-            this.samplerOriginVariants.clear();
-            this.samplerOriginVariantKey = "";
             console.debug('[HYD] linkProgram fragment:\n\n', fs);
             if (this.fragmentShader.shader_info.shader_capture) {
                 emitShaderCapture({
@@ -3102,13 +4473,26 @@ class HydProgram {
         const aus = ShaderInfo2HydAus(this.staticSamplerOriginVariants ? runtimeShaderInfo : dynamicShaderInfo);
         this.hydAttributes = aus.attributes;
         for (const attribute of this.hydAttributes) {
-            const location = translatedProgram.attributeLocations?.get(attribute.name);
+            const location = translatedProgram.attributeLocations?.get(attribute.shaderName);
             if (location !== undefined) {
                 attribute.location = location;
             }
         }
-        this.hydAttributeLocations = new Set(this.hydAttributes.map((attribute) => attribute.location));
+        this.hydAttributeLocations = new Set();
+        for (const attribute of this.hydAttributes) {
+            for (let offset = 0; offset < attribute.locationSpan; offset++) {
+                this.hydAttributeLocations.add(attribute.location + offset);
+            }
+        }
         this.hydUniforms = aus.uniforms;
+        this.fragCoordHeightUniform = this.hydUniforms.find((uniform) => uniform.name === FRAG_COORD_HEIGHT_UNIFORM_NAME) || null;
+        this.fragCoordHeightValue = Number.NaN;
+        this.depthRangeUniforms = [
+            DEPTH_RANGE_NEAR_UNIFORM_NAME,
+            DEPTH_RANGE_FAR_UNIFORM_NAME,
+            DEPTH_RANGE_DIFF_UNIFORM_NAME,
+        ].map((name) => this.hydUniforms.find((uniform) => uniform.name === name) || null);
+        this.depthRangeValue = [Number.NaN, Number.NaN];
         this.hydSamplers = aus.samplers;
         for (const uniform of this.hydUniforms) {
             uniform.ownerToken = this.ownerToken;
@@ -3156,7 +4540,8 @@ class HydProgram {
         return offset + this.alignedUniformSize;
     }
     applySamplerOriginVariant(samplerOriginFlips) {
-        if (!this.fragmentShader || this.fragmentWgsl.length === 0 || samplerOriginFlips.size === 0) {
+        if (!this.vertexShader || !this.fragmentShader || this.vertexWgsl.length === 0 ||
+            this.fragmentWgsl.length === 0 || samplerOriginFlips.size === 0) {
             this.samplerOriginVariantKey = "";
             return;
         }
@@ -3184,12 +4569,31 @@ class HydProgram {
         }
         let variant = this.samplerOriginVariants.get(key);
         if (!variant) {
-            const wgsl = specializeSamplerOriginWgsl(this.fragmentWgsl, samplerOriginFlips);
+            const vertexWgsl = specializeSamplerOriginWgsl(this.vertexWgsl, samplerOriginFlips);
+            const fragmentWgsl = specializeSamplerOriginWgsl(this.fragmentWgsl, samplerOriginFlips);
             variant = {
-                wgsl,
-                module: this.device.createShaderModule({ code: wgsl, label: (0,dist/* default */.Ay)(wgsl).toString() }),
+                vertexWgsl,
+                fragmentWgsl,
+                vertexModule: this.device.createShaderModule({
+                    code: vertexWgsl,
+                    label: (0,dist/* default */.Ay)(vertexWgsl).toString(),
+                }),
+                fragmentModule: this.device.createShaderModule({
+                    code: fragmentWgsl,
+                    label: (0,dist/* default */.Ay)(fragmentWgsl).toString(),
+                }),
             };
             this.samplerOriginVariants.set(key, variant);
+            if (this.vertexShader.shader_info.shader_capture) {
+                emitShaderCapture({
+                    ...this.vertexShader.shader_info.shader_capture,
+                    kind: "shader-final",
+                    source: "runtime-origin-variant",
+                    programId: this._hash,
+                    shaderId: `${this.vertexShader.shader_info.shader_capture.shaderId}:origin:${key}`,
+                    finalWgsl: sourceCapture(vertexWgsl),
+                });
+            }
             if (this.fragmentShader.shader_info.shader_capture) {
                 emitShaderCapture({
                     ...this.fragmentShader.shader_info.shader_capture,
@@ -3197,11 +4601,12 @@ class HydProgram {
                     source: "runtime-origin-variant",
                     programId: this._hash,
                     shaderId: `${this.fragmentShader.shader_info.shader_capture.shaderId}:origin:${key}`,
-                    finalWgsl: sourceCapture(wgsl),
+                    finalWgsl: sourceCapture(fragmentWgsl),
                 });
             }
         }
-        this.fragmentModule = variant.module;
+        this.vertexModule = variant.vertexModule;
+        this.fragmentModule = variant.fragmentModule;
         this.samplerOriginVariantKey = key;
     }
 }
@@ -3216,17 +4621,50 @@ class HydBuffer {
     deleted = false;
     webglSize = 0;
     webglUsage = 0x88E4;
+    bindingKind = null;
     descriptor = {
         size: undefined,
         usage: GPUBufferUsage.COPY_DST,
     };
     shadowData = new Uint8Array(0);
+    writeVersion = 0;
+    uint16IndexBuffer = null;
+    uint16IndexBufferVersion = -1;
+    indexRangeMaxCache = new Map();
+    expandedIndexBuffers = new Map();
+    convertedVertexBuffers = new Map();
+    divisorVertexBuffers = new Map();
+    lastMaxIndexType = 0;
+    lastMaxIndexOffset = -1;
+    lastMaxIndexCount = -1;
+    lastMaxIndexValue = -1;
     constructor(device, ownerToken) {
         this.device = device;
         this.ownerToken = ownerToken;
         this.descriptor.label = `buffer ${HydBuffer.__total__++}`;
     }
+    invalidateIndexCaches() {
+        this.uint16IndexBuffer?.destroy();
+        this.uint16IndexBuffer = null;
+        this.uint16IndexBufferVersion = -1;
+        for (const expanded of this.expandedIndexBuffers.values()) {
+            expanded.buffer.destroy();
+        }
+        for (const converted of this.convertedVertexBuffers.values()) {
+            converted.buffer.destroy();
+        }
+        for (const expanded of this.divisorVertexBuffers.values()) {
+            expanded.buffer.destroy();
+        }
+        this.expandedIndexBuffers.clear();
+        this.convertedVertexBuffers.clear();
+        this.divisorVertexBuffers.clear();
+        this.indexRangeMaxCache.clear();
+        this.lastMaxIndexCount = -1;
+    }
     write(data = null, dstOffset = 0) {
+        this.writeVersion++;
+        this.invalidateIndexCaches();
         if (this.__buffer__ && (this.__buffer__.size !== this.descriptor.size)) {
             this.__buffer__.destroy();
             this.__buffer__ = null;
@@ -3238,20 +4676,240 @@ class HydBuffer {
         if (this.shadowData.byteLength !== this.descriptor.size) {
             this.shadowData = new Uint8Array(this.descriptor.size);
         }
+        else if (data === null) {
+            this.shadowData.fill(0);
+        }
         if (data !== null) {
-            const secondLength = data.byteLength & 3;
-            const firstLength = data.byteLength - secondLength;
-            const source = data instanceof ArrayBuffer
-                ? new Uint8Array(data)
-                : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+            const source = ArrayBuffer.isView(data)
+                ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+                : new Uint8Array(data);
             this.shadowData.set(source, dstOffset);
-            this.device.queue.writeBuffer(this.__buffer__, dstOffset, source.subarray(0, firstLength));
-            if (secondLength > 0) {
-                const tmpUint8Array = new Uint8Array(4);
-                tmpUint8Array.set(source.subarray(firstLength));
-                this.device.queue.writeBuffer(this.__buffer__, dstOffset + firstLength, tmpUint8Array);
+            if (source.byteLength > 0) {
+                const alignedStart = dstOffset & ~3;
+                const alignedEnd = (dstOffset + source.byteLength + 3) & ~3;
+                this.device.queue.writeBuffer(this.__buffer__, alignedStart, this.shadowData.buffer, this.shadowData.byteOffset + alignedStart, alignedEnd - alignedStart);
             }
         }
+    }
+    get version() {
+        return this.writeVersion;
+    }
+    get hasConvertedVertexBuffers() {
+        return this.convertedVertexBuffers.size > 0 || this.divisorVertexBuffers.size > 0;
+    }
+    readIndex(type, byteOffset) {
+        if (type === WebGL2RenderingContext.UNSIGNED_BYTE) {
+            return this.shadowData[byteOffset];
+        }
+        const view = new DataView(this.shadowData.buffer, this.shadowData.byteOffset, this.shadowData.byteLength);
+        if (type === WebGL2RenderingContext.UNSIGNED_SHORT) {
+            return view.getUint16(byteOffset, true);
+        }
+        return view.getUint32(byteOffset, true);
+    }
+    maxIndex(type, byteOffset, count) {
+        if (count <= 0)
+            return -1;
+        if (this.lastMaxIndexType === type &&
+            this.lastMaxIndexOffset === byteOffset &&
+            this.lastMaxIndexCount === count) {
+            return this.lastMaxIndexValue;
+        }
+        const key = `${type}:${byteOffset}:${count}`;
+        const cached = this.indexRangeMaxCache.get(key);
+        if (cached !== undefined) {
+            this.lastMaxIndexType = type;
+            this.lastMaxIndexOffset = byteOffset;
+            this.lastMaxIndexCount = count;
+            this.lastMaxIndexValue = cached;
+            return cached;
+        }
+        const indexSize = type === WebGL2RenderingContext.UNSIGNED_BYTE ? 1 :
+            type === WebGL2RenderingContext.UNSIGNED_SHORT ? 2 : 4;
+        let max = -1;
+        for (let i = 0; i < count; i++) {
+            max = Math.max(max, this.readIndex(type, byteOffset + i * indexSize));
+        }
+        this.indexRangeMaxCache.set(key, max);
+        this.lastMaxIndexType = type;
+        this.lastMaxIndexOffset = byteOffset;
+        this.lastMaxIndexCount = count;
+        this.lastMaxIndexValue = max;
+        return max;
+    }
+    getExpandedIndexBuffer(mode, type, byteOffset, count) {
+        const key = `${mode}:${type}:${byteOffset}:${count}`;
+        const cached = this.expandedIndexBuffers.get(key);
+        if (cached)
+            return cached;
+        let indices;
+        if (mode === WebGL2RenderingContext.TRIANGLE_FAN) {
+            indices = new Uint32Array(Math.max(0, count - 2) * 3);
+            if (count >= 3) {
+                const first = this.readIndex(type, byteOffset);
+                for (let i = 0; i < count - 2; i++) {
+                    indices[i * 3] = first;
+                    indices[i * 3 + 1] = this.readIndex(type, byteOffset + (i + 1) * (type === WebGL2RenderingContext.UNSIGNED_BYTE ? 1 : type === WebGL2RenderingContext.UNSIGNED_SHORT ? 2 : 4));
+                    indices[i * 3 + 2] = this.readIndex(type, byteOffset + (i + 2) * (type === WebGL2RenderingContext.UNSIGNED_BYTE ? 1 : type === WebGL2RenderingContext.UNSIGNED_SHORT ? 2 : 4));
+                }
+            }
+        }
+        else {
+            indices = new Uint32Array(count >= 2 ? count * 2 : 0);
+            if (count >= 2) {
+                const indexSize = type === WebGL2RenderingContext.UNSIGNED_BYTE ? 1 : type === WebGL2RenderingContext.UNSIGNED_SHORT ? 2 : 4;
+                const first = this.readIndex(type, byteOffset);
+                let previous = first;
+                for (let i = 1; i < count; i++) {
+                    const current = this.readIndex(type, byteOffset + i * indexSize);
+                    indices[(i - 1) * 2] = previous;
+                    indices[(i - 1) * 2 + 1] = current;
+                    previous = current;
+                }
+                indices[(count - 1) * 2] = previous;
+                indices[(count - 1) * 2 + 1] = first;
+            }
+        }
+        const buffer = this.device.createBuffer({
+            label: `${this.descriptor.label} expanded-${mode}-${type}-${byteOffset}-${count}-v${this.writeVersion}`,
+            size: Math.max(4, indices.byteLength),
+            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        });
+        if (indices.byteLength > 0) {
+            this.device.queue.writeBuffer(buffer, 0, indices.buffer, indices.byteOffset, indices.byteLength);
+        }
+        const expanded = { buffer, indexCount: indices.length, format: "uint32" };
+        this.expandedIndexBuffers.set(key, expanded);
+        return expanded;
+    }
+    vertexComponent(view, type, byteOffset, normalized) {
+        switch (type) {
+            case WebGL2RenderingContext.BYTE: {
+                const value = view.getInt8(byteOffset);
+                return normalized ? Math.max(value / 127, -1) : value;
+            }
+            case WebGL2RenderingContext.UNSIGNED_BYTE: {
+                const value = view.getUint8(byteOffset);
+                return normalized ? value / 255 : value;
+            }
+            case WebGL2RenderingContext.SHORT: {
+                const value = view.getInt16(byteOffset, true);
+                return normalized ? Math.max(value / 32767, -1) : value;
+            }
+            case WebGL2RenderingContext.UNSIGNED_SHORT: {
+                const value = view.getUint16(byteOffset, true);
+                return normalized ? value / 65535 : value;
+            }
+            case WebGL2RenderingContext.INT:
+                return view.getInt32(byteOffset, true);
+            case WebGL2RenderingContext.UNSIGNED_INT:
+                return view.getUint32(byteOffset, true);
+            case WebGL2RenderingContext.HALF_FLOAT: {
+                const bits = view.getUint16(byteOffset, true);
+                const sign = bits & 0x8000 ? -1 : 1;
+                const exponent = (bits >>> 10) & 0x1f;
+                const fraction = bits & 0x03ff;
+                if (exponent === 0)
+                    return sign * Math.pow(2, -14) * (fraction / 1024);
+                if (exponent === 0x1f)
+                    return fraction ? NaN : sign * Infinity;
+                return sign * Math.pow(2, exponent - 15) * (1 + fraction / 1024);
+            }
+            default:
+                return view.getFloat32(byteOffset, true);
+        }
+    }
+    getFloatVertexBuffer(type, size, normalized, webglStride, offset, divisor = 1) {
+        const key = `${type}:${size}:${normalized ? 1 : 0}:${webglStride}:${offset}:d${divisor}`;
+        const cached = this.convertedVertexBuffers.get(key);
+        if (cached)
+            return cached;
+        const componentBytes = type === WebGL2RenderingContext.BYTE || type === WebGL2RenderingContext.UNSIGNED_BYTE ? 1 :
+            type === WebGL2RenderingContext.SHORT || type === WebGL2RenderingContext.UNSIGNED_SHORT || type === WebGL2RenderingContext.HALF_FLOAT ? 2 : 4;
+        const elementBytes = size * componentBytes;
+        const sourceStride = webglStride || elementBytes;
+        const elementCount = this.webglSize < offset + elementBytes
+            ? 0
+            : Math.floor((this.webglSize - offset - elementBytes) / sourceStride) + 1;
+        const repeatCount = Math.max(1, divisor);
+        const values = new Float32Array(elementCount * repeatCount * size);
+        const sourceView = new DataView(this.shadowData.buffer, this.shadowData.byteOffset, this.shadowData.byteLength);
+        for (let element = 0; element < elementCount; element++) {
+            const sourceBase = offset + element * sourceStride;
+            for (let component = 0; component < size; component++) {
+                const value = this.vertexComponent(sourceView, type, sourceBase + component * componentBytes, normalized);
+                for (let repeat = 0; repeat < repeatCount; repeat++) {
+                    values[(element * repeatCount + repeat) * size + component] = value;
+                }
+            }
+        }
+        const format = ["float32", "float32x2", "float32x3", "float32x4"][size - 1];
+        const arrayStride = size * 4;
+        const buffer = this.device.createBuffer({
+            label: `${this.descriptor.label} float-vertex-${key}-v${this.writeVersion}`,
+            size: Math.max(4, values.byteLength),
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        });
+        if (values.byteLength > 0) {
+            this.device.queue.writeBuffer(buffer, 0, values.buffer, values.byteOffset, values.byteLength);
+        }
+        const converted = { buffer, format, arrayStride, key: `${this.hash}|float:${key}:v${this.writeVersion}` };
+        this.convertedVertexBuffers.set(key, converted);
+        return converted;
+    }
+    getDivisorVertexBuffer(arrayStride, divisor, sourceOffset) {
+        const key = `${arrayStride}:${divisor}:${sourceOffset}`;
+        const cached = this.divisorVertexBuffers.get(key);
+        if (cached)
+            return cached;
+        const sourceByteLength = Math.max(0, this.webglSize - sourceOffset);
+        const recordCount = sourceByteLength === 0 ? 0 : Math.ceil(sourceByteLength / arrayStride);
+        const expandedByteLength = recordCount * divisor * arrayStride;
+        const uploadByteLength = Math.max(4, (expandedByteLength + 3) & ~3);
+        const expandedData = new Uint8Array(uploadByteLength);
+        for (let record = 0; record < recordCount; record++) {
+            const sourceStart = sourceOffset + record * arrayStride;
+            const sourceEnd = Math.min(sourceStart + arrayStride, this.webglSize);
+            const source = this.shadowData.subarray(sourceStart, sourceEnd);
+            for (let repeat = 0; repeat < divisor; repeat++) {
+                expandedData.set(source, (record * divisor + repeat) * arrayStride);
+            }
+        }
+        const buffer = this.device.createBuffer({
+            label: `${this.descriptor.label} divisor-${divisor}-${arrayStride}-${sourceOffset}-v${this.writeVersion}`,
+            size: uploadByteLength,
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        });
+        if (expandedByteLength > 0) {
+            this.device.queue.writeBuffer(buffer, 0, expandedData.buffer, expandedData.byteOffset, uploadByteLength);
+        }
+        const expanded = {
+            buffer,
+            key: `${this.hash}|divisor:${arrayStride}:${divisor}:${sourceOffset}:v${this.writeVersion}`,
+        };
+        this.divisorVertexBuffers.set(key, expanded);
+        return expanded;
+    }
+    getUint16IndexBuffer() {
+        if (this.uint16IndexBuffer && this.uint16IndexBufferVersion === this.writeVersion) {
+            return this.uint16IndexBuffer;
+        }
+        const elementCount = this.webglSize;
+        const size = Math.max(4, (elementCount * 2 + 3) & ~3);
+        const converted = new Uint16Array(size / 2);
+        for (let i = 0; i < elementCount; i++) {
+            converted[i] = this.shadowData[i];
+        }
+        this.uint16IndexBuffer = this.device.createBuffer({
+            label: `${this.descriptor.label} uint8-to-uint16 v${this.writeVersion}`,
+            size,
+            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        });
+        if (elementCount > 0) {
+            this.device.queue.writeBuffer(this.uint16IndexBuffer, 0, converted.buffer, converted.byteOffset, size);
+        }
+        this.uint16IndexBufferVersion = this.writeVersion;
+        return this.uint16IndexBuffer;
     }
     get buffer() {
         return this.__buffer__;
@@ -3824,6 +5482,177 @@ const hydWebGLConstants = {
     ZERO: 0,
 };
 
+;// ./src/components/shaderGlslIdentifiers.ts
+
+const GLSL_310_IDENTIFIER_CONFLICTS = new Set([
+    "abs", "acos", "all", "any", "asin", "atan", "ceil", "clamp", "cos", "cosh", "cross",
+    "degrees", "determinant", "distance", "dot", "exp", "exp2", "faceforward", "floor", "fwidth",
+    "isinf", "isnan", "length", "log", "log2", "max", "min", "modf", "normalize", "pow",
+    "radians", "reflect", "refract", "round", "sign", "sin", "sinh", "smoothstep", "sqrt", "step",
+    "tan", "tanh", "texture", "transpose", "trunc",
+    "layout", "centroid", "smooth", "case", "resource",
+    "mat2x2", "mat2x3", "mat2x4", "mat3x2", "mat3x3", "mat3x4", "mat4x2", "mat4x3", "mat4x4",
+    "uint", "uvec2", "uvec3", "uvec4",
+    "samplerCubeShadow", "sampler2DArray", "sampler2DArrayShadow",
+    "isampler2D", "isampler3D", "isamplerCube", "isampler2DArray",
+    "usampler2D", "usampler3D", "usamplerCube", "usampler2DArray",
+]);
+const GLSL_ES100_LANGUAGE_TOKENS = new Set([
+    "attribute", "const", "uniform", "varying", "break", "continue", "do", "for", "while",
+    "if", "else", "in", "out", "inout", "float", "int", "void", "bool", "true", "false",
+    "lowp", "mediump", "highp", "precision", "invariant", "discard", "return", "struct",
+    "mat2", "mat3", "mat4", "vec2", "vec3", "vec4", "ivec2", "ivec3", "ivec4",
+    "bvec2", "bvec3", "bvec4", "sampler2D", "samplerCube",
+]);
+const GLSL_PREDEFINED_DUNDER_IDENTIFIERS = new Set([
+    "__FILE__",
+    "__LINE__",
+    "__VERSION__",
+]);
+function maskComments(source) {
+    const masked = source.split("");
+    let lineComment = false;
+    let blockComment = false;
+    for (let index = 0; index < source.length; index++) {
+        const ch = source[index];
+        const next = source[index + 1];
+        if (lineComment) {
+            if (ch === "\n")
+                lineComment = false;
+            else
+                masked[index] = " ";
+            continue;
+        }
+        if (blockComment) {
+            if (ch === "*" && next === "/") {
+                masked[index] = " ";
+                masked[index + 1] = " ";
+                blockComment = false;
+                index++;
+            }
+            else if (ch !== "\n") {
+                masked[index] = " ";
+            }
+            continue;
+        }
+        if (ch === "/" && next === "/") {
+            masked[index] = " ";
+            masked[index + 1] = " ";
+            lineComment = true;
+            index++;
+        }
+        else if (ch === "/" && next === "*") {
+            masked[index] = " ";
+            masked[index + 1] = " ";
+            blockComment = true;
+            index++;
+        }
+    }
+    return masked.join("");
+}
+function isTopLevelAt(source, index) {
+    let braceDepth = 0;
+    let parenDepth = 0;
+    for (let cursor = 0; cursor < index; cursor++) {
+        if (source[cursor] === "{")
+            braceDepth++;
+        else if (source[cursor] === "}")
+            braceDepth = Math.max(0, braceDepth - 1);
+        else if (source[cursor] === "(")
+            parenDepth++;
+        else if (source[cursor] === ")")
+            parenDepth = Math.max(0, parenDepth - 1);
+    }
+    return braceDepth === 0 && parenDepth === 0;
+}
+function shaderGlslIdentifiers_escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function renameUserDefinedFunctions(source) {
+    const masked = maskComments(source);
+    const names = new Set();
+    const signature = /(?:^|[;}\n])\s*(?:(?:lowp|mediump|highp)\s+)?[A-Za-z_]\w*\s+([A-Za-z_]\w*)\s*\(/gm;
+    for (let match = signature.exec(masked); match !== null; match = signature.exec(masked)) {
+        const name = match[1];
+        const nameOffset = match.index + match[0].lastIndexOf(name);
+        if (name !== "main" && isTopLevelAt(masked, nameOffset))
+            names.add(name);
+    }
+    if (names.size === 0)
+        return source;
+    const alternatives = Array.from(names)
+        .sort((left, right) => right.length - left.length)
+        .map(shaderGlslIdentifiers_escapeRegExp)
+        .join("|");
+    const call = new RegExp(`\\b(?:${alternatives})\\b(?=\\s*\\()`, "g");
+    let result = "";
+    let cursor = 0;
+    for (let match = call.exec(masked); match !== null; match = call.exec(masked)) {
+        let previous = match.index - 1;
+        while (previous >= 0 && /\s/.test(masked[previous]))
+            previous--;
+        if (previous >= 0 && masked[previous] === ".")
+            continue;
+        result += source.slice(cursor, match.index);
+        result += `_hyd_user_${match[0]}`;
+        cursor = call.lastIndex;
+    }
+    return cursor === 0 ? source : result + source.slice(cursor);
+}
+function bridgeGlslIdentifier(name) {
+    if (GLSL_310_IDENTIFIER_CONFLICTS.has(name) || isReservedWgslIdentifier(name)) {
+        return `hydgl2gpu_id_${name}`;
+    }
+    return bridgeGlslDunderIdentifier(name);
+}
+function bridgeGlslDunderIdentifier(name) {
+    if (!name.includes("__") || name.startsWith("gl_") || GLSL_PREDEFINED_DUNDER_IDENTIFIERS.has(name))
+        return name;
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < name.length; index++) {
+        hash ^= name.charCodeAt(index);
+        hash = Math.imul(hash, 0x01000193);
+    }
+    const readableName = name.replace(/_+/g, "_").replace(/^_+|_+$/g, "") || "identifier";
+    return `hydgl2gpu_dunder_${readableName}_${(hash >>> 0).toString(36)}`;
+}
+function bridgeIdentifiers(source, includeEs310Conflicts) {
+    const masked = maskComments(source);
+    const structTypes = new Set();
+    const structPattern = /\bstruct\s+([A-Za-z_]\w*)/g;
+    for (let match = structPattern.exec(masked); match !== null; match = structPattern.exec(masked)) {
+        if (bridgeGlslIdentifier(match[1]) !== match[1])
+            structTypes.add(match[1]);
+    }
+    const identifier = /\b[A-Za-z_]\w*\b/g;
+    let out = "";
+    let cursor = 0;
+    for (let match = identifier.exec(masked); match !== null; match = identifier.exec(masked)) {
+        const name = match[0];
+        const dunder = bridgeGlslDunderIdentifier(name) !== name;
+        const versionConflict = includeEs310Conflicts &&
+            !GLSL_ES100_LANGUAGE_TOKENS.has(name) &&
+            bridgeGlslIdentifier(name) !== name;
+        if (!dunder && !versionConflict)
+            continue;
+        let next = identifier.lastIndex;
+        while (next < masked.length && /\s/.test(masked[next]))
+            next++;
+        if (!dunder && masked[next] === "(" && !structTypes.has(name))
+            continue;
+        out += source.slice(cursor, match.index);
+        out += bridgeGlslIdentifier(name);
+        cursor = identifier.lastIndex;
+    }
+    return cursor === 0 ? source : out + source.slice(cursor);
+}
+function bridgeGlslEs100Identifiers(source) {
+    return bridgeIdentifiers(source, true);
+}
+function bridgeGlslDunderIdentifiers(source) {
+    return bridgeIdentifiers(source, false);
+}
+
 ;// ./src/components/hydWebGLStatic.ts
 
 
@@ -3835,12 +5664,207 @@ const hydWebGLConstants = {
 
 
 
-const GLOB_GL_CTX = document.createElement('canvas').getContext('webgl2');
+
+
+const hydWebGLStatic_NATIVE_CANVAS_GET_CONTEXT = HTMLCanvasElement.prototype.getContext;
+const hydWebGLStatic_GL_SRGB_EXT = 0x8C40;
+const hydWebGLStatic_GL_SRGB_ALPHA_EXT = 0x8C42;
+const GL_SRGB8_ALPHA8_EXT = 0x8C43;
+const GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING_EXT = 0x8210;
+const RENDER_PASS_DESCRIPTOR_CALLBACK = Symbol("renderPassDescriptorCallback");
+let validationWebGl1 = null;
+let validationWebGl2 = null;
+const hydCanvasContexts = new WeakMap();
+let canvasReadHooksInstalled = false;
+let straightAlphaCanvasScratch;
+let synchronousReadbackScratch;
+function getSynchronousReadbackScratch() {
+    if (synchronousReadbackScratch?.gl.isContextLost())
+        synchronousReadbackScratch = undefined;
+    if (synchronousReadbackScratch === undefined) {
+        const canvas = document.createElement("canvas");
+        const gl = hydWebGLStatic_NATIVE_CANVAS_GET_CONTEXT.call(canvas, "webgl2", {
+            alpha: true,
+            antialias: false,
+            premultipliedAlpha: true,
+            preserveDrawingBuffer: true,
+        });
+        const texture = gl?.createTexture() || null;
+        const framebuffer = gl?.createFramebuffer() || null;
+        synchronousReadbackScratch = gl && texture && framebuffer
+            ? { canvas, gl, texture, framebuffer }
+            : null;
+    }
+    return synchronousReadbackScratch;
+}
+function prepareStraightAlphaCanvas(pixels, width, height) {
+    if (straightAlphaCanvasScratch === undefined) {
+        const canvas = document.createElement("canvas");
+        const gl = hydWebGLStatic_NATIVE_CANVAS_GET_CONTEXT.call(canvas, "webgl2", {
+            alpha: true,
+            antialias: false,
+            premultipliedAlpha: false,
+            preserveDrawingBuffer: true,
+        });
+        const texture = gl?.createTexture() || null;
+        const framebuffer = gl?.createFramebuffer() || null;
+        straightAlphaCanvasScratch = gl && texture && framebuffer
+            ? { canvas, gl, texture, framebuffer }
+            : null;
+    }
+    const scratch = straightAlphaCanvasScratch;
+    if (!scratch)
+        return null;
+    const { canvas, gl, texture, framebuffer } = scratch;
+    if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+    }
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, framebuffer);
+    gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    gl.blitFramebuffer(0, 0, width, height, 0, 0, width, height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.finish();
+    return gl.getError() === gl.NO_ERROR ? canvas : null;
+}
+function installCanvasReadHooks() {
+    if (canvasReadHooksInstalled)
+        return;
+    canvasReadHooksInstalled = true;
+    if (typeof CanvasRenderingContext2D !== "undefined") {
+        const nativeDrawImage = CanvasRenderingContext2D.prototype.drawImage;
+        CanvasRenderingContext2D.prototype.drawImage = function (...args) {
+            let source = args[0];
+            if (typeof HTMLCanvasElement !== "undefined" && source instanceof HTMLCanvasElement) {
+                source = hydCanvasContexts.get(source)?.prepareCanvasForExternalRead() || source;
+                args[0] = source;
+            }
+            return nativeDrawImage.apply(this, args);
+        };
+    }
+    const nativeToDataUrl = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function (...args) {
+        const source = hydCanvasContexts.get(this)?.prepareCanvasForExternalRead() || this;
+        return nativeToDataUrl.apply(source, args);
+    };
+    const nativeToBlob = HTMLCanvasElement.prototype.toBlob;
+    HTMLCanvasElement.prototype.toBlob = function (...args) {
+        const source = hydCanvasContexts.get(this)?.prepareCanvasForExternalRead() || this;
+        return nativeToBlob.apply(source, args);
+    };
+}
+function createNativeValidationContext(type) {
+    const canvas = document.createElement("canvas");
+    const attributes = { alpha: false, antialias: false, depth: false, stencil: false };
+    return (hydWebGLStatic_NATIVE_CANVAS_GET_CONTEXT.call(canvas, type, attributes) ||
+        (type === "webgl" ? hydWebGLStatic_NATIVE_CANVAS_GET_CONTEXT.call(canvas, "experimental-webgl", attributes) : null));
+}
+function nativeValidationContext(type) {
+    if (type === "webgl2") {
+        if (!validationWebGl2 || validationWebGl2.isContextLost()) {
+            validationWebGl2 = createNativeValidationContext("webgl2");
+        }
+        return validationWebGl2;
+    }
+    if (!validationWebGl1 || validationWebGl1.isContextLost()) {
+        validationWebGl1 = createNativeValidationContext("webgl");
+    }
+    return validationWebGl1;
+}
 const frameBeginFuncLst = [];
 const frameEndFuncList = [];
 const VALID_PIXEL_ALIGNMENT = new Set([1, 2, 4, 8]);
+const SUPPORTED_EXTENSION_NAMES = [
+    "ANGLE_instanced_arrays",
+    "OES_element_index_uint",
+    "EXT_sRGB",
+];
+const SUPPORTED_EXTENSION_BY_LOWER_NAME = new Map(SUPPORTED_EXTENSION_NAMES.map((name) => [name.toLowerCase(), name]));
+const VALID_DRAW_MODES = new Set([
+    WebGL2RenderingContext.POINTS,
+    WebGL2RenderingContext.LINES,
+    WebGL2RenderingContext.LINE_LOOP,
+    WebGL2RenderingContext.LINE_STRIP,
+    WebGL2RenderingContext.TRIANGLES,
+    WebGL2RenderingContext.TRIANGLE_STRIP,
+    WebGL2RenderingContext.TRIANGLE_FAN,
+]);
 let frameDepth = 0;
 let autoFrameScheduled = false;
+function isBufferSource(value) {
+    if (ArrayBuffer.isView(value))
+        return true;
+    if (value instanceof ArrayBuffer)
+        return true;
+    const SharedArrayBufferConstructor = globalThis.SharedArrayBuffer;
+    return Boolean(SharedArrayBufferConstructor && value instanceof SharedArrayBufferConstructor);
+}
+function toWebGlInt32(value) {
+    return Number(value) >> 0;
+}
+function toWebGlInt64(value) {
+    const converted = Number(value);
+    return Number.isFinite(converted) ? Math.trunc(converted) : 0;
+}
+function clampWebGlUnitFloat(value) {
+    if (Number.isNaN(value))
+        return 0;
+    return Math.min(1, Math.max(0, value));
+}
+function isWebGlIdentifierName(name, allowUniformPath = false) {
+    if (!allowUniformPath)
+        return /^[A-Za-z_]\w*$/.test(name);
+    return /^[A-Za-z_]\w*(?:(?:\[\d+\])|(?:\.[A-Za-z_]\w*))*$/.test(name);
+}
+function isVisibleActiveUniform(uniform) {
+    return !uniform.internal || Boolean(uniform.sourceName?.startsWith("gl_"));
+}
+function mixesConstantColorAndAlpha(first, second) {
+    const color = first === WebGL2RenderingContext.CONSTANT_COLOR ||
+        first === WebGL2RenderingContext.ONE_MINUS_CONSTANT_COLOR ||
+        second === WebGL2RenderingContext.CONSTANT_COLOR ||
+        second === WebGL2RenderingContext.ONE_MINUS_CONSTANT_COLOR;
+    const alpha = first === WebGL2RenderingContext.CONSTANT_ALPHA ||
+        first === WebGL2RenderingContext.ONE_MINUS_CONSTANT_ALPHA ||
+        second === WebGL2RenderingContext.CONSTANT_ALPHA ||
+        second === WebGL2RenderingContext.ONE_MINUS_CONSTANT_ALPHA;
+    return color && alpha;
+}
+function vertexComponentByteSize(type) {
+    switch (type) {
+        case WebGL2RenderingContext.BYTE:
+        case WebGL2RenderingContext.UNSIGNED_BYTE:
+            return 1;
+        case WebGL2RenderingContext.SHORT:
+        case WebGL2RenderingContext.UNSIGNED_SHORT:
+        case WebGL2RenderingContext.HALF_FLOAT:
+            return 2;
+        case WebGL2RenderingContext.INT:
+        case WebGL2RenderingContext.UNSIGNED_INT:
+        case WebGL2RenderingContext.FLOAT:
+            return 4;
+        default:
+            return 0;
+    }
+}
+function vertexFormatNeedsFloatConversion(type, size, normalized) {
+    if (type === WebGL2RenderingContext.FLOAT)
+        return false;
+    if (type === WebGL2RenderingContext.HALF_FLOAT)
+        return size !== 2 && size !== 4;
+    if (type === WebGL2RenderingContext.INT || type === WebGL2RenderingContext.UNSIGNED_INT)
+        return true;
+    return !normalized || (size !== 2 && size !== 4);
+}
 function beginFrame() {
     if (frameDepth++ === 0) {
         frameBeginFuncLst.forEach((func) => func());
@@ -3875,8 +5899,10 @@ function ensureAutoFrame() {
     });
 }
 class HydWebGLStatic {
-    static nextUniformUseToken = 1;
+    [RENDER_PASS_DESCRIPTOR_CALLBACK];
     hydLastCanvasSize = [-1, -1];
+    canvasSizeDirty = true;
+    maxDrawingBufferDimension;
     hydMaxUniSize;
     hydCanvas;
     hydGpuctx;
@@ -3887,10 +5913,10 @@ class HydWebGLStatic {
     hydWrapper;
     hydContextType;
     hydGlobalState;
-    bindedGetRenderPassDesc;
     hydRpCache;
     shaderTranslator;
     triangleFanIndexBuffers = new Map();
+    lineLoopIndexBuffers = new Map();
     hydTextureObjects = new WeakMap();
     hydBufferObjects = new WeakMap();
     contextToken = {};
@@ -3901,10 +5927,142 @@ class HydWebGLStatic {
     gpuScissorDirty = true;
     lastDrawPbv = null;
     pendingReadbacks = [];
-    currentUniformUseToken = HydWebGLStatic.nextUniformUseToken++;
+    activeUniformBuffers = [];
+    activeUniformSamplers = [];
     currentProgramValid = false;
     synchronousReadbackCanvas = null;
     synchronousReadbackContext = null;
+    synchronousSnapshotCanvas = null;
+    synchronousSnapshotContext = null;
+    snapshotRgbPipeline = null;
+    snapshotAlphaPipeline = null;
+    exactExternalReadCanvas = null;
+    exactExternalReadContext = null;
+    defaultFramebufferBackingTexture = null;
+    defaultFramebufferBackingView = null;
+    useDefaultFramebufferBacking = true;
+    defaultFramebufferBackingNeedsPresentation = false;
+    defaultFramebufferNeedsImplicitClear = true;
+    canvasPresentationPipeline = null;
+    canvasPresentationBindGroup = null;
+    enabledExtensions = new Set();
+    extensionObjects = new Map();
+    drawValidationCache = new WeakMap();
+    indexedDrawCache = new WeakMap();
+    arrayDrawCache = new WeakMap();
+    lastIndexedDraw = null;
+    lastArrayDraw = null;
+    get unpackColorSpace() {
+        return this.hydGlobalState?.miscState.unpackColorSpace || "srgb";
+    }
+    set unpackColorSpace(value) {
+        if ((value === "srgb" || value === "display-p3") && this.hydGlobalState) {
+            this.hydGlobalState.miscState.unpackColorSpace = value;
+        }
+    }
+    getSnapshotPipeline(channel) {
+        const cached = channel === "rgb" ? this.snapshotRgbPipeline : this.snapshotAlphaPipeline;
+        if (cached)
+            return cached;
+        const module = this.hydDevice.createShaderModule({
+            label: "lossless texture snapshot shader",
+            code: `
+@group(0) @binding(0) var source : texture_2d<f32>;
+
+@vertex
+fn vertexMain(@builtin(vertex_index) index : u32) -> @builtin(position) vec4f {
+  let positions = array<vec2f, 3>(
+    vec2f(-1.0, -1.0),
+    vec2f(3.0, -1.0),
+    vec2f(-1.0, 3.0)
+  );
+  return vec4f(positions[index], 0.0, 1.0);
+}
+
+@fragment
+fn fragmentRgb(@builtin(position) position : vec4f) -> @location(0) vec4f {
+  let color = textureLoad(source, vec2i(position.xy), 0);
+  return vec4f(color.rgb, 1.0);
+}
+
+@fragment
+fn fragmentAlpha(@builtin(position) position : vec4f) -> @location(0) vec4f {
+  let color = textureLoad(source, vec2i(position.xy), 0);
+  return vec4f(color.aaa, 1.0);
+}
+`,
+        });
+        const pipeline = this.hydDevice.createRenderPipeline({
+            label: `lossless ${channel} texture snapshot pipeline`,
+            layout: "auto",
+            vertex: { module, entryPoint: "vertexMain" },
+            fragment: {
+                module,
+                entryPoint: channel === "rgb" ? "fragmentRgb" : "fragmentAlpha",
+                targets: [{ format: "bgra8unorm" }],
+            },
+            primitive: { topology: "triangle-list" },
+        });
+        if (channel === "rgb") {
+            this.snapshotRgbPipeline = pipeline;
+        }
+        else {
+            this.snapshotAlphaPipeline = pipeline;
+        }
+        return pipeline;
+    }
+    snapshotTextureChannel(texture, width, height, channel, mipLevel = 0, layer = 0, viewFormat) {
+        if (typeof OffscreenCanvas === "undefined")
+            return null;
+        if (!this.synchronousSnapshotCanvas) {
+            this.synchronousSnapshotCanvas = new OffscreenCanvas(width, height);
+            this.synchronousSnapshotContext = this.synchronousSnapshotCanvas.getContext("webgpu");
+        }
+        const canvas = this.synchronousSnapshotCanvas;
+        const context = this.synchronousSnapshotContext;
+        if (!context)
+            return null;
+        if (canvas.width !== width || canvas.height !== height) {
+            canvas.width = width;
+            canvas.height = height;
+        }
+        context.configure({
+            device: this.hydDevice,
+            format: "bgra8unorm",
+            alphaMode: "opaque",
+            usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+        const pipeline = this.getSnapshotPipeline(channel);
+        const sourceView = texture.createView({
+            dimension: "2d",
+            format: viewFormat,
+            baseMipLevel: mipLevel,
+            mipLevelCount: 1,
+            baseArrayLayer: layer,
+            arrayLayerCount: 1,
+        });
+        const bindGroup = this.hydDevice.createBindGroup({
+            label: `lossless ${channel} texture snapshot bind group`,
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [{ binding: 0, resource: sourceView }],
+        });
+        const encoder = this.hydDevice.createCommandEncoder({ label: `synchronous ${channel} texture snapshot` });
+        const pass = encoder.beginRenderPass({
+            label: `synchronous ${channel} texture snapshot pass`,
+            colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    loadOp: "clear",
+                    storeOp: "store",
+                    clearValue: [0, 0, 0, 1],
+                }],
+        });
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.draw(3);
+        pass.end();
+        this.hydDevice.queue.submit([encoder.finish()]);
+        return canvas.transferToImageBitmap();
+    }
     increaseOk() {
     }
     decreaseOk() {
@@ -3912,7 +6070,83 @@ class HydWebGLStatic {
     get wrapperContext() {
         return this.hydWrapper;
     }
+    get drawingBufferWidth() {
+        if (this.canvasSizeDirty)
+            this.updateCanvasSize();
+        return Math.max(1, Math.min(this.hydCanvas.width, this.maxDrawingBufferDimension));
+    }
+    get drawingBufferHeight() {
+        if (this.canvasSizeDirty)
+            this.updateCanvasSize();
+        return Math.max(1, Math.min(this.hydCanvas.height, this.maxDrawingBufferDimension));
+    }
+    get drawingBufferFormat() {
+        return this.hydGlobalState.contextAttributes.alpha === false
+            ? WebGL2RenderingContext.RGB8
+            : WebGL2RenderingContext.RGBA8;
+    }
+    canvasExceedsDrawingBufferLimit() {
+        return this.hydCanvas.width > this.maxDrawingBufferDimension ||
+            this.hydCanvas.height > this.maxDrawingBufferDimension;
+    }
+    clampCanvasToDrawingBufferLimit() {
+        const canvas = this.hydCanvas;
+        for (const property of ["width", "height"]) {
+            const value = canvas[property];
+            if (value <= this.maxDrawingBufferDimension)
+                continue;
+            const descriptor = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, property);
+            descriptor?.set?.call(canvas, this.maxDrawingBufferDimension);
+        }
+    }
+    installCanvasSizeTracking() {
+        const canvas = this.hydCanvas;
+        for (const property of ["width", "height"]) {
+            const descriptor = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, property);
+            if (!descriptor?.get || !descriptor.set)
+                continue;
+            try {
+                Object.defineProperty(canvas, property, {
+                    configurable: true,
+                    enumerable: descriptor.enumerable,
+                    get: () => descriptor.get.call(canvas),
+                    set: (value) => {
+                        const previous = descriptor.get.call(canvas);
+                        if (Number(value) === previous)
+                            return;
+                        this.discardPendingCanvasCommands();
+                        descriptor.set.call(canvas, value);
+                        if (descriptor.get.call(canvas) !== previous) {
+                            this.canvasSizeDirty = true;
+                            if (this.hydGlobalState) {
+                                this.hydGlobalState.drawingBufferGeneration++;
+                                this.hydGlobalState.recordTransition("canvasResize", this.hydGlobalState.drawingBufferGeneration);
+                            }
+                        }
+                    },
+                });
+            }
+            catch (_) {
+            }
+        }
+    }
+    discardPendingCanvasCommands() {
+        if (!this.hydRpCache)
+            return;
+        this.hydRpCache.CeDiscardAndReset();
+        this.hydUniOff = 0;
+        this.lastDrawPbv = null;
+        if (this.hydGlobalState)
+            this.hydGlobalState.clearState.target = 0;
+    }
     setObjectValidationError(...objects) {
+        const foreignObject = objects.some((object) => object && object.ownerToken && object.ownerToken !== this.contextToken);
+        const deletedObject = objects.some((object) => object && object.deleted === true);
+        this.hydGlobalState.setError(foreignObject || deletedObject
+            ? WebGL2RenderingContext.INVALID_OPERATION
+            : WebGL2RenderingContext.INVALID_VALUE);
+    }
+    setShaderProgramValidationError(...objects) {
         const foreignObject = objects.some((object) => object && object.ownerToken && object.ownerToken !== this.contextToken);
         this.hydGlobalState.setError(foreignObject
             ? WebGL2RenderingContext.INVALID_OPERATION
@@ -3927,24 +6161,232 @@ class HydWebGLStatic {
         this.hydGlobalState.defaultFramebuffer.attachments.set(bindPoint, new FramebufferAttributes(bindPoint, undefined, undefined, texture, undefined, WebGL2RenderingContext.RENDERBUFFER));
         this.hydGlobalState.defaultFramebuffer.resetHash();
     }
-    updateCanvasSize() {
+    shouldUseDefaultFramebufferBacking() {
+        return this.useDefaultFramebufferBacking ||
+            this.hydGlobalState.contextAttributes.preserveDrawingBuffer === true ||
+            this.hydGlobalState.contextAttributes.premultipliedAlpha === false ||
+            !this.hydCanvas.isConnected;
+    }
+    shouldKeepDefaultFramebufferBackingAcrossResize() {
+        return this.useDefaultFramebufferBacking ||
+            this.hydGlobalState.contextAttributes.preserveDrawingBuffer === true ||
+            this.hydGlobalState.contextAttributes.premultipliedAlpha === false;
+    }
+    createDefaultFramebufferBacking() {
         const width = this.hydCanvas.width;
         const height = this.hydCanvas.height;
-        if (this.hydLastCanvasSize[0] === width && this.hydLastCanvasSize[1] === height) {
+        if (width <= 0 || height <= 0)
+            return;
+        this.defaultFramebufferBackingTexture?.destroy();
+        this.defaultFramebufferBackingTexture = this.hydDevice.createTexture({
+            label: `defaultFramebufferBacking ${width}x${height}`,
+            size: { width, height, depthOrArrayLayers: 1 },
+            format: "bgra8unorm",
+            usage: GPUTextureUsage.RENDER_ATTACHMENT |
+                GPUTextureUsage.COPY_SRC |
+                GPUTextureUsage.COPY_DST |
+                GPUTextureUsage.TEXTURE_BINDING,
+        });
+        this.defaultFramebufferBackingView = this.defaultFramebufferBackingTexture.createView({
+            label: `defaultFramebufferBackingView ${width}x${height}`,
+        });
+        this.defaultFramebufferBackingNeedsPresentation = false;
+        this.canvasPresentationBindGroup = null;
+    }
+    getCanvasPresentationPipeline() {
+        if (this.canvasPresentationPipeline)
+            return this.canvasPresentationPipeline;
+        const module = this.hydDevice.createShaderModule({
+            label: "straight-alpha canvas presentation shader",
+            code: `
+@group(0) @binding(0) var source : texture_2d<f32>;
+
+@vertex
+fn vertexMain(@builtin(vertex_index) index : u32) -> @builtin(position) vec4f {
+  let positions = array<vec2f, 3>(
+    vec2f(-1.0, -1.0),
+    vec2f(3.0, -1.0),
+    vec2f(-1.0, 3.0)
+  );
+  return vec4f(positions[index], 0.0, 1.0);
+}
+
+@fragment
+fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
+  let color = textureLoad(source, vec2i(position.xy), 0);
+  return vec4f(color.rgb * color.a, color.a);
+}
+`,
+        });
+        this.canvasPresentationPipeline = this.hydDevice.createRenderPipeline({
+            label: "straight-alpha canvas presentation pipeline",
+            layout: "auto",
+            vertex: { module, entryPoint: "vertexMain" },
+            fragment: {
+                module,
+                entryPoint: "fragmentMain",
+                targets: [{ format: "bgra8unorm" }],
+            },
+            primitive: { topology: "triangle-list" },
+        });
+        return this.canvasPresentationPipeline;
+    }
+    activateDefaultFramebufferBacking(preserveCurrentContents) {
+        if (this.defaultFramebufferBackingTexture) {
+            this.useDefaultFramebufferBacking = true;
+            this.hydGlobalState.__canvasTexture = this.defaultFramebufferBackingTexture;
+            this.hydGlobalState.__canvasView = this.defaultFramebufferBackingView;
+            return;
+        }
+        const currentTexture = this.hydGlobalState.__canvasTexture;
+        this.createDefaultFramebufferBacking();
+        if (!this.defaultFramebufferBackingTexture)
+            return;
+        if (preserveCurrentContents && currentTexture && currentTexture !== this.defaultFramebufferBackingTexture) {
+            const encoder = this.hydDevice.createCommandEncoder({ label: "preserve default framebuffer" });
+            encoder.copyTextureToTexture({ texture: currentTexture }, { texture: this.defaultFramebufferBackingTexture }, {
+                width: this.hydCanvas.width,
+                height: this.hydCanvas.height,
+                depthOrArrayLayers: 1,
+            });
+            this.hydDevice.queue.submit([encoder.finish()]);
+        }
+        this.useDefaultFramebufferBacking = true;
+        this.hydGlobalState.__canvasTexture = this.defaultFramebufferBackingTexture;
+        this.hydGlobalState.__canvasView = this.defaultFramebufferBackingView;
+    }
+    presentDefaultFramebufferBacking() {
+        if (!this.defaultFramebufferBackingTexture || !this.defaultFramebufferBackingNeedsPresentation ||
+            this.hydCanvas.width <= 0 || this.hydCanvas.height <= 0)
+            return;
+        const canvasTexture = this.hydGpuctx.getCurrentTexture();
+        const encoder = this.hydDevice.createCommandEncoder({ label: "present default framebuffer backing" });
+        const needsPremultiply = this.hydGlobalState.contextAttributes.alpha !== false &&
+            this.hydGlobalState.contextAttributes.premultipliedAlpha === false;
+        if (needsPremultiply) {
+            const pipeline = this.getCanvasPresentationPipeline();
+            if (!this.canvasPresentationBindGroup) {
+                this.canvasPresentationBindGroup = this.hydDevice.createBindGroup({
+                    label: "straight-alpha canvas presentation bind group",
+                    layout: pipeline.getBindGroupLayout(0),
+                    entries: [{ binding: 0, resource: this.defaultFramebufferBackingView }],
+                });
+            }
+            const pass = encoder.beginRenderPass({
+                label: "straight-alpha canvas presentation pass",
+                colorAttachments: [{
+                        view: canvasTexture.createView(),
+                        loadOp: "clear",
+                        storeOp: "store",
+                        clearValue: [0, 0, 0, 0],
+                    }],
+            });
+            pass.setPipeline(pipeline);
+            pass.setBindGroup(0, this.canvasPresentationBindGroup);
+            pass.draw(3);
+            pass.end();
+        }
+        else {
+            encoder.copyTextureToTexture({ texture: this.defaultFramebufferBackingTexture }, { texture: canvasTexture }, {
+                width: this.hydCanvas.width,
+                height: this.hydCanvas.height,
+                depthOrArrayLayers: 1,
+            });
+        }
+        this.hydDevice.queue.submit([encoder.finish()]);
+        this.defaultFramebufferBackingNeedsPresentation = false;
+    }
+    prepareDefaultFramebufferForExternalRead() {
+        if (this.canvasSizeDirty) {
+            this.updateCanvasSize();
+        }
+        const hasGpuSource = Boolean(this.hydGlobalState.__canvasTexture || this.defaultFramebufferBackingTexture);
+        this._der_flush();
+        if (!hasGpuSource)
+            return false;
+        this.activateDefaultFramebufferBacking(true);
+        this.materializeImplicitDefaultFramebufferClear();
+        this._der_flush();
+        this.presentDefaultFramebufferBacking();
+        return Boolean(this.defaultFramebufferBackingTexture);
+    }
+    prepareCanvasForExternalRead() {
+        if (this.canvasSizeDirty)
+            this.updateCanvasSize();
+        const hasGpuSource = Boolean(this.hydGlobalState.__canvasTexture || this.defaultFramebufferBackingTexture);
+        this._der_flush();
+        if (!hasGpuSource)
+            return this.hydCanvas;
+        this.activateDefaultFramebufferBacking(Boolean(this.hydGlobalState.__canvasTexture));
+        this.materializeImplicitDefaultFramebufferClear();
+        this._der_flush();
+        const snapshot = this.prepareExactExternalReadCanvas();
+        if (snapshot)
+            return snapshot;
+        this.presentDefaultFramebufferBacking();
+        return this.hydCanvas;
+    }
+    prepareCanvasForTextureUpload() {
+        if (!this.prepareDefaultFramebufferForExternalRead())
+            return this.hydCanvas;
+        return this.prepareExactExternalReadCanvas() || this.hydCanvas;
+    }
+    materializeImplicitDefaultFramebufferClear() {
+        if (!this.defaultFramebufferNeedsImplicitClear || !this.defaultFramebufferBackingTexture)
+            return;
+        this.defaultFramebufferNeedsImplicitClear = false;
+        const clearState = this.hydGlobalState.clearState;
+        const savedTarget = clearState.target;
+        const savedColor = clearState.color;
+        const savedDepth = clearState.depth;
+        const savedStencil = clearState.stencil;
+        clearState.target = WebGL2RenderingContext.COLOR_BUFFER_BIT |
+            (this.hydGlobalState.contextAttributes.depth === false ? 0 : WebGL2RenderingContext.DEPTH_BUFFER_BIT) |
+            (this.hydGlobalState.contextAttributes.stencil === true ? WebGL2RenderingContext.STENCIL_BUFFER_BIT : 0);
+        clearState.color = [0, 0, 0, 0];
+        clearState.depth = 1;
+        clearState.stencil = 0;
+        this.defaultFramebufferBackingNeedsPresentation = true;
+        this.hydRpCache.RpClear(this[RENDER_PASS_DESCRIPTOR_CALLBACK]);
+        clearState.target = savedTarget;
+        clearState.color = savedColor;
+        clearState.depth = savedDepth;
+        clearState.stencil = savedStencil;
+    }
+    updateCanvasSize() {
+        if (this.canvasExceedsDrawingBufferLimit())
+            this.clampCanvasToDrawingBufferLimit();
+        const width = this.hydCanvas.width;
+        const height = this.hydCanvas.height;
+        if (!this.canvasSizeDirty && this.hydLastCanvasSize[0] === width && this.hydLastCanvasSize[1] === height) {
             return;
         }
         if (width <= 0 || height <= 0) {
+            this.discardPendingCanvasCommands();
+            this.defaultFramebufferBackingTexture?.destroy();
+            this.defaultFramebufferBackingTexture = null;
+            this.defaultFramebufferBackingView = null;
+            this.defaultFramebufferBackingNeedsPresentation = false;
+            this.canvasPresentationBindGroup = null;
+            this.hydGlobalState.__canvasTexture = null;
+            this.hydGlobalState.__canvasView = null;
+            this.hydLastCanvasSize = [width, height];
+            this.canvasSizeDirty = false;
             return;
         }
-        if (this.hydRpCache) {
-            this._der_flush();
+        const initialSize = this.hydLastCanvasSize[0] < 0 || this.hydLastCanvasSize[1] < 0;
+        if (this.hydRpCache && !initialSize) {
+            this.hydRpCache.CeDiscardAndReset();
+            this.hydUniOff = 0;
+            this.lastDrawPbv = null;
+            this.hydGlobalState.clearState.target = 0;
         }
-        this.hydGlobalState.miscState.scissorBox = [0, 0, width, height];
-        this.hydGlobalState.commonState.viewport = [0, 0, width, height, 0, 1];
-        this.gpuViewportDirty = true;
-        this.gpuScissorDirty = true;
-        this['drawingBufferWidth'] = width;
-        this['drawingBufferHeight'] = height;
+        if (initialSize) {
+            this.hydGlobalState.miscState.scissorBox = [0, 0, width, height];
+            this.hydGlobalState.commonState.viewport = [0, 0, width, height, 0, 1];
+            this.gpuViewportDirty = true;
+            this.gpuScissorDirty = true;
+        }
         try {
             this.hydGlobalState.defaultFramebuffer.attachments.get(WebGL2RenderingContext.DEPTH_ATTACHMENT).attachment.destroy();
             this.hydGlobalState.defaultFramebuffer.attachments.get(WebGL2RenderingContext.STENCIL_ATTACHMENT).attachment.destroy();
@@ -3952,17 +6394,37 @@ class HydWebGLStatic {
         }
         catch (error) {
         }
+        this.defaultFramebufferBackingTexture?.destroy();
+        this.defaultFramebufferBackingTexture = null;
+        this.defaultFramebufferBackingView = null;
+        this.defaultFramebufferBackingNeedsPresentation = false;
+        this.canvasPresentationBindGroup = null;
         this.hydLastCanvasSize = [width, height];
+        this.canvasSizeDirty = false;
         this.regenerateDS(`defaultDepthBuffer ${width} ${height}`, 'depth32float', this.hydGlobalState.depthState.func, WebGL2RenderingContext.DEPTH_ATTACHMENT, width, height);
         this.regenerateDS(`defaultStencilBuffer ${width} ${height}`, 'stencil8', this.hydGlobalState.stencilState.frontFunc, WebGL2RenderingContext.STENCIL_ATTACHMENT, width, height);
         this.regenerateDS(`defaultDepthStencilBuffer ${width} ${height}`, 'depth24plus-stencil8', this.hydGlobalState.depthState.func, WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT, width, height);
-        this.hydGlobalState.__canvasView = this.hydGpuctx.getCurrentTexture().createView({ label: 'canvasView resized' });
+        if (this.shouldKeepDefaultFramebufferBackingAcrossResize()) {
+            this.createDefaultFramebufferBacking();
+            this.useDefaultFramebufferBacking = true;
+            this.hydGlobalState.__canvasTexture = this.defaultFramebufferBackingTexture;
+            this.hydGlobalState.__canvasView = this.defaultFramebufferBackingView;
+        }
+        else {
+            this.hydGlobalState.__canvasTexture = this.hydGpuctx.getCurrentTexture();
+            this.hydGlobalState.__canvasView = this.hydGlobalState.__canvasTexture.createView({ label: 'canvasView resized' });
+        }
+        this.defaultFramebufferNeedsImplicitClear = true;
     }
     constructor(_canvas, _gpuctx, _attributes, _device, _maxUniformSize, _replay, shaderTranslator, contextType = "webgl") {
         this.shaderTranslator = shaderTranslator;
         this.hydContextType = contextType;
         this.hydMaxUniSize = _maxUniformSize;
         this.hydCanvas = _canvas;
+        this.maxDrawingBufferDimension = _device.limits.maxTextureDimension2D;
+        this.installCanvasSizeTracking();
+        hydCanvasContexts.set(this.hydCanvas, this);
+        installCanvasReadHooks();
         this.hydGpuctx = _gpuctx;
         this.hydDevice = _device;
         this.hydUniArr = new Uint8Array(this.hydMaxUniSize);
@@ -3974,21 +6436,46 @@ class HydWebGLStatic {
         this.hydCanvas.onresize = () => {
             this.updateCanvasSize();
         };
+        const contextPrototype = contextType === "webgl2"
+            ? WebGL2RenderingContext.prototype
+            : WebGLRenderingContext.prototype;
         for (const propertyName in hydWebGLConstants) {
-            this[propertyName] = hydWebGLConstants[propertyName];
+            if (!(propertyName in contextPrototype))
+                continue;
+            if (!Object.prototype.hasOwnProperty.call(HydWebGLStatic.prototype, propertyName)) {
+                Object.defineProperty(HydWebGLStatic.prototype, propertyName, {
+                    configurable: true,
+                    enumerable: true,
+                    value: hydWebGLConstants[propertyName],
+                    writable: false,
+                });
+            }
+            Object.defineProperty(this, propertyName, {
+                configurable: true,
+                enumerable: true,
+                value: hydWebGLConstants[propertyName],
+                writable: false,
+            });
         }
         this['canvas'] = _canvas;
-        this['drawingBufferWidth'] = _canvas.width;
-        this['drawingBufferHeight'] = _canvas.height;
         this['drawingBufferColorSpace'] = 'srgb';
         this.hydWrapper = this;
-        this.hydGlobalState = new HydGlobalStateHashed(_attributes, this.hydUniBuf, _device);
-        this.hydGlobalState.__canvasView = this.hydGpuctx.getCurrentTexture().createView({ label: 'initial canvasView' });
-        this.bindedGetRenderPassDesc = this.hydGlobalState.getRenderPassDescriptor.bind(this.hydGlobalState);
+        this.hydGlobalState = new HydGlobalStateHashed(_attributes, this.hydUniBuf, _device, this.hydContextType === "webgl2" ? 2 : 1);
+        if (!this.shouldUseDefaultFramebufferBacking() && this.hydCanvas.width > 0 && this.hydCanvas.height > 0) {
+            this.hydGlobalState.__canvasTexture = this.hydGpuctx.getCurrentTexture();
+            this.hydGlobalState.__canvasView = this.hydGlobalState.__canvasTexture.createView({ label: 'initial canvasView' });
+        }
+        this[RENDER_PASS_DESCRIPTOR_CALLBACK] = this.hydGlobalState.getRenderPassDescriptor.bind(this.hydGlobalState);
         frameBeginFuncLst.push(this._frameStart.bind(this));
         frameEndFuncList.push(this._frameEnd.bind(this));
         this.hydRpCache = new HydRenderPassCache(this.hydDevice);
         this.updateCanvasSize();
+        const publicOwnProperties = new Set(["canvas", "drawingBufferColorSpace", "drawingBufferFormat", "unpackColorSpace", ...Object.keys(hydWebGLConstants)]);
+        for (const propertyName of Object.keys(this)) {
+            if (publicOwnProperties.has(propertyName))
+                continue;
+            Object.defineProperty(this, propertyName, { enumerable: false });
+        }
     }
     flushUniforms() {
         if (this.hydUniOff > 0) {
@@ -4000,7 +6487,8 @@ class HydWebGLStatic {
         if (this.hydGlobalState.clearState.target === 0 || this.hydRpCache.hasActiveRenderPass()) {
             return;
         }
-        this.hydRpCache.RpClear(this.bindedGetRenderPassDesc);
+        this.ensureDefaultFramebufferRenderTarget();
+        this.hydRpCache.RpClear(this[RENDER_PASS_DESCRIPTOR_CALLBACK]);
         this.hydGlobalState.clearState.target = 0;
         this.hydGlobalState.recordTransitionOne('!!d0');
     }
@@ -4010,17 +6498,68 @@ class HydWebGLStatic {
         this.hydRpCache.CeSubmitAndReset();
     }
     _frameEnd() {
+        if (this.canvasSizeDirty) {
+            this.discardPendingCanvasCommands();
+            return;
+        }
         this._der_flush();
-        this.hydGlobalState.__canvasView = null;
+        const renderingToBacking = this.defaultFramebufferBackingTexture &&
+            this.hydGlobalState.__canvasTexture === this.defaultFramebufferBackingTexture;
+        if (renderingToBacking) {
+            if (this.hydCanvas.isConnected) {
+                this.presentDefaultFramebufferBacking();
+                if (this.hydGlobalState.contextAttributes.preserveDrawingBuffer !== true) {
+                    this.defaultFramebufferNeedsImplicitClear = true;
+                }
+            }
+        }
+        else {
+            this.hydGlobalState.__canvasTexture = null;
+            this.hydGlobalState.__canvasView = null;
+        }
     }
     _frameStart() {
         this.hydUniOff = 0;
         this.updateCanvasSize();
-        this.hydGlobalState.__canvasView = this.hydGpuctx.getCurrentTexture().createView({ label: 'canvasView' });
+        if (this.shouldUseDefaultFramebufferBacking()) {
+            this.activateDefaultFramebufferBacking(Boolean(this.hydGlobalState.__canvasTexture));
+            this.materializeImplicitDefaultFramebufferClear();
+        }
+        else {
+            this.hydGlobalState.__canvasTexture = this.hydGpuctx.getCurrentTexture();
+            this.hydGlobalState.__canvasView = this.hydGlobalState.__canvasTexture.createView({ label: 'canvasView' });
+        }
+    }
+    ensureDefaultFramebufferRenderTarget() {
+        if (this.hydGlobalState.commonState.drawFramebufferBinding !== this.hydGlobalState.defaultFramebuffer ||
+            this.hydGlobalState.__canvasView) {
+            return;
+        }
+        if (this.shouldUseDefaultFramebufferBacking()) {
+            this.activateDefaultFramebufferBacking(false);
+        }
+        else if (this.hydCanvas.width > 0 && this.hydCanvas.height > 0) {
+            this.hydGlobalState.__canvasTexture = this.hydGpuctx.getCurrentTexture();
+            this.hydGlobalState.__canvasView = this.hydGlobalState.__canvasTexture.createView({
+                label: "canvasView after external read",
+            });
+        }
+        this.hydGlobalState.drawingBufferGeneration++;
+        this.hydGlobalState.recordTransition("drawingBufferTarget", this.hydGlobalState.drawingBufferGeneration);
+        this.lastDrawPbv = null;
     }
     bindAttribLocation(program, index, name) {
         if (!this.isProgram(program)) {
-            this.setObjectValidationError(program);
+            this.setShaderProgramValidationError(program);
+            return;
+        }
+        if (name.startsWith("gl_") || name.startsWith("webgl_") || name.startsWith("_webgl_")) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const maxNameLength = this.hydContextType === "webgl2" ? 1024 : 256;
+        if (name.length > maxNameLength || /[^\x00-\x7f]/.test(name) || !isWebGlIdentifierName(name)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
             return;
         }
         program.bindAttribLocation(index, name);
@@ -4037,17 +6576,17 @@ class HydWebGLStatic {
         }
         switch (precisionType) {
             case WebGL2RenderingContext.LOW_FLOAT:
-                return { rangeMin: 8, rangeMax: 8, precision: 8 };
+                return brandHydWebGlObject({ rangeMin: 8, rangeMax: 8, precision: 8 }, "shader-precision-format");
             case WebGL2RenderingContext.MEDIUM_FLOAT:
-                return { rangeMin: 14, rangeMax: 14, precision: 10 };
+                return brandHydWebGlObject({ rangeMin: 14, rangeMax: 14, precision: 10 }, "shader-precision-format");
             case WebGL2RenderingContext.HIGH_FLOAT:
-                return { rangeMin: 127, rangeMax: 127, precision: 23 };
+                return brandHydWebGlObject({ rangeMin: 127, rangeMax: 127, precision: 23 }, "shader-precision-format");
             case WebGL2RenderingContext.LOW_INT:
-                return { rangeMin: 8, rangeMax: 8, precision: 0 };
+                return brandHydWebGlObject({ rangeMin: 8, rangeMax: 8, precision: 0 }, "shader-precision-format");
             case WebGL2RenderingContext.MEDIUM_INT:
-                return { rangeMin: 16, rangeMax: 16, precision: 0 };
+                return brandHydWebGlObject({ rangeMin: 16, rangeMax: 16, precision: 0 }, "shader-precision-format");
             case WebGL2RenderingContext.HIGH_INT:
-                return { rangeMin: 31, rangeMax: 31, precision: 0 };
+                return brandHydWebGlObject({ rangeMin: 31, rangeMax: 31, precision: 0 }, "shader-precision-format");
             default:
                 this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
                 return null;
@@ -4055,7 +6594,7 @@ class HydWebGLStatic {
     }
     detachShader(program, shader) {
         if (!this.isProgram(program) || !this.isShader(shader)) {
-            this.setObjectValidationError(program, shader);
+            this.setShaderProgramValidationError(program, shader);
             return;
         }
         if (!program.detachShader(shader)) {
@@ -4065,8 +6604,10 @@ class HydWebGLStatic {
     deleteShader(s) {
         if (s === null)
             return;
+        if (s instanceof HydShader && s.ownerToken === this.contextToken && s.deleted)
+            return;
         if (!this.isShader(s)) {
-            this.setObjectValidationError(s);
+            this.setShaderProgramValidationError(s);
             return;
         }
         s.deleted = true;
@@ -4082,8 +6623,10 @@ class HydWebGLStatic {
     deleteProgram(p) {
         if (p === null)
             return;
+        if (p instanceof HydProgram && p.ownerToken === this.contextToken && p.deleted)
+            return;
         if (!this.isProgram(p)) {
-            this.setObjectValidationError(p);
+            this.setShaderProgramValidationError(p);
             return;
         }
         p.deleted = true;
@@ -4117,6 +6660,8 @@ class HydWebGLStatic {
             this.setObjectValidationError(renderbuffer);
             return;
         }
+        if (renderbuffer.deleted)
+            return;
         renderbuffer.deleted = true;
         this._der_flush();
         if (this.hydGlobalState.commonState.renderbufferBinding === renderbuffer) {
@@ -4124,7 +6669,6 @@ class HydWebGLStatic {
         }
         for (const callback of renderbuffer.onDelete.splice(0))
             callback();
-        renderbuffer.destroy();
         this.hydGlobalState.recordTransition("deleteRenderbuffer", "renderbuffer");
     }
     lookupTexture(texture) {
@@ -4178,12 +6722,13 @@ class HydWebGLStatic {
         const hydTexture = this.lookupTexture(texture);
         if (!hydTexture)
             return;
+        if (hydTexture.deleted)
+            return;
         this._der_flush();
         this.hydGlobalState.deleteTextureBinding(hydTexture);
         hydTexture.deleted = true;
         for (const callback of hydTexture.onDelete.splice(0))
             callback();
-        hydTexture.destroy();
         this.hydGlobalState.recordTransition("deleteTexture", "texture");
     }
     lookupBuffer(buffer) {
@@ -4245,6 +6790,12 @@ class HydWebGLStatic {
         if (this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding === hydBuffer) {
             this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding = null;
         }
+        if (this.hydGlobalState.commonState.pixelPackBufferBinding === hydBuffer) {
+            this.hydGlobalState.commonState.pixelPackBufferBinding = null;
+        }
+        if (this.hydGlobalState.commonState.pixelUnpackBufferBinding === hydBuffer) {
+            this.hydGlobalState.commonState.pixelUnpackBufferBinding = null;
+        }
         for (const attribute of this.hydGlobalState.commonState.vertexArrayBinding.attributes) {
             if (attribute.buffer === hydBuffer) {
                 attribute.buffer = null;
@@ -4255,14 +6806,14 @@ class HydWebGLStatic {
     }
     getShaderInfoLog(shader) {
         if (!this.isShader(shader)) {
-            this.setObjectValidationError(shader);
+            this.setShaderProgramValidationError(shader);
             return null;
         }
         return shader.infoLog;
     }
     getProgramInfoLog(program) {
         if (!this.isProgram(program)) {
-            this.setObjectValidationError(program);
+            this.setShaderProgramValidationError(program);
             return null;
         }
         return program.infoLog;
@@ -4272,14 +6823,68 @@ class HydWebGLStatic {
             throw new TypeError("getAttachedShaders requires a WebGLProgram");
         }
         if (!this.isProgram(program)) {
-            this.setObjectValidationError(program);
+            this.setShaderProgramValidationError(program);
             return null;
         }
         return program.getAttachedShaders();
     }
+    currentFramebufferBits(pname) {
+        const framebuffer = this.hydGlobalState.commonState.drawFramebufferBinding;
+        if (framebuffer === this.hydGlobalState.defaultFramebuffer) {
+            if (pname === WebGL2RenderingContext.DEPTH_BITS) {
+                return this.hydGlobalState.contextAttributes.depth ? 24 : 0;
+            }
+            if (pname === WebGL2RenderingContext.STENCIL_BITS) {
+                return this.hydGlobalState.contextAttributes.stencil ? 8 : 0;
+            }
+            if (pname === WebGL2RenderingContext.ALPHA_BITS) {
+                return this.hydGlobalState.contextAttributes.alpha ? 8 : 0;
+            }
+            return 8;
+        }
+        if (pname === WebGL2RenderingContext.DEPTH_BITS) {
+            return (framebuffer.attachments.get(WebGL2RenderingContext.DEPTH_ATTACHMENT) ||
+                framebuffer.attachments.get(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT))?.depthBits || 0;
+        }
+        if (pname === WebGL2RenderingContext.STENCIL_BITS) {
+            return (framebuffer.attachments.get(WebGL2RenderingContext.STENCIL_ATTACHMENT) ||
+                framebuffer.attachments.get(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT))?.stencilBits || 0;
+        }
+        const color = framebuffer.attachments.get(WebGL2RenderingContext.COLOR_ATTACHMENT0);
+        if (!color)
+            return 0;
+        const channel = pname === WebGL2RenderingContext.RED_BITS ? 0 :
+            pname === WebGL2RenderingContext.GREEN_BITS ? 1 :
+                pname === WebGL2RenderingContext.BLUE_BITS ? 2 : 3;
+        return color.colorBits[channel];
+    }
     getParameter(pname) {
+        if (this.hydContextType !== "webgl2" &&
+            (pname === WebGL2RenderingContext.MAX_COLOR_ATTACHMENTS ||
+                pname === WebGL2RenderingContext.MAX_DRAW_BUFFERS) &&
+            !this.enabledExtensions.has("WEBGL_DRAW_BUFFERS")) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return null;
+        }
+        switch (pname) {
+            case WebGL2RenderingContext.VERSION:
+                return this.hydContextType === "webgl2"
+                    ? "WebGL 2.0 (GL2GPU)"
+                    : "WebGL 1.0 (GL2GPU)";
+            case WebGL2RenderingContext.SHADING_LANGUAGE_VERSION:
+                return this.hydContextType === "webgl2"
+                    ? "WebGL GLSL ES 3.00 (GL2GPU)"
+                    : "WebGL GLSL ES 1.0 (GL2GPU)";
+            case WebGL2RenderingContext.VENDOR:
+                return "GL2GPU";
+            case WebGL2RenderingContext.RENDERER:
+                return "WebGPU";
+            case WebGL2RenderingContext.MAX_VIEWPORT_DIMS:
+                return new Int32Array([this.maxDrawingBufferDimension, this.maxDrawingBufferDimension]);
+        }
         if (enumToConstant.has(pname)) {
-            return enumToConstant.get(pname);
+            const value = enumToConstant.get(pname);
+            return ArrayBuffer.isView(value) ? value.slice() : value;
         }
         else {
             switch (pname) {
@@ -4292,13 +6897,17 @@ class HydWebGLStatic {
                 case WebGL2RenderingContext.BLEND_COLOR:
                     return new Float32Array(this.hydGlobalState.blendState.color);
                 case WebGL2RenderingContext.BLEND_SRC_RGB:
-                    return this.hydGlobalState.blendState.srcRGB;
+                    return this.hydGlobalState.blendState.srcRGBEnum;
                 case WebGL2RenderingContext.BLEND_SRC_ALPHA:
-                    return this.hydGlobalState.blendState.srcAlpha;
+                    return this.hydGlobalState.blendState.srcAlphaEnum;
                 case WebGL2RenderingContext.BLEND_DST_RGB:
-                    return this.hydGlobalState.blendState.dstRGB;
+                    return this.hydGlobalState.blendState.dstRGBEnum;
                 case WebGL2RenderingContext.BLEND_DST_ALPHA:
-                    return this.hydGlobalState.blendState.dstAlpha;
+                    return this.hydGlobalState.blendState.dstAlphaEnum;
+                case WebGL2RenderingContext.BLEND_EQUATION_RGB:
+                    return this.hydGlobalState.blendState.equationRGBEnum;
+                case WebGL2RenderingContext.BLEND_EQUATION_ALPHA:
+                    return this.hydGlobalState.blendState.equationAlphaEnum;
                 case WebGL2RenderingContext.COLOR_CLEAR_VALUE:
                     return new Float32Array(this.hydGlobalState.clearState.color);
                 case WebGL2RenderingContext.COLOR_WRITEMASK:
@@ -4306,15 +6915,43 @@ class HydWebGLStatic {
                 case WebGL2RenderingContext.CULL_FACE:
                     return this.hydGlobalState.polygonState.cullFace;
                 case WebGL2RenderingContext.CULL_FACE_MODE:
-                    return this.hydGlobalState.polygonState.cullFaceMode;
+                    return this.hydGlobalState.polygonState.cullFaceModeEnum;
                 case WebGL2RenderingContext.FRONT_FACE:
-                    return this.hydGlobalState.polygonState.frontFace;
+                    return this.hydGlobalState.polygonState.frontFaceEnum;
                 case WebGL2RenderingContext.DEPTH_TEST:
                     return this.hydGlobalState.depthState.enabled;
                 case WebGL2RenderingContext.DEPTH_WRITEMASK:
                     return this.hydGlobalState.depthState.writeMask;
                 case WebGL2RenderingContext.DEPTH_CLEAR_VALUE:
                     return this.hydGlobalState.clearState.depth;
+                case WebGL2RenderingContext.DEPTH_FUNC:
+                    return this.hydGlobalState.depthState.funcEnum;
+                case WebGL2RenderingContext.DEPTH_RANGE:
+                    return new Float32Array(this.hydGlobalState.depthState.range);
+                case WebGL2RenderingContext.DITHER:
+                    return this.hydGlobalState.miscState.dither;
+                case WebGL2RenderingContext.CURRENT_PROGRAM:
+                    return this.hydGlobalState.commonState.currentProgram;
+                case WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER_BINDING:
+                    return this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding;
+                case WebGL2RenderingContext.GENERATE_MIPMAP_HINT:
+                    return this.hydGlobalState.miscState.generateMipmapHint;
+                case WebGL2RenderingContext.LINE_WIDTH:
+                    return this.hydGlobalState.miscState.lineWidth;
+                case WebGL2RenderingContext.POLYGON_OFFSET_FACTOR:
+                    return this.hydGlobalState.polygonState.polygonOffsetFactor;
+                case WebGL2RenderingContext.POLYGON_OFFSET_FILL:
+                    return this.hydGlobalState.polygonState.polygonOffsetFill;
+                case WebGL2RenderingContext.POLYGON_OFFSET_UNITS:
+                    return this.hydGlobalState.polygonState.polygonOffsetUnits;
+                case WebGL2RenderingContext.SAMPLE_ALPHA_TO_COVERAGE:
+                    return this.hydGlobalState.miscState.sampleAlphaToCoverage;
+                case WebGL2RenderingContext.SAMPLE_COVERAGE:
+                    return this.hydGlobalState.miscState.sampleCoverage;
+                case WebGL2RenderingContext.SAMPLE_COVERAGE_INVERT:
+                    return this.hydGlobalState.miscState.sampleCoverageInvert;
+                case WebGL2RenderingContext.SAMPLE_COVERAGE_VALUE:
+                    return this.hydGlobalState.miscState.sampleCoverageValue;
                 case WebGL2RenderingContext.SCISSOR_BOX:
                     return new Int32Array(this.hydGlobalState.miscState.scissorBox);
                 case WebGL2RenderingContext.SCISSOR_TEST:
@@ -4340,21 +6977,21 @@ class HydWebGLStatic {
                 case WebGL2RenderingContext.STENCIL_BACK_REF:
                     return this.hydGlobalState.stencilState.backRef;
                 case WebGL2RenderingContext.STENCIL_FUNC:
-                    return this.hydGlobalState.stencilState.frontFunc;
+                    return this.hydGlobalState.stencilState.frontFuncEnum;
                 case WebGL2RenderingContext.STENCIL_BACK_FUNC:
-                    return this.hydGlobalState.stencilState.backFunc;
+                    return this.hydGlobalState.stencilState.backFuncEnum;
                 case WebGL2RenderingContext.STENCIL_FAIL:
-                    return this.hydGlobalState.stencilState.frontFail;
+                    return this.hydGlobalState.stencilState.frontFailEnum;
                 case WebGL2RenderingContext.STENCIL_BACK_FAIL:
-                    return this.hydGlobalState.stencilState.backFail;
+                    return this.hydGlobalState.stencilState.backFailEnum;
                 case WebGL2RenderingContext.STENCIL_PASS_DEPTH_FAIL:
-                    return this.hydGlobalState.stencilState.frontPassDepthFail;
+                    return this.hydGlobalState.stencilState.frontPassDepthFailEnum;
                 case WebGL2RenderingContext.STENCIL_BACK_PASS_DEPTH_FAIL:
-                    return this.hydGlobalState.stencilState.backPassDepthFail;
+                    return this.hydGlobalState.stencilState.backPassDepthFailEnum;
                 case WebGL2RenderingContext.STENCIL_PASS_DEPTH_PASS:
-                    return this.hydGlobalState.stencilState.frontPassDepthPass;
+                    return this.hydGlobalState.stencilState.frontPassDepthPassEnum;
                 case WebGL2RenderingContext.STENCIL_BACK_PASS_DEPTH_PASS:
-                    return this.hydGlobalState.stencilState.backPassDepthPass;
+                    return this.hydGlobalState.stencilState.backPassDepthPassEnum;
                 case WebGL2RenderingContext.STENCIL_CLEAR_VALUE:
                     return this.hydGlobalState.clearState.stencil;
                 case WebGL2RenderingContext.VIEWPORT:
@@ -4367,8 +7004,30 @@ class HydWebGLStatic {
                     return this.hydGlobalState.commonState.readFramebufferBinding === this.hydGlobalState.defaultFramebuffer ? null : this.hydGlobalState.commonState.readFramebufferBinding;
                 case WebGL2RenderingContext.RENDERBUFFER_BINDING:
                     return this.hydGlobalState.commonState.renderbufferBinding;
+                case WebGL2RenderingContext.TEXTURE_BINDING_2D:
+                    return this.hydGlobalState.getTextureUnitBinding(this.hydGlobalState.commonState.activeTextureUnit, "2d");
+                case WebGL2RenderingContext.TEXTURE_BINDING_CUBE_MAP:
+                    return this.hydGlobalState.getTextureUnitBinding(this.hydGlobalState.commonState.activeTextureUnit, "cube");
+                case WebGL2RenderingContext.UNPACK_PREMULTIPLY_ALPHA_WEBGL:
+                    return this.hydGlobalState.miscState.unpackPremultiplyAlphaWebGL;
+                case WebGL2RenderingContext.UNPACK_COLORSPACE_CONVERSION_WEBGL:
+                    return this.hydGlobalState.miscState.unpackColorSpaceConversionWebGL;
+                case WebGL2RenderingContext.SAMPLE_BUFFERS:
+                    return this.hydGlobalState.contextAttributes.antialias ? 1 : 0;
+                case WebGL2RenderingContext.SAMPLES:
+                    return this.hydGlobalState.contextAttributes.antialias ? 4 : 0;
+                case WebGL2RenderingContext.DEPTH_BITS:
+                    return this.currentFramebufferBits(pname);
+                case WebGL2RenderingContext.RED_BITS:
+                case WebGL2RenderingContext.GREEN_BITS:
+                case WebGL2RenderingContext.BLUE_BITS:
+                case WebGL2RenderingContext.ALPHA_BITS:
+                    return this.currentFramebufferBits(pname);
+                case WebGL2RenderingContext.STENCIL_BITS:
+                    return this.currentFramebufferBits(pname);
             }
-            throw new Error("unhandled getParameter: " + pname);
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return null;
         }
     }
     getContextAttributes() {
@@ -4379,7 +7038,7 @@ class HydWebGLStatic {
     }
     getShaderParameter(shader, pname) {
         if (!this.isShader(shader)) {
-            this.setObjectValidationError(shader);
+            this.setShaderProgramValidationError(shader);
             return null;
         }
         switch (pname) {
@@ -4395,7 +7054,7 @@ class HydWebGLStatic {
     }
     getProgramParameter(program, pname) {
         if (!this.isProgram(program)) {
-            this.setObjectValidationError(program);
+            this.setShaderProgramValidationError(program);
             return null;
         }
         switch (pname) {
@@ -4410,7 +7069,8 @@ class HydWebGLStatic {
             case WebGL2RenderingContext.ACTIVE_ATTRIBUTES:
                 return program.hydAttributes.length;
             case WebGL2RenderingContext.ACTIVE_UNIFORMS:
-                return program.hydUniforms.filter((uniform) => !uniform.internal).length + program.hydSamplers.length;
+                return program.hydUniforms.filter(isVisibleActiveUniform).length +
+                    program.hydSamplers.filter((sampler) => sampler.arrayIndex === undefined || sampler.arrayIndex === 0).length;
             case WebGL2RenderingContext.ACTIVE_UNIFORM_BLOCKS:
                 if (this.hydContextType === "webgl2")
                     return 0;
@@ -4419,44 +7079,43 @@ class HydWebGLStatic {
         this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
         return null;
     }
+    getSupportedExtensions() {
+        return [...SUPPORTED_EXTENSION_NAMES];
+    }
     getExtension(extensionName) {
-        if (extensionName === 'OES_vertex_array_object') {
-            return {
-                createVertexArrayOES: () => {
-                    return this.createVertexArray();
-                },
-                deleteVertexArrayOES: (vertexArray) => {
-                    console.warn("deleteVertexArrayOES is not implemented");
-                },
-                bindVertexArrayOES: (vertexArray) => {
-                    return this.bindVertexArray(vertexArray);
-                },
-                isVertexArrayOES: (vertexArray) => {
-                    return vertexArray instanceof HydVertexArray;
-                },
-            };
+        const canonicalName = typeof extensionName === "string"
+            ? SUPPORTED_EXTENSION_BY_LOWER_NAME.get(extensionName.toLowerCase())
+            : undefined;
+        if (!canonicalName) {
+            return null;
         }
-        if (extensionName === 'ANGLE_instanced_arrays') {
-            return {
+        this.enabledExtensions.add(canonicalName.toUpperCase());
+        const cached = this.extensionObjects.get(canonicalName);
+        if (cached)
+            return cached;
+        let extension = null;
+        if (canonicalName === 'ANGLE_instanced_arrays') {
+            extension = {
                 VERTEX_ATTRIB_ARRAY_DIVISOR_ANGLE: WebGL2RenderingContext.VERTEX_ATTRIB_ARRAY_DIVISOR,
-                drawArraysInstancedANGLE: this.drawArraysInstanced.bind(this),
-                drawElementsInstancedANGLE: this.drawElementsInstanced.bind(this),
-                vertexAttribDivisorANGLE: this.vertexAttribDivisor.bind(this),
+                drawArraysInstancedANGLE: HydWebGLStatic.prototype.drawArraysInstanced.bind(this),
+                drawElementsInstancedANGLE: HydWebGLStatic.prototype.drawElementsInstanced.bind(this),
+                vertexAttribDivisorANGLE: HydWebGLStatic.prototype.vertexAttribDivisor.bind(this),
             };
         }
-        if (extensionName === 'OES_texture_float' ||
-            extensionName === 'OES_texture_float_linear' ||
-            extensionName === 'OES_element_index_uint' ||
-            extensionName === 'OES_standard_derivatives' ||
-            extensionName === 'EXT_shader_texture_lod' ||
-            extensionName === 'WEBGL_depth_texture' ||
-            extensionName === 'EXT_color_buffer_float' ||
-            extensionName === 'WEBGL_color_buffer_float' ||
-            extensionName === 'EXT_blend_minmax') {
-            return {};
+        else if (canonicalName === 'OES_element_index_uint') {
+            extension = {};
         }
-        console.warn("extension required: " + extensionName);
-        return null;
+        else if (canonicalName === 'EXT_sRGB') {
+            extension = {
+                SRGB_EXT: hydWebGLStatic_GL_SRGB_EXT,
+                SRGB_ALPHA_EXT: hydWebGLStatic_GL_SRGB_ALPHA_EXT,
+                SRGB8_ALPHA8_EXT: GL_SRGB8_ALPHA8_EXT,
+                FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING_EXT: GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING_EXT,
+            };
+        }
+        if (extension)
+            this.extensionObjects.set(canonicalName, extension);
+        return extension;
     }
     getBufferParameter(target, pname) {
         let buffer = null;
@@ -4544,6 +7203,10 @@ class HydWebGLStatic {
             return null;
         }
         const framebuffer = this.getFramebufferForTarget(target);
+        if (framebuffer === this.hydGlobalState.defaultFramebuffer) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return null;
+        }
         const attrib = framebuffer.attachments.get(attachment);
         if (!attrib) {
             if (pname === WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE) {
@@ -4553,6 +7216,14 @@ class HydWebGLStatic {
             return null;
         }
         switch (pname) {
+            case GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING_EXT:
+                if (!this.enabledExtensions.has("EXT_SRGB")) {
+                    this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                    return null;
+                }
+                return attrib.format?.endsWith("-srgb")
+                    ? hydWebGLStatic_GL_SRGB_EXT
+                    : WebGL2RenderingContext.LINEAR;
             case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
                 return attrib.objectType;
             case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
@@ -4571,7 +7242,22 @@ class HydWebGLStatic {
     }
     getAttribLocation(program, attribName) {
         if (!this.isProgram(program)) {
-            this.setObjectValidationError(program);
+            if (program instanceof HydProgram &&
+                program.ownerToken === this.contextToken && program.deleted) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            }
+            else {
+                this.setShaderProgramValidationError(program);
+            }
+            return -1;
+        }
+        if (!program.linked) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return -1;
+        }
+        const maxNameLength = this.hydContextType === "webgl2" ? 1024 : 256;
+        if (attribName.length > maxNameLength || /[^\x00-\x7f]/.test(attribName) || !isWebGlIdentifierName(attribName)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
             return -1;
         }
         const attrib = program.hydAttributes.find((item) => item.name === attribName);
@@ -4579,23 +7265,73 @@ class HydWebGLStatic {
     }
     getUniformLocation(program, uniformName) {
         if (!this.isProgram(program)) {
-            this.setObjectValidationError(program);
+            if (program instanceof HydProgram &&
+                program.ownerToken === this.contextToken && program.deleted) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            }
+            else {
+                this.setShaderProgramValidationError(program);
+            }
             return null;
         }
-        const safeUniformName = uniformName.replace(/[^A-Za-z0-9_]/g, "_").replace(/_+$/g, "");
+        if (!program.linked) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return null;
+        }
+        const maxNameLength = this.hydContextType === "webgl2" ? 1024 : 256;
+        if (uniformName.length > maxNameLength || /[^\x00-\x7f]/.test(uniformName) || !isWebGlIdentifierName(uniformName, true)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return null;
+        }
+        const arrayMatch = /^(.*)\[\s*(\d+)\s*\]$/.exec(uniformName);
+        const lookupName = arrayMatch ? arrayMatch[1] : uniformName;
+        const arrayIndex = arrayMatch ? Number(arrayMatch[2]) : 0;
+        const safeUniformName = lookupName.replace(/[^A-Za-z0-9_]/g, "_").replace(/_+$/g, "");
         const ret = program.hydUniforms.find((uniform) => !uniform.internal &&
-            (uniform.name === uniformName || uniform.name === safeUniformName || uniform.sourceName === uniformName)) ||
-            program.hydSamplers.find((sampler) => sampler.name === uniformName || sampler.name === safeUniformName || sampler.sourceName === uniformName);
-        if (ret) {
-            return ret;
-        }
-        else {
+            (uniform.name === lookupName || uniform.name === safeUniformName || uniform.sourceName === lookupName)) ||
+            program.hydSamplers.find((sampler) => sampler.name === lookupName || sampler.name === safeUniformName || sampler.sourceName === uniformName ||
+                (sampler.arrayName === lookupName && (sampler.arrayIndex || 0) === arrayIndex));
+        if (!ret) {
             return null;
         }
+        if (arrayMatch && (!ret.isArray || arrayIndex >= ret.size)) {
+            return null;
+        }
+        if (ret instanceof ProgramUniformSampler) {
+            const location = brandHydWebGlObject(Object.create(ret), "uniform-location");
+            location.activeForUniformUpdates = false;
+            location.storage = ret;
+            location.arrayElements = ret.arrayName
+                ? program.hydSamplers
+                    .filter((sampler) => sampler.arrayName === ret.arrayName && (sampler.arrayIndex || 0) >= (ret.arrayIndex || 0))
+                    .sort((a, b) => (a.arrayIndex || 0) - (b.arrayIndex || 0))
+                : [ret];
+            location.remainingArrayElements = location.arrayElements.length;
+            program.uniformSamplerLocations.push(location);
+            if (this.currentProgramValid && this.hydGlobalState.commonState.currentProgram === program) {
+                location.activeForUniformUpdates = true;
+            }
+            return location;
+        }
+        const location = brandHydWebGlObject(Object.create(ret), "uniform-location");
+        location.wordOffset = ret.wordOffset + (ret.elementStride >> 2) * arrayIndex;
+        location.byteLength = ret.elementByteLength;
+        location.arrayStrideWords = ret.elementStride >> 2;
+        location.remainingArrayElements = ret.size - arrayIndex;
+        location.writeFloat32View = null;
+        location.writeInt32View = null;
+        location.writeUint32View = null;
+        program.uniformBufferLocations.push(location);
+        if (this.currentProgramValid && this.hydGlobalState.commonState.currentProgram === program) {
+            location.writeFloat32View = location.float32View;
+            location.writeInt32View = location.int32View;
+            location.writeUint32View = location.uint32View;
+        }
+        return location;
     }
     getUniform(program, location) {
         if (!this.isProgram(program)) {
-            this.setObjectValidationError(program);
+            this.setShaderProgramValidationError(program);
             return null;
         }
         if (location === null ||
@@ -4607,17 +7343,13 @@ class HydWebGLStatic {
             return null;
         }
         if (location instanceof ProgramUniformSampler) {
-            return location.textureUnit;
+            return (location.storage || location).textureUnit;
         }
+        const matrixDimensions = uniformMatrixDimensions(location.webgl_type);
         const componentCount = (() => {
+            if (matrixDimensions)
+                return matrixDimensions.columns * matrixDimensions.rows;
             switch (location.webgl_type) {
-                case WebGL2RenderingContext.FLOAT_MAT3: return 9;
-                case WebGL2RenderingContext.FLOAT_MAT2x3: return 6;
-                case WebGL2RenderingContext.FLOAT_MAT2x4: return 8;
-                case WebGL2RenderingContext.FLOAT_MAT3x2: return 6;
-                case WebGL2RenderingContext.FLOAT_MAT3x4: return 12;
-                case WebGL2RenderingContext.FLOAT_MAT4x2: return 8;
-                case WebGL2RenderingContext.FLOAT_MAT4x3: return 12;
                 default: return Math.max(1, location.byteLength / 4);
             }
         })();
@@ -4639,10 +7371,10 @@ class HydWebGLStatic {
         if (location.webgl_type >= WebGL2RenderingContext.INT_VEC2 && location.webgl_type <= WebGL2RenderingContext.INT_VEC4) {
             return location.int32View.slice(location.wordOffset, location.wordOffset + componentCount);
         }
-        if (location.webgl_type === WebGL2RenderingContext.FLOAT_MAT3) {
-            const value = new Float32Array(9);
-            for (let column = 0; column < 3; column++) {
-                value.set(location.float32View.subarray(location.wordOffset + column * 4, location.wordOffset + column * 4 + 3), column * 3);
+        if (matrixDimensions) {
+            const value = new Float32Array(componentCount);
+            for (let column = 0; column < matrixDimensions.columns; column++) {
+                value.set(location.float32View.subarray(location.wordOffset + column * 4, location.wordOffset + column * 4 + matrixDimensions.rows), column * matrixDimensions.rows);
             }
             return value;
         }
@@ -4671,8 +7403,9 @@ class HydWebGLStatic {
             case WebGL2RenderingContext.CURRENT_VERTEX_ATTRIB:
                 return new Float32Array(this.hydGlobalState.currentVertexAttribValues[index]);
             case WebGL2RenderingContext.VERTEX_ATTRIB_ARRAY_DIVISOR:
-                if (this.hydContextType === "webgl2")
+                if (this.hydContextType === "webgl2" || this.enabledExtensions.has("ANGLE_INSTANCED_ARRAYS")) {
                     return attribute.divisor;
+                }
                 break;
             case WebGL2RenderingContext.VERTEX_ATTRIB_ARRAY_INTEGER:
                 if (this.hydContextType === "webgl2")
@@ -4720,69 +7453,113 @@ class HydWebGLStatic {
     polygonOffset(x, y) {
         this.hydGlobalState.polygonState.polygonOffsetFactor = x;
         this.hydGlobalState.polygonState.polygonOffsetUnits = y;
+        this.hydGlobalState.recordTransition("polygonOffset", x, y);
+    }
+    lineWidth(width) {
+        if (!Number.isFinite(width) || width <= 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        this.hydGlobalState.miscState.lineWidth = width;
+        this.hydGlobalState.recordTransition("lineWidth", width);
+    }
+    hint(target, mode) {
+        if (target !== WebGL2RenderingContext.GENERATE_MIPMAP_HINT) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (mode !== WebGL2RenderingContext.FASTEST &&
+            mode !== WebGL2RenderingContext.NICEST &&
+            mode !== WebGL2RenderingContext.DONT_CARE) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        this.hydGlobalState.miscState.generateMipmapHint = mode;
+        this.hydGlobalState.recordTransition("hint", target, mode);
+    }
+    sampleCoverage(value, invert) {
+        this.hydGlobalState.miscState.sampleCoverageValue = clampWebGlUnitFloat(value);
+        this.hydGlobalState.miscState.sampleCoverageInvert = Boolean(invert);
+        this.hydGlobalState.recordTransition("sampleCoverage", value, invert);
     }
     shaderSource(shader, source) {
         if (!this.isShader(shader)) {
-            this.setObjectValidationError(shader);
+            this.setShaderProgramValidationError(shader);
             return;
         }
         shader.sourceLength = source.length;
         shader.glsl_shader = source.trim();
-        shader.compiled = false;
-        shader.infoLog = "";
     }
     getShaderSource(shader) {
         if (!this.isShader(shader)) {
-            this.setObjectValidationError(shader);
+            this.setShaderProgramValidationError(shader);
             return null;
         }
         return shader.glsl_shader;
     }
-    validateUniformLocation(uniform) {
-        if (uniform === null) {
-            return false;
-        }
-        if (uniform.useToken === this.currentUniformUseToken) {
-            return true;
-        }
-        this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
-        return false;
-    }
     activateUniformLocations(program) {
-        this.currentUniformUseToken = HydWebGLStatic.nextUniformUseToken++;
-        if (!program)
-            return;
-        for (const uniform of program.hydUniforms)
-            uniform.useToken = this.currentUniformUseToken;
-        for (const sampler of program.hydSamplers)
-            sampler.useToken = this.currentUniformUseToken;
+        for (const uniform of this.activeUniformBuffers) {
+            uniform.writeFloat32View = null;
+            uniform.writeInt32View = null;
+            uniform.writeUint32View = null;
+        }
+        for (const sampler of this.activeUniformSamplers) {
+            sampler.activeForUniformUpdates = false;
+        }
+        this.activeUniformBuffers = program ? program.uniformBufferLocations : [];
+        this.activeUniformSamplers = program ? program.uniformSamplerLocations : [];
+        for (const uniform of this.activeUniformBuffers) {
+            uniform.writeFloat32View = uniform.float32View;
+            uniform.writeInt32View = uniform.int32View;
+            uniform.writeUint32View = uniform.uint32View;
+        }
+        for (const sampler of this.activeUniformSamplers) {
+            sampler.activeForUniformUpdates = true;
+        }
     }
     uniform1f(pub, x0) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        pub.float32View[pub.wordOffset] = x0;
+        const a = pub.writeFloat32View;
+        if (!a) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        a[pub.wordOffset] = x0;
     }
     uniform2f(pub, x0, x1) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        const a = pub.float32View;
+        const a = pub.writeFloat32View;
+        if (!a) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         const offset = pub.wordOffset;
         a[offset] = x0;
         a[offset + 1] = x1;
     }
     uniform3f(pub, x0, x1, x2) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        const a = pub.float32View;
+        const a = pub.writeFloat32View;
+        if (!a) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         const offset = pub.wordOffset;
         a[offset] = x0;
         a[offset + 1] = x1;
         a[offset + 2] = x2;
     }
     uniform4f(pub, x0, x1, x2, x3) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        const a = pub.float32View;
+        const a = pub.writeFloat32View;
+        if (!a) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         const offset = pub.wordOffset;
         a[offset] = x0;
         a[offset + 1] = x1;
@@ -4790,40 +7567,67 @@ class HydWebGLStatic {
         a[offset + 3] = x3;
     }
     uniform1i(uniform, x0) {
-        if (!this.validateUniformLocation(uniform))
+        if (uniform === null)
             return;
         if (uniform instanceof ProgramUniformSampler) {
-            if (uniform.textureUnit !== x0) {
-                uniform.textureUnit = x0;
+            if (!uniform.activeForUniformUpdates) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            const maxTextureUnits = enumToConstant.get(WebGL2RenderingContext.MAX_COMBINED_TEXTURE_IMAGE_UNITS) || 0;
+            if (!Number.isInteger(x0) || x0 < 0 || x0 >= maxTextureUnits) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+                return;
+            }
+            const storage = uniform.storage || uniform;
+            if (storage.textureUnit !== x0) {
+                storage.textureUnit = x0;
                 this.samplerOriginStateVersion++;
-                this.hydGlobalState.recordTransition("uniformSampler", uniform.name, x0);
+                this.hydGlobalState.recordTransition("uniformSampler", storage.name, x0);
             }
             return;
         }
+        const a = uniform.writeInt32View;
+        if (!a) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         const offset = uniform.wordOffset;
-        uniform.int32View[offset] = x0;
+        a[offset] = x0;
     }
     uniform2i(pub, x0, x1) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        const a = pub.int32View;
+        const a = pub.writeInt32View;
+        if (!a) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         const offset = pub.wordOffset;
         a[offset] = x0;
         a[offset + 1] = x1;
     }
     uniform3i(pub, x0, x1, x2) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        const a = pub.int32View;
+        const a = pub.writeInt32View;
+        if (!a) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         const offset = pub.wordOffset;
         a[offset] = x0;
         a[offset + 1] = x1;
         a[offset + 2] = x2;
     }
     uniform4i(pub, x0, x1, x2, x3) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        const a = pub.int32View;
+        const a = pub.writeInt32View;
+        if (!a) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         const offset = pub.wordOffset;
         a[offset] = x0;
         a[offset + 1] = x1;
@@ -4831,158 +7635,382 @@ class HydWebGLStatic {
         a[offset + 3] = x3;
     }
     uniform1ui(pub, x0) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        pub.uint32View[pub.wordOffset] = x0 >>> 0;
+        const a = pub.writeUint32View;
+        if (!a) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        a[pub.wordOffset] = x0 >>> 0;
     }
     uniform2ui(pub, x0, x1) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        const a = pub.uint32View;
+        const a = pub.writeUint32View;
+        if (!a) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         const offset = pub.wordOffset;
         a[offset] = x0 >>> 0;
         a[offset + 1] = x1 >>> 0;
     }
     uniform3ui(pub, x0, x1, x2) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        const a = pub.uint32View;
+        const a = pub.writeUint32View;
+        if (!a) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         const offset = pub.wordOffset;
         a[offset] = x0 >>> 0;
         a[offset + 1] = x1 >>> 0;
         a[offset + 2] = x2 >>> 0;
     }
     uniform4ui(pub, x0, x1, x2, x3) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        const a = pub.uint32View;
+        const a = pub.writeUint32View;
+        if (!a) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         const offset = pub.wordOffset;
         a[offset] = x0 >>> 0;
         a[offset + 1] = x1 >>> 0;
         a[offset + 2] = x2 >>> 0;
         a[offset + 3] = x3 >>> 0;
     }
-    uniform1fv(pub, v) {
-        if (!this.validateUniformLocation(pub))
+    uniformArrayLength(value) {
+        if ((typeof value !== "object" && typeof value !== "function") || value === null || typeof value.length !== "number") {
+            throw new TypeError("uniform vector data must be an array or typed array");
+        }
+        return Number(value.length);
+    }
+    writeFloatUniformArray(pub, value, components, expectedType) {
+        const length = this.uniformArrayLength(value);
+        const target = pub.writeFloat32View;
+        if (!target) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
-        pub.float32View.set(v, pub.wordOffset);
+        }
+        if (pub.webgl_type !== expectedType) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (length < components || length % components !== 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const requestedElements = length / components;
+        if (!pub.isArray && requestedElements > pub.remainingArrayElements) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const elements = Math.min(requestedElements, pub.remainingArrayElements);
+        const stride = pub.arrayStrideWords || components;
+        const valueCount = elements * components;
+        if (elements === 1) {
+            const offset = pub.wordOffset;
+            target[offset] = value[0];
+            if (components > 1)
+                target[offset + 1] = value[1];
+            if (components > 2)
+                target[offset + 2] = value[2];
+            if (components > 3)
+                target[offset + 3] = value[3];
+            return;
+        }
+        if (stride === components && valueCount === length && ArrayBuffer.isView(value)) {
+            target.set(value, pub.wordOffset);
+            return;
+        }
+        for (let element = 0; element < elements; element++) {
+            const sourceOffset = element * components;
+            const targetOffset = pub.wordOffset + element * stride;
+            for (let component = 0; component < components; component++) {
+                target[targetOffset + component] = value[sourceOffset + component];
+            }
+        }
+    }
+    writeIntUniformArray(pub, value, components, expectedType, boolType) {
+        const length = this.uniformArrayLength(value);
+        const target = pub.writeInt32View;
+        if (!target) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (pub.webgl_type !== expectedType && pub.webgl_type !== boolType) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (length < components || length % components !== 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const requestedElements = length / components;
+        if (!pub.isArray && requestedElements > pub.remainingArrayElements) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const elements = Math.min(requestedElements, pub.remainingArrayElements);
+        const stride = pub.arrayStrideWords || components;
+        const valueCount = elements * components;
+        if (elements === 1) {
+            const offset = pub.wordOffset;
+            target[offset] = value[0];
+            if (components > 1)
+                target[offset + 1] = value[1];
+            if (components > 2)
+                target[offset + 2] = value[2];
+            if (components > 3)
+                target[offset + 3] = value[3];
+            return;
+        }
+        if (stride === components && valueCount === length && ArrayBuffer.isView(value)) {
+            target.set(value, pub.wordOffset);
+            return;
+        }
+        for (let element = 0; element < elements; element++) {
+            const sourceOffset = element * components;
+            const targetOffset = pub.wordOffset + element * stride;
+            for (let component = 0; component < components; component++) {
+                target[targetOffset + component] = value[sourceOffset + component];
+            }
+        }
+    }
+    writeUintUniformArray(pub, value, components, expectedType, boolType) {
+        const length = this.uniformArrayLength(value);
+        const target = pub.writeUint32View;
+        if (!target) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (pub.webgl_type !== expectedType && pub.webgl_type !== boolType) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (length < components || length % components !== 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const requestedElements = length / components;
+        if (!pub.isArray && requestedElements > pub.remainingArrayElements) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const elements = Math.min(requestedElements, pub.remainingArrayElements);
+        const stride = pub.arrayStrideWords || components;
+        const valueCount = elements * components;
+        if (elements === 1) {
+            const offset = pub.wordOffset;
+            target[offset] = value[0] >>> 0;
+            if (components > 1)
+                target[offset + 1] = value[1] >>> 0;
+            if (components > 2)
+                target[offset + 2] = value[2] >>> 0;
+            if (components > 3)
+                target[offset + 3] = value[3] >>> 0;
+            return;
+        }
+        if (stride === components && valueCount === length && ArrayBuffer.isView(value)) {
+            target.set(value, pub.wordOffset);
+            return;
+        }
+        for (let element = 0; element < elements; element++) {
+            const sourceOffset = element * components;
+            const targetOffset = pub.wordOffset + element * stride;
+            for (let component = 0; component < components; component++) {
+                target[targetOffset + component] = value[sourceOffset + component] >>> 0;
+            }
+        }
+    }
+    uniform1fv(pub, v) {
+        if (pub === null)
+            return;
+        this.writeFloatUniformArray(pub, v, 1, WebGL2RenderingContext.FLOAT);
     }
     uniform2fv(pub, v) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        pub.float32View.set(v, pub.wordOffset);
+        this.writeFloatUniformArray(pub, v, 2, WebGL2RenderingContext.FLOAT_VEC2);
     }
     uniform3fv(pub, v) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        pub.float32View.set(v, pub.wordOffset);
+        const target = pub.writeFloat32View;
+        if (target && pub.webgl_type === WebGL2RenderingContext.FLOAT_VEC3 &&
+            v !== null && (typeof v === "object" || typeof v === "function") && v.length === 3) {
+            const offset = pub.wordOffset;
+            target[offset] = v[0];
+            target[offset + 1] = v[1];
+            target[offset + 2] = v[2];
+            return;
+        }
+        this.writeFloatUniformArray(pub, v, 3, WebGL2RenderingContext.FLOAT_VEC3);
     }
     uniform4fv(pub, v) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        pub.float32View.set(v, pub.wordOffset);
+        this.writeFloatUniformArray(pub, v, 4, WebGL2RenderingContext.FLOAT_VEC4);
     }
     uniform1iv(pub, v) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        pub.int32View.set(v, pub.wordOffset);
+        const length = this.uniformArrayLength(v);
+        if (length < 1) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (pub instanceof ProgramUniformSampler) {
+            if (!pub.activeForUniformUpdates) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            const elements = pub.arrayElements || [pub.storage || pub];
+            if (!pub.isArray && length > elements.length) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            const count = Math.min(length, elements.length);
+            const maxTextureUnits = enumToConstant.get(WebGL2RenderingContext.MAX_COMBINED_TEXTURE_IMAGE_UNITS) || 0;
+            for (let i = 0; i < count; i++) {
+                const unit = Number(v[i]);
+                if (!Number.isInteger(unit) || unit < 0 || unit >= maxTextureUnits) {
+                    this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+                    return;
+                }
+            }
+            for (let i = 0; i < count; i++) {
+                const sampler = elements[i];
+                const unit = Number(v[i]);
+                if (sampler.textureUnit !== unit) {
+                    sampler.textureUnit = unit;
+                    this.samplerOriginStateVersion++;
+                    this.hydGlobalState.recordTransition("uniformSampler", sampler.name, unit);
+                }
+            }
+            return;
+        }
+        this.writeIntUniformArray(pub, v, 1, WebGL2RenderingContext.INT, WebGL2RenderingContext.BOOL);
     }
     uniform2iv(pub, v) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        pub.int32View.set(v, pub.wordOffset);
+        this.writeIntUniformArray(pub, v, 2, WebGL2RenderingContext.INT_VEC2, WebGL2RenderingContext.BOOL_VEC2);
     }
     uniform3iv(pub, v) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        pub.int32View.set(v, pub.wordOffset);
+        this.writeIntUniformArray(pub, v, 3, WebGL2RenderingContext.INT_VEC3, WebGL2RenderingContext.BOOL_VEC3);
     }
     uniform4iv(pub, v) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        pub.int32View.set(v, pub.wordOffset);
+        this.writeIntUniformArray(pub, v, 4, WebGL2RenderingContext.INT_VEC4, WebGL2RenderingContext.BOOL_VEC4);
     }
     uniform1uiv(pub, v) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        pub.uint32View.set(v, pub.wordOffset);
+        this.writeUintUniformArray(pub, v, 1, WebGL2RenderingContext.UNSIGNED_INT, WebGL2RenderingContext.BOOL);
     }
     uniform2uiv(pub, v) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        pub.uint32View.set(v, pub.wordOffset);
+        this.writeUintUniformArray(pub, v, 2, WebGL2RenderingContext.UNSIGNED_INT_VEC2, WebGL2RenderingContext.BOOL_VEC2);
     }
     uniform3uiv(pub, v) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        pub.uint32View.set(v, pub.wordOffset);
+        this.writeUintUniformArray(pub, v, 3, WebGL2RenderingContext.UNSIGNED_INT_VEC3, WebGL2RenderingContext.BOOL_VEC3);
     }
     uniform4uiv(pub, v) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        pub.uint32View.set(v, pub.wordOffset);
+        this.writeUintUniformArray(pub, v, 4, WebGL2RenderingContext.UNSIGNED_INT_VEC4, WebGL2RenderingContext.BOOL_VEC4);
+    }
+    writeFloatUniformMatrix(pub, transpose, value, columns, rows, expectedType) {
+        const target = pub.writeFloat32View;
+        if (!target) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (pub.webgl_type !== expectedType) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (transpose) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const matrixValues = columns * rows;
+        const length = this.uniformArrayLength(value);
+        if (length < matrixValues || length % matrixValues !== 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const requestedElements = length / matrixValues;
+        if (!pub.isArray && requestedElements > pub.remainingArrayElements) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const elements = Math.min(requestedElements, pub.remainingArrayElements);
+        const columnStride = 4;
+        const matrixStride = pub.arrayStrideWords || columns * columnStride;
+        for (let element = 0; element < elements; element++) {
+            const sourceBase = element * matrixValues;
+            const targetBase = pub.wordOffset + element * matrixStride;
+            for (let column = 0; column < columns; column++) {
+                for (let row = 0; row < rows; row++) {
+                    const sourceIndex = transpose
+                        ? sourceBase + row * columns + column
+                        : sourceBase + column * rows + row;
+                    target[targetBase + column * columnStride + row] = value[sourceIndex];
+                }
+            }
+        }
     }
     uniformMatrix2fv(pub, transpose, v) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        if (transpose) {
-            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
-            return;
-        }
-        pub.float32View.set(v, pub.wordOffset);
+        this.writeFloatUniformMatrix(pub, transpose, v, 2, 2, WebGL2RenderingContext.FLOAT_MAT2);
     }
     uniformMatrix3fv(pub, transpose, v) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        if (transpose) {
-            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
-            return;
-        }
-        const target = pub.float32View;
-        const offset = pub.wordOffset;
-        target[offset] = v[0];
-        target[offset + 1] = v[1];
-        target[offset + 2] = v[2];
-        target[offset + 4] = v[3];
-        target[offset + 5] = v[4];
-        target[offset + 6] = v[5];
-        target[offset + 8] = v[6];
-        target[offset + 9] = v[7];
-        target[offset + 10] = v[8];
+        this.writeFloatUniformMatrix(pub, transpose, v, 3, 3, WebGL2RenderingContext.FLOAT_MAT3);
     }
     uniformMatrix4fv(pub, transpose, v) {
-        if (!this.validateUniformLocation(pub))
+        if (pub === null)
             return;
-        if (transpose) {
-            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
-            return;
-        }
-        pub.float32View.set(v, pub.wordOffset);
+        this.writeFloatUniformMatrix(pub, transpose, v, 4, 4, WebGL2RenderingContext.FLOAT_MAT4);
     }
     createProgram() {
-        return new HydProgram(this.hydDevice, this.shaderTranslator, this.contextToken);
+        return brandHydWebGlObject(new HydProgram(this.hydDevice, this.shaderTranslator, this.contextToken), "program");
     }
     createShader(type) {
         if (type !== WebGL2RenderingContext.VERTEX_SHADER && type !== WebGL2RenderingContext.FRAGMENT_SHADER) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
             return null;
         }
-        return new HydShader(this.hydDevice, type, this.shaderTranslator, this.contextToken);
+        return brandHydWebGlObject(new HydShader(this.hydDevice, type, this.shaderTranslator, this.contextToken, this.hydContextType === "webgl2" ? 2 : 1), "shader");
     }
     createBuffer() {
-        return new HydBuffer(this.hydDevice, this.contextToken);
+        return brandHydWebGlObject(new HydBuffer(this.hydDevice, this.contextToken), "buffer");
     }
     createTexture() {
-        return new HydTexture(this.hydDevice, this.contextToken);
+        return brandHydWebGlObject(new HydTexture(this.hydDevice, this.contextToken), "texture");
     }
     createFramebuffer() {
-        return new HydFramebuffer(this.contextToken);
+        return brandHydWebGlObject(new HydFramebuffer(this.contextToken), "framebuffer");
     }
     createRenderbuffer() {
-        return new HydTexture(this.hydDevice, this.contextToken);
+        return brandHydWebGlObject(new HydTexture(this.hydDevice, this.contextToken), "renderbuffer");
     }
     createVertexArray() {
-        return new HydVertexArray(this.contextToken);
+        return brandHydWebGlObject(new HydVertexArray(this.contextToken), "vertex-array");
     }
     currentTexture(target) {
         const viewDimension = enumToViewDimension.get(target);
@@ -4991,9 +8019,135 @@ class HydWebGLStatic {
             : null;
         if (!texture) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
-            throw new Error("No texture bound to active texture unit");
+            return null;
         }
         return texture;
+    }
+    isCubeFaceTarget(target) {
+        return target >= WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X &&
+            target <= WebGL2RenderingContext.TEXTURE_CUBE_MAP_NEGATIVE_Z;
+    }
+    validateTexImage2DTarget(target) {
+        const valid = target === WebGL2RenderingContext.TEXTURE_2D || this.isCubeFaceTarget(target);
+        if (!valid)
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+        return valid;
+    }
+    validateTexImage2DDimensions(target, level, width, height) {
+        const maxSize = enumToConstant.get(this.isCubeFaceTarget(target)
+            ? WebGL2RenderingContext.MAX_CUBE_MAP_TEXTURE_SIZE
+            : WebGL2RenderingContext.MAX_TEXTURE_SIZE) || 0;
+        const maxLevel = Math.floor(Math.log2(maxSize));
+        const levelLimit = level <= maxLevel ? Math.max(1, maxSize >> level) : 0;
+        const powerOfTwo = (value) => value > 0 && (value & (value - 1)) === 0;
+        const invalid = level < 0 || level > maxLevel || width < 0 || height < 0 ||
+            width > levelLimit || height > levelLimit ||
+            (this.isCubeFaceTarget(target) && width !== height) ||
+            (this.hydContextType !== "webgl2" && level > 0 &&
+                width > 0 && height > 0 && (!powerOfTwo(width) || !powerOfTwo(height)));
+        if (invalid)
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+        return !invalid;
+    }
+    resolveTexImageSourceExtent(source) {
+        if (!source)
+            return null;
+        if (typeof HTMLVideoElement !== "undefined" && source instanceof HTMLVideoElement) {
+            return { width: source.videoWidth, height: source.videoHeight };
+        }
+        if (typeof HTMLImageElement !== "undefined" && source instanceof HTMLImageElement) {
+            const imageUrl = source.currentSrc || source.src || "";
+            const isSvg = /^data:image\/svg\+xml(?:[;,]|$)/i.test(imageUrl) || (() => {
+                try {
+                    return new URL(imageUrl, document.baseURI).pathname.toLowerCase().endsWith(".svg");
+                }
+                catch {
+                    return false;
+                }
+            })();
+            if (isSvg)
+                return { width: source.width, height: source.height };
+            return { width: source.naturalWidth, height: source.naturalHeight };
+        }
+        if (Number.isFinite(source.displayWidth) && Number.isFinite(source.displayHeight)) {
+            return { width: source.displayWidth, height: source.displayHeight };
+        }
+        if (Number.isFinite(source.width) && Number.isFinite(source.height)) {
+            return { width: source.width, height: source.height };
+        }
+        return null;
+    }
+    isKnownTextureFormat(format) {
+        return format === WebGL2RenderingContext.ALPHA ||
+            format === WebGL2RenderingContext.RGB ||
+            format === WebGL2RenderingContext.RGBA ||
+            format === WebGL2RenderingContext.LUMINANCE ||
+            format === WebGL2RenderingContext.LUMINANCE_ALPHA ||
+            format === WebGL2RenderingContext.DEPTH_COMPONENT ||
+            format === WebGL2RenderingContext.DEPTH_STENCIL ||
+            format === hydWebGLStatic_GL_SRGB_EXT ||
+            format === hydWebGLStatic_GL_SRGB_ALPHA_EXT ||
+            (this.hydContextType === "webgl2" && (format === WebGL2RenderingContext.RED ||
+                format === WebGL2RenderingContext.RG ||
+                format === WebGL2RenderingContext.RED_INTEGER ||
+                format === WebGL2RenderingContext.RG_INTEGER ||
+                format === WebGL2RenderingContext.RGBA_INTEGER));
+    }
+    isKnownTextureType(type) {
+        return type === WebGL2RenderingContext.UNSIGNED_BYTE ||
+            type === WebGL2RenderingContext.UNSIGNED_SHORT_5_6_5 ||
+            type === WebGL2RenderingContext.UNSIGNED_SHORT_4_4_4_4 ||
+            type === WebGL2RenderingContext.UNSIGNED_SHORT_5_5_5_1 ||
+            type === WebGL2RenderingContext.FLOAT ||
+            type === 0x8D61 ||
+            (this.hydContextType === "webgl2" && (type === WebGL2RenderingContext.BYTE ||
+                type === WebGL2RenderingContext.SHORT ||
+                type === WebGL2RenderingContext.UNSIGNED_SHORT ||
+                type === WebGL2RenderingContext.INT ||
+                type === WebGL2RenderingContext.UNSIGNED_INT ||
+                type === WebGL2RenderingContext.HALF_FLOAT ||
+                type === WebGL2RenderingContext.UNSIGNED_INT_24_8));
+    }
+    validateTextureUploadView(pixels, width, height, format, type) {
+        if (pixels === null || !ArrayBuffer.isView(pixels))
+            return true;
+        const compatible = type === WebGL2RenderingContext.UNSIGNED_BYTE
+            ? pixels instanceof Uint8Array || pixels instanceof Uint8ClampedArray
+            : type === WebGL2RenderingContext.UNSIGNED_SHORT_5_6_5 ||
+                type === WebGL2RenderingContext.UNSIGNED_SHORT_4_4_4_4 ||
+                type === WebGL2RenderingContext.UNSIGNED_SHORT_5_5_5_1 ||
+                type === WebGL2RenderingContext.UNSIGNED_SHORT ||
+                type === WebGL2RenderingContext.HALF_FLOAT || type === 0x8D61
+                ? pixels instanceof Uint16Array
+                : type === WebGL2RenderingContext.FLOAT
+                    ? pixels instanceof Float32Array
+                    : type === WebGL2RenderingContext.UNSIGNED_INT ||
+                        type === WebGL2RenderingContext.UNSIGNED_INT_24_8
+                        ? pixels instanceof Uint32Array
+                        : type === WebGL2RenderingContext.INT
+                            ? pixels instanceof Int32Array
+                            : type === WebGL2RenderingContext.BYTE
+                                ? pixels instanceof Int8Array
+                                : type === WebGL2RenderingContext.SHORT
+                                    ? pixels instanceof Int16Array
+                                    : false;
+        if (!compatible) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return false;
+        }
+        try {
+            const bytesPerPixel = textureUploadBytesPerPixel(format, type);
+            const required = packedPixelLayout(width, height, bytesPerPixel, this.hydGlobalState.miscState.unpackAlignment).requiredBytes;
+            if (pixels.byteLength < required) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return false;
+            }
+        }
+        catch {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return false;
+        }
+        return true;
     }
     isSupportedTextureUploadFormat(internalformat, format, type) {
         return ((internalformat === WebGL2RenderingContext.RGBA || internalformat === WebGL2RenderingContext.RGBA8) && format === WebGL2RenderingContext.RGBA && (type === WebGL2RenderingContext.UNSIGNED_BYTE || type === WebGL2RenderingContext.FLOAT))
@@ -5015,7 +8169,35 @@ class HydWebGLStatic {
             || (internalformat === WebGL2RenderingContext.LUMINANCE && format === WebGL2RenderingContext.LUMINANCE && type === WebGL2RenderingContext.UNSIGNED_BYTE)
             || (internalformat === WebGL2RenderingContext.ALPHA && format === WebGL2RenderingContext.ALPHA && type === WebGL2RenderingContext.UNSIGNED_BYTE)
             || (internalformat === WebGL2RenderingContext.LUMINANCE_ALPHA && format === WebGL2RenderingContext.LUMINANCE_ALPHA && type === WebGL2RenderingContext.UNSIGNED_BYTE)
-            || (internalformat === WebGL2RenderingContext.RGB && format === WebGL2RenderingContext.RGB && type === WebGL2RenderingContext.UNSIGNED_BYTE);
+            || (((internalformat === hydWebGLStatic_GL_SRGB_EXT && format === hydWebGLStatic_GL_SRGB_EXT) ||
+                (internalformat === hydWebGLStatic_GL_SRGB_ALPHA_EXT && format === hydWebGLStatic_GL_SRGB_ALPHA_EXT)) &&
+                type === WebGL2RenderingContext.UNSIGNED_BYTE)
+            || (this.hydContextType === "webgl2" &&
+                ((internalformat === WebGL2RenderingContext.SRGB8 && format === WebGL2RenderingContext.RGB) ||
+                    (internalformat === WebGL2RenderingContext.SRGB8_ALPHA8 && format === WebGL2RenderingContext.RGBA)) &&
+                type === WebGL2RenderingContext.UNSIGNED_BYTE)
+            || (internalformat === WebGL2RenderingContext.RGB && format === WebGL2RenderingContext.RGB &&
+                (type === WebGL2RenderingContext.UNSIGNED_BYTE || type === WebGL2RenderingContext.UNSIGNED_SHORT_5_6_5))
+            || (internalformat === WebGL2RenderingContext.RGBA && format === WebGL2RenderingContext.RGBA &&
+                (type === WebGL2RenderingContext.UNSIGNED_SHORT_4_4_4_4 ||
+                    type === WebGL2RenderingContext.UNSIGNED_SHORT_5_5_5_1));
+    }
+    textureUploadExtensionsAllow(format, type) {
+        if (this.hydContextType === "webgl2")
+            return true;
+        const extensionName = format === hydWebGLStatic_GL_SRGB_EXT || format === hydWebGLStatic_GL_SRGB_ALPHA_EXT
+            ? "EXT_SRGB"
+            : type === WebGL2RenderingContext.FLOAT
+                ? "OES_TEXTURE_FLOAT"
+                : type === 0x8D61
+                    ? "OES_TEXTURE_HALF_FLOAT"
+                    : (format === WebGL2RenderingContext.DEPTH_COMPONENT || format === WebGL2RenderingContext.DEPTH_STENCIL)
+                        ? "WEBGL_DEPTH_TEXTURE"
+                        : null;
+        if (!extensionName || this.enabledExtensions.has(extensionName))
+            return true;
+        this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+        return false;
     }
     isSupportedTextureSubUploadFormat(format, type) {
         return this.isSupportedTextureUploadFormat(format, format, type)
@@ -5032,7 +8214,12 @@ class HydWebGLStatic {
             || (format === WebGL2RenderingContext.RGB && type === WebGL2RenderingContext.UNSIGNED_BYTE)
             || (format === WebGL2RenderingContext.LUMINANCE && type === WebGL2RenderingContext.UNSIGNED_BYTE)
             || (format === WebGL2RenderingContext.ALPHA && type === WebGL2RenderingContext.UNSIGNED_BYTE)
-            || (format === WebGL2RenderingContext.LUMINANCE_ALPHA && type === WebGL2RenderingContext.UNSIGNED_BYTE);
+            || (format === WebGL2RenderingContext.LUMINANCE_ALPHA && type === WebGL2RenderingContext.UNSIGNED_BYTE)
+            || ((format === hydWebGLStatic_GL_SRGB_EXT || format === hydWebGLStatic_GL_SRGB_ALPHA_EXT) && type === WebGL2RenderingContext.UNSIGNED_BYTE)
+            || (format === WebGL2RenderingContext.RGB && type === WebGL2RenderingContext.UNSIGNED_SHORT_5_6_5)
+            || (format === WebGL2RenderingContext.RGBA &&
+                (type === WebGL2RenderingContext.UNSIGNED_SHORT_4_4_4_4 ||
+                    type === WebGL2RenderingContext.UNSIGNED_SHORT_5_5_5_1));
     }
     textureStorageUploadFormat(internalformat) {
         switch (internalformat) {
@@ -5102,6 +8289,15 @@ class HydWebGLStatic {
         }
         throw new Error("unsupported framebuffer target: " + target);
     }
+    validateFramebufferTarget(target) {
+        const valid = target === WebGL2RenderingContext.FRAMEBUFFER ||
+            (this.hydContextType === "webgl2" &&
+                (target === WebGL2RenderingContext.DRAW_FRAMEBUFFER ||
+                    target === WebGL2RenderingContext.READ_FRAMEBUFFER));
+        if (!valid)
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+        return valid;
+    }
     getDrawFramebufferHeight() {
         const framebuffer = this.hydGlobalState.commonState.drawFramebufferBinding;
         if (framebuffer === this.hydGlobalState.defaultFramebuffer || framebuffer.drawBuffers.includes(WebGL2RenderingContext.BACK)) {
@@ -5114,6 +8310,18 @@ class HydWebGLStatic {
         }
         return this.hydCanvas.height;
     }
+    getDrawFramebufferWidth() {
+        const framebuffer = this.hydGlobalState.commonState.drawFramebufferBinding;
+        if (framebuffer === this.hydGlobalState.defaultFramebuffer || framebuffer.drawBuffers.includes(WebGL2RenderingContext.BACK)) {
+            return this.hydCanvas.width;
+        }
+        for (const attachment of framebuffer.attachments.values()) {
+            if (attachment.width > 0) {
+                return attachment.width;
+            }
+        }
+        return this.hydCanvas.width;
+    }
     toGpuViewport() {
         const [x, y, width, height, minDepth, maxDepth] = this.hydGlobalState.commonState.viewport;
         const framebufferHeight = this.getDrawFramebufferHeight();
@@ -5121,8 +8329,13 @@ class HydWebGLStatic {
     }
     toGpuScissorRect() {
         const [x, y, width, height] = this.hydGlobalState.miscState.scissorBox;
+        const framebufferWidth = this.getDrawFramebufferWidth();
         const framebufferHeight = this.getDrawFramebufferHeight();
-        return [x, framebufferHeight - y - height, width, height];
+        const x0 = Math.min(framebufferWidth, Math.max(0, x));
+        const y0 = Math.min(framebufferHeight, Math.max(0, y));
+        const x1 = Math.min(framebufferWidth, Math.max(0, x + width));
+        const y1 = Math.min(framebufferHeight, Math.max(0, y + height));
+        return [x0, framebufferHeight - y1, Math.max(0, x1 - x0), Math.max(0, y1 - y0)];
     }
     setGpuViewport() {
         const viewport = this.hydGlobalState.commonState.viewport;
@@ -5130,9 +8343,7 @@ class HydWebGLStatic {
         this.hydRpCache.RpSetViewportValues(viewport[0], framebufferHeight - viewport[1] - viewport[3], viewport[2], viewport[3], viewport[4], viewport[5]);
     }
     setGpuScissorRect() {
-        const scissorBox = this.hydGlobalState.miscState.scissorBox;
-        const framebufferHeight = this.getDrawFramebufferHeight();
-        this.hydRpCache.RpSetScissorRectValues(scissorBox[0], framebufferHeight - scissorBox[1] - scissorBox[3], scissorBox[2], scissorBox[3]);
+        this.hydRpCache.RpSetScissorRectValues(...this.toGpuScissorRect());
     }
     blendUsesConstantFactor() {
         const blend = this.hydGlobalState.blendState;
@@ -5148,27 +8359,72 @@ class HydWebGLStatic {
     samplerNeedsOriginFlip(texture) {
         return !!texture && (texture.sourceOrigin === "render-target" || texture.sourceOrigin === "copy");
     }
-    getColorWriteMask() {
+    markDrawFramebufferAttachmentsAsRenderTargets(mask) {
+        const framebuffer = this.hydGlobalState.commonState.drawFramebufferBinding;
+        if (framebuffer === this.hydGlobalState.defaultFramebuffer || mask === 0)
+            return;
+        let changed = false;
+        for (const [point, attachment] of framebuffer.attachments) {
+            const isColor = point >= WebGL2RenderingContext.COLOR_ATTACHMENT0 &&
+                point <= WebGL2RenderingContext.COLOR_ATTACHMENT15;
+            const isDepth = point === WebGL2RenderingContext.DEPTH_ATTACHMENT ||
+                point === WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT;
+            const isStencil = point === WebGL2RenderingContext.STENCIL_ATTACHMENT ||
+                point === WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT;
+            const isWritten = (isColor && Boolean(mask & WebGL2RenderingContext.COLOR_BUFFER_BIT)) ||
+                (isDepth && Boolean(mask & WebGL2RenderingContext.DEPTH_BUFFER_BIT)) ||
+                (isStencil && Boolean(mask & WebGL2RenderingContext.STENCIL_BUFFER_BIT));
+            if (isWritten) {
+                changed = attachment.attachment.markFramebufferRenderTarget() || changed;
+            }
+        }
+        if (changed) {
+            this.samplerOriginStateVersion++;
+        }
+    }
+    colorWriteMaskForAttachment(attachment) {
         const [r, g, b, a] = this.hydGlobalState.miscState.colorWriteMask;
+        const writesDefaultFramebuffer = this.hydGlobalState.commonState.drawFramebufferBinding === this.hydGlobalState.defaultFramebuffer;
+        const targetHasAlpha = !attachment || attachment.colorBits[3] > 0;
+        const writeAlpha = targetHasAlpha &&
+            (writesDefaultFramebuffer && this.hydGlobalState.contextAttributes.alpha === false ? true : a);
         return (r ? GPUColorWrite.RED : 0) |
             (g ? GPUColorWrite.GREEN : 0) |
             (b ? GPUColorWrite.BLUE : 0) |
-            (a ? GPUColorWrite.ALPHA : 0);
+            (writeAlpha ? GPUColorWrite.ALPHA : 0);
+    }
+    getColorWriteMask() {
+        const framebuffer = this.hydGlobalState.commonState.drawFramebufferBinding;
+        if (framebuffer === this.hydGlobalState.defaultFramebuffer) {
+            return this.colorWriteMaskForAttachment();
+        }
+        return framebuffer.drawBuffers.reduce((mask, point) => {
+            const attachment = framebuffer.attachments.get(point);
+            return mask | (attachment ? this.colorWriteMaskForAttachment(attachment) : 0);
+        }, 0);
     }
     getMaskedClearTargets() {
         return this.hydGlobalState.commonState.drawFramebufferBinding.drawBuffers.flatMap((value) => {
             if (value === WebGL2RenderingContext.BACK) {
-                return this.hydGlobalState.__canvasView ? [{ view: this.hydGlobalState.__canvasView, format: "bgra8unorm" }] : [];
+                return this.hydGlobalState.__canvasView ? [{
+                        view: this.hydGlobalState.__canvasView,
+                        format: "bgra8unorm",
+                        writeMask: this.colorWriteMaskForAttachment(),
+                    }] : [];
             }
             if (WebGL2RenderingContext.COLOR_ATTACHMENT0 <= value && value <= WebGL2RenderingContext.COLOR_ATTACHMENT15) {
                 const attachment = this.hydGlobalState.commonState.drawFramebufferBinding.attachments.get(value);
-                return attachment ? [{ view: attachment.view, format: attachment.format }] : [];
+                return attachment ? [{
+                        view: attachment.view,
+                        format: attachment.format,
+                        writeMask: this.colorWriteMaskForAttachment(attachment),
+                    }] : [];
             }
             return [];
         });
     }
-    getMaskedClearPipeline(targets, writeMask) {
-        const key = `${targets.map((target) => target.format).join(",")}|${writeMask}`;
+    getMaskedClearPipeline(targets) {
+        const key = targets.map((target) => `${target.format}:${target.writeMask}`).join(",");
         let pipeline = this.maskedClearPipelines.get(key);
         if (!pipeline) {
             const outputs = targets.map((_, index) => `    @location(${index}) color${index}: vec4<f32>,`).join("\n");
@@ -5207,7 +8463,7 @@ ${assignments}
                 fragment: {
                     module,
                     entryPoint: "fs",
-                    targets: targets.map((target) => ({ format: target.format, writeMask })),
+                    targets: targets.map((target) => ({ format: target.format, writeMask: target.writeMask })),
                 },
                 primitive: { topology: "triangle-list" },
             });
@@ -5231,8 +8487,11 @@ ${assignments}
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.UNIFORM,
             });
         }
-        this.hydDevice.queue.writeBuffer(this.maskedClearUniformBuffer, 0, new Float32Array(this.hydGlobalState.clearState.color));
-        const pipeline = this.getMaskedClearPipeline(targets, writeMask);
+        this.hydDevice.queue.writeBuffer(this.maskedClearUniformBuffer, 0, new Float32Array(this.hydGlobalState.commonState.drawFramebufferBinding === this.hydGlobalState.defaultFramebuffer &&
+            this.hydGlobalState.contextAttributes.alpha === false
+            ? [...this.hydGlobalState.clearState.color.slice(0, 3), 1]
+            : this.hydGlobalState.clearState.color));
+        const pipeline = this.getMaskedClearPipeline(targets);
         const bindGroup = this.hydDevice.createBindGroup({
             label: "masked-clear-bind-group",
             layout: pipeline.getBindGroupLayout(0),
@@ -5256,7 +8515,11 @@ ${assignments}
         this.hydDevice.queue.submit([commandEncoder.finish()]);
     }
     bindRenderbuffer(target, renderbuffer) {
-        if (renderbuffer !== null && (!(renderbuffer instanceof HydTexture) || renderbuffer.ownerToken !== this.contextToken || renderbuffer.deleted)) {
+        if (renderbuffer?.deleted) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (renderbuffer !== null && (!(renderbuffer instanceof HydTexture) || renderbuffer.ownerToken !== this.contextToken)) {
             this.setObjectValidationError(renderbuffer);
             return;
         }
@@ -5272,15 +8535,32 @@ ${assignments}
         this.hydGlobalState.recordTransition("bindRenderbuffer", target, renderbuffer ? renderbuffer.hash : "null");
     }
     renderbufferStorage(target, internalFormat, width, height) {
+        if (target !== WebGL2RenderingContext.RENDERBUFFER) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        const maxSize = Number(enumToConstant.get(WebGL2RenderingContext.MAX_RENDERBUFFER_SIZE)) || 4096;
+        if (width < 0 || height < 0 || width > maxSize || height > maxSize) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
         if (target === WebGL2RenderingContext.RENDERBUFFER) {
             const renderbuffer = this.hydGlobalState.commonState.renderbufferBinding;
             if (!renderbuffer) {
                 this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
-                throw new Error("renderbufferStorage called with no renderbuffer bound");
+                return;
             }
+            this._der_flush();
             renderbuffer.renderbufferInternalFormat = internalFormat;
             renderbuffer.renderbufferSamples = 0;
             switch (internalFormat) {
+                case GL_SRGB8_ALPHA8_EXT:
+                    if (this.hydContextType !== "webgl2" && !this.enabledExtensions.has("EXT_SRGB")) {
+                        this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                        return;
+                    }
+                    renderbuffer.renderbufferStorage('rgba8unorm-srgb', width, height);
+                    break;
                 case WebGL2RenderingContext.DEPTH_COMPONENT16:
                     renderbuffer.renderbufferStorage('depth16unorm', width, height);
                     break;
@@ -5306,16 +8586,19 @@ ${assignments}
                     renderbuffer.renderbufferStorage('rgba8unorm', width, height);
                     break;
                 default:
-                    throw new Error("unsupported internalFormat: " + internalFormat);
+                    this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                    return;
             }
-        }
-        else {
-            console.warn("unknown target: " + target);
         }
         this.hydGlobalState.recordTransition("renderbufferStorage", target, internalFormat, width, height);
     }
     enableVertexAttribArray(index) {
+        index = Number(index) >>> 0;
         const attribute = this.hydGlobalState.commonState.vertexArrayBinding.attributes[index];
+        if (!attribute) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
         if (!attribute.enabled) {
             attribute.enabled = true;
             attribute.updateHash();
@@ -5323,7 +8606,12 @@ ${assignments}
         }
     }
     disableVertexAttribArray(index) {
+        index = Number(index) >>> 0;
         const attribute = this.hydGlobalState.commonState.vertexArrayBinding.attributes[index];
+        if (!attribute) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
         if (attribute.enabled) {
             attribute.enabled = false;
             attribute.updateHash();
@@ -5331,11 +8619,20 @@ ${assignments}
         }
     }
     setCurrentVertexAttrib(index, x, y, z, w) {
+        index = Number(index) >>> 0;
         const values = this.hydGlobalState.currentVertexAttribValues[index];
+        if (!values) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (values[0] === x && values[1] === y && values[2] === z && values[3] === w)
+            return;
+        this._der_flush();
         values[0] = x;
         values[1] = y;
         values[2] = z;
         values[3] = w;
+        this.hydGlobalState.updateCurrentVertexAttribBuffer(index);
         this.hydGlobalState.recordTransition("vertexAttrib", index, x, y, z, w);
     }
     vertexAttrib1f(index, x) {
@@ -5351,18 +8648,38 @@ ${assignments}
         this.setCurrentVertexAttrib(index, x, y, z, w);
     }
     vertexAttrib1fv(index, values) {
+        if (!values || values.length < 1) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
         this.vertexAttrib1f(index, values[0]);
     }
     vertexAttrib2fv(index, values) {
+        if (!values || values.length < 2) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
         this.vertexAttrib2f(index, values[0], values[1]);
     }
     vertexAttrib3fv(index, values) {
+        if (!values || values.length < 3) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
         this.vertexAttrib3f(index, values[0], values[1], values[2]);
     }
     vertexAttrib4fv(index, values) {
+        if (!values || values.length < 4) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
         this.vertexAttrib4f(index, values[0], values[1], values[2], values[3]);
     }
     clearColor(r, g, b, a) {
+        r = clampWebGlUnitFloat(r);
+        g = clampWebGlUnitFloat(g);
+        b = clampWebGlUnitFloat(b);
+        a = clampWebGlUnitFloat(a);
         const [r1, g1, b1, a1] = this.hydGlobalState.clearState.color;
         if (r !== r1 || g !== g1 || b !== b1 || a !== a1) {
             this.hydGlobalState.clearState.color = [r, g, b, a];
@@ -5370,6 +8687,7 @@ ${assignments}
         }
     }
     clearDepth(depth) {
+        depth = clampWebGlUnitFloat(depth);
         if (this.hydGlobalState.clearState.depth !== depth) {
             this.hydGlobalState.clearState.depth = depth;
             this.hydGlobalState.recordTransition("clearDepth", depth);
@@ -5382,7 +8700,27 @@ ${assignments}
         }
     }
     clear(mask) {
+        const validMask = WebGL2RenderingContext.COLOR_BUFFER_BIT |
+            WebGL2RenderingContext.DEPTH_BUFFER_BIT |
+            WebGL2RenderingContext.STENCIL_BUFFER_BIT;
+        if ((mask & ~validMask) !== 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (this.framebufferStatus(this.hydGlobalState.commonState.drawFramebufferBinding) !== WebGL2RenderingContext.FRAMEBUFFER_COMPLETE) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_FRAMEBUFFER_OPERATION);
+            return;
+        }
         ensureAutoFrame();
+        if (this.canvasSizeDirty) {
+            this.updateCanvasSize();
+        }
+        this.ensureDefaultFramebufferRenderTarget();
+        if (this.hydGlobalState.commonState.drawFramebufferBinding === this.hydGlobalState.defaultFramebuffer &&
+            this.defaultFramebufferNeedsImplicitClear) {
+            this.materializeImplicitDefaultFramebufferClear();
+            this._der_flush();
+        }
         let effectiveMask = mask;
         let needsMaskedColorClear = false;
         if (mask & WebGL2RenderingContext.COLOR_BUFFER_BIT) {
@@ -5398,6 +8736,12 @@ ${assignments}
         }
         if ((mask & WebGL2RenderingContext.DEPTH_BUFFER_BIT) && !this.hydGlobalState.depthState.writeMask) {
             effectiveMask &= ~WebGL2RenderingContext.DEPTH_BUFFER_BIT;
+        }
+        this.markDrawFramebufferAttachmentsAsRenderTargets(effectiveMask | (needsMaskedColorClear ? WebGL2RenderingContext.COLOR_BUFFER_BIT : 0));
+        if ((effectiveMask & WebGL2RenderingContext.COLOR_BUFFER_BIT || needsMaskedColorClear) &&
+            this.hydGlobalState.commonState.drawFramebufferBinding === this.hydGlobalState.defaultFramebuffer &&
+            this.hydGlobalState.__canvasTexture === this.defaultFramebufferBackingTexture) {
+            this.defaultFramebufferBackingNeedsPresentation = true;
         }
         const canUseLoadOpClear = effectiveMask !== 0 &&
             !needsMaskedColorClear &&
@@ -5424,14 +8768,19 @@ ${assignments}
         }
         const previousTarget = this.hydGlobalState.clearState.target;
         this.hydGlobalState.clearState.target = effectiveMask;
-        this.hydRpCache.RpClear(this.bindedGetRenderPassDesc);
+        this.hydRpCache.RpClear(this[RENDER_PASS_DESCRIPTOR_CALLBACK]);
         this.hydGlobalState.clearState.target = previousTarget;
-        this.hydGlobalState.recordTransition("clear", effectiveMask);
+        this.hydGlobalState.recordTransition("clearMaterialized", effectiveMask, previousTarget);
     }
     depthFunc(func) {
         const tmp = enumToCompareFunction.get(func);
+        if (!tmp) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
         if (this.hydGlobalState.depthState.func !== tmp) {
             this.hydGlobalState.depthState.func = tmp;
+            this.hydGlobalState.depthState.funcEnum = func;
             this.hydGlobalState.recordTransition("depthFunc", func);
         }
     }
@@ -5450,24 +8799,117 @@ ${assignments}
     }
     frontFace(mode) {
         let tmp = enumToFrontFace.get(mode);
+        if (!tmp) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
         if (this.hydGlobalState.polygonState.frontFace !== tmp) {
             this.hydGlobalState.polygonState.frontFace = tmp;
+            this.hydGlobalState.polygonState.frontFaceEnum = mode;
             this.hydGlobalState.recordTransition("frontFace", mode);
         }
     }
     cullFace(mode) {
         let tmp = enumToCullFace.get(mode);
+        if (!tmp) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
         if (this.hydGlobalState.polygonState.cullFaceMode !== tmp) {
             this.hydGlobalState.polygonState.cullFaceMode = tmp;
+            this.hydGlobalState.polygonState.cullFaceModeEnum = mode;
             this.hydGlobalState.recordTransition("cullFace", mode);
         }
     }
+    bufferBindingKindForTarget(target) {
+        if (target === WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER) {
+            return "element-array";
+        }
+        if (target === WebGL2RenderingContext.ARRAY_BUFFER) {
+            return "other";
+        }
+        if (this.hydContextType === "webgl2" &&
+            (target === WebGL2RenderingContext.PIXEL_PACK_BUFFER ||
+                target === WebGL2RenderingContext.PIXEL_UNPACK_BUFFER)) {
+            return "other";
+        }
+        return null;
+    }
     bindBuffer(target, buffer) {
-        if (buffer instanceof HydBuffer && (buffer.ownerToken !== this.contextToken || buffer.deleted)) {
-            this.setObjectValidationError(buffer);
+        if (buffer instanceof HydBuffer && buffer.ownerToken === this.contextToken && !buffer.deleted) {
+            if (target === WebGL2RenderingContext.ARRAY_BUFFER && buffer.bindingKind === "other") {
+                this.hydGlobalState.commonState.arrayBufferBinding = buffer;
+                return;
+            }
+            if (target === WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER && buffer.bindingKind === "element-array") {
+                if (this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding !== buffer) {
+                    this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding = buffer;
+                    this.hydGlobalState.recordTransition("bindBuffer", target, buffer.hash);
+                }
+                return;
+            }
+        }
+        if (target === WebGL2RenderingContext.ARRAY_BUFFER &&
+            buffer === this.hydGlobalState.commonState.arrayBufferBinding) {
             return;
         }
-        const hydBuffer = this.normalizeBuffer(buffer);
+        if (target === WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER &&
+            buffer === this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding) {
+            return;
+        }
+        if (this.hydContextType === "webgl2" && target === WebGL2RenderingContext.PIXEL_PACK_BUFFER &&
+            buffer === this.hydGlobalState.commonState.pixelPackBufferBinding) {
+            return;
+        }
+        if (this.hydContextType === "webgl2" && target === WebGL2RenderingContext.PIXEL_UNPACK_BUFFER &&
+            buffer === this.hydGlobalState.commonState.pixelUnpackBufferBinding) {
+            return;
+        }
+        if (buffer instanceof HydBuffer &&
+            (target === WebGL2RenderingContext.ARRAY_BUFFER || target === WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER)) {
+            if (buffer.ownerToken !== this.contextToken || buffer.deleted) {
+                this.setObjectValidationError(buffer);
+                return;
+            }
+            const bindingKind = target === WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER ? "element-array" : "other";
+            if (buffer.bindingKind && buffer.bindingKind !== bindingKind) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            buffer.bindingKind = bindingKind;
+            buffer.initialized = true;
+            if (target === WebGL2RenderingContext.ARRAY_BUFFER) {
+                this.hydGlobalState.commonState.arrayBufferBinding = buffer;
+            }
+            else {
+                this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding = buffer;
+                this.hydGlobalState.recordTransition("bindBuffer", target, buffer.hash);
+            }
+            return;
+        }
+        const bindingKind = this.bufferBindingKindForTarget(target);
+        if (!bindingKind) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        let hydBuffer;
+        if (buffer instanceof HydBuffer) {
+            if (buffer.ownerToken !== this.contextToken || buffer.deleted) {
+                this.setObjectValidationError(buffer);
+                return;
+            }
+            hydBuffer = buffer;
+        }
+        else {
+            hydBuffer = this.normalizeBuffer(buffer);
+        }
+        if (hydBuffer && hydBuffer.bindingKind && hydBuffer.bindingKind !== bindingKind) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (hydBuffer && !hydBuffer.bindingKind) {
+            hydBuffer.bindingKind = bindingKind;
+        }
         if (target === WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER) {
             if (hydBuffer)
                 hydBuffer.initialized = true;
@@ -5497,11 +8939,12 @@ ${assignments}
                 this.hydGlobalState.commonState.pixelUnpackBufferBinding = hydBuffer;
             }
         }
-        else {
-            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
-        }
     }
     getBoundBufferForTarget(target) {
+        if (!this.bufferBindingKindForTarget(target)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return null;
+        }
         if (target === WebGL2RenderingContext.ARRAY_BUFFER) {
             return this.hydGlobalState.commonState.arrayBufferBinding;
         }
@@ -5514,15 +8957,50 @@ ${assignments}
         if (target === WebGL2RenderingContext.PIXEL_UNPACK_BUFFER) {
             return this.hydGlobalState.commonState.pixelUnpackBufferBinding;
         }
-        throw new Error("unsupported buffer target: " + target);
+        return null;
     }
     bufferData(target, data, usage) {
-        this._der_flush();
+        const drawUsage = usage === WebGL2RenderingContext.STATIC_DRAW ||
+            usage === WebGL2RenderingContext.DYNAMIC_DRAW ||
+            usage === WebGL2RenderingContext.STREAM_DRAW;
+        const webgl2Usage = usage === WebGL2RenderingContext.STATIC_READ ||
+            usage === WebGL2RenderingContext.DYNAMIC_READ ||
+            usage === WebGL2RenderingContext.STREAM_READ ||
+            usage === WebGL2RenderingContext.STATIC_COPY ||
+            usage === WebGL2RenderingContext.DYNAMIC_COPY ||
+            usage === WebGL2RenderingContext.STREAM_COPY;
+        if (!drawUsage && !(this.hydContextType === "webgl2" && webgl2Usage)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (!this.bufferBindingKindForTarget(target)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
         const buffer = this.getBoundBufferForTarget(target);
         if (!buffer) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
-            throw new Error("bufferData called with no buffer bound for target: " + target);
+            return;
         }
+        let source = null;
+        let size;
+        if (data === null || data === undefined) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (isBufferSource(data)) {
+            source = data;
+            size = data.byteLength;
+        }
+        else {
+            const converted = Number(data);
+            size = Number.isFinite(converted) ? Math.trunc(converted) : 0;
+        }
+        if (size < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        this._der_flush();
         if (target === WebGL2RenderingContext.ARRAY_BUFFER) {
             buffer.descriptor.usage |= GPUBufferUsage.VERTEX;
         }
@@ -5532,36 +9010,39 @@ ${assignments}
         else if (target === WebGL2RenderingContext.PIXEL_PACK_BUFFER || target === WebGL2RenderingContext.PIXEL_UNPACK_BUFFER) {
             buffer.descriptor.usage |= GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
         }
-        if (typeof data === 'number') {
-            buffer.webglSize = data;
-            buffer.descriptor.size = (data + 3) & (~3);
-            buffer.write();
-        }
-        else {
-            buffer.webglSize = data.byteLength;
-            buffer.descriptor.size = (data.byteLength + 3) & (~3);
-            buffer.write(data, 0);
-        }
+        buffer.webglSize = size;
+        buffer.descriptor.size = Math.max(4, Math.ceil(size / 4) * 4);
+        const invalidatesConvertedVertices = buffer.hasConvertedVertexBuffers;
+        buffer.write(source, 0);
         buffer.webglUsage = usage;
-        if (usage !== WebGL2RenderingContext.STATIC_DRAW &&
-            usage !== WebGL2RenderingContext.DYNAMIC_DRAW &&
-            usage !== WebGL2RenderingContext.STREAM_DRAW &&
-            usage !== WebGL2RenderingContext.STATIC_READ &&
-            usage !== WebGL2RenderingContext.DYNAMIC_READ &&
-            usage !== WebGL2RenderingContext.STREAM_READ &&
-            usage !== WebGL2RenderingContext.STATIC_COPY &&
-            usage !== WebGL2RenderingContext.DYNAMIC_COPY &&
-            usage !== WebGL2RenderingContext.STREAM_COPY) {
-            throw new Error("unsupported buffer usage: " + usage);
-        }
+        this.hydGlobalState.recordTransition("bufferData", target, buffer.hash, size, invalidatesConvertedVertices ? buffer.version : 0);
     }
     bufferSubData(target, dstOffset, data) {
+        if (!this.bufferBindingKindForTarget(target)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
         const buffer = this.getBoundBufferForTarget(target);
         if (!buffer) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
-            throw new Error("bufferSubData called with no buffer bound for target: " + target);
+            return;
         }
-        buffer.write(data, dstOffset);
+        if (!isBufferSource(data)) {
+            throw new TypeError("bufferSubData requires an ArrayBuffer or ArrayBufferView");
+        }
+        const offset = toWebGlInt64(dstOffset);
+        if (offset < 0 || offset + data.byteLength > buffer.webglSize) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (data.byteLength === 0)
+            return;
+        this._der_flush();
+        const invalidatesConvertedVertices = buffer.hasConvertedVertexBuffers;
+        buffer.write(data, offset);
+        if (invalidatesConvertedVertices) {
+            this.hydGlobalState.recordTransition("bufferSubDataConvertedVertex", buffer.hash, buffer.version);
+        }
     }
     getBufferSubData(target, srcByteOffset, dstData, dstOffset = 0, length) {
         const buffer = this.getBoundBufferForTarget(target);
@@ -5576,41 +9057,53 @@ ${assignments}
         dst.set(buffer.shadowData.subarray(srcByteOffset, srcByteOffset + byteLength), byteOffset);
     }
     getActiveUniform(program, index) {
+        if (program === null || program === undefined) {
+            throw new TypeError("getActiveUniform requires a WebGLProgram");
+        }
         if (!this.isProgram(program)) {
-            this.setObjectValidationError(program);
+            this.setShaderProgramValidationError(program);
             return null;
         }
-        const publicUniforms = program.hydUniforms.filter((uniform) => !uniform.internal);
-        if (index < publicUniforms.length) {
-            return {
-                name: publicUniforms[index].sourceName || publicUniforms[index].name,
-                size: publicUniforms[index].size,
-                type: publicUniforms[index].webgl_type,
-            };
+        const publicUniforms = program.hydUniforms.filter(isVisibleActiveUniform);
+        const publicSamplers = program.hydSamplers.filter((sampler) => sampler.arrayIndex === undefined || sampler.arrayIndex === 0);
+        if (index < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return null;
         }
-        else if (index - publicUniforms.length < program.hydSamplers.length) {
-            return {
-                name: program.hydSamplers[index - publicUniforms.length].sourceName || program.hydSamplers[index - publicUniforms.length].name,
-                size: program.hydSamplers[index - publicUniforms.length].size,
-                type: program.hydSamplers[index - publicUniforms.length].webgl_type,
-            };
+        if (index < publicUniforms.length) {
+            const uniform = publicUniforms[index];
+            const baseName = uniform.sourceName || uniform.name;
+            return brandHydWebGlObject({
+                name: uniform.isArray ? `${baseName}[0]` : baseName,
+                size: uniform.size,
+                type: uniform.webgl_type,
+            }, "active-info");
+        }
+        else if (index - publicUniforms.length < publicSamplers.length) {
+            const sampler = publicSamplers[index - publicUniforms.length];
+            return brandHydWebGlObject({
+                name: sampler.arrayName ? `${sampler.arrayName}[0]` : (sampler.sourceName || sampler.name),
+                size: sampler.size,
+                type: sampler.webgl_type,
+            }, "active-info");
         }
         this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
         return null;
     }
     getUniformIndices(program, uniformNames) {
         if (!this.isProgram(program)) {
-            this.setObjectValidationError(program);
+            this.setShaderProgramValidationError(program);
             return null;
         }
-        const publicUniforms = program.hydUniforms.filter((uniform) => !uniform.internal);
+        const publicUniforms = program.hydUniforms.filter(isVisibleActiveUniform);
+        const publicSamplers = program.hydSamplers.filter((sampler) => sampler.arrayIndex === undefined || sampler.arrayIndex === 0);
         return uniformNames.map((name) => {
             const safeName = name.replace(/[^A-Za-z0-9_]/g, "_").replace(/_+$/g, "");
             const uniformIndex = publicUniforms.findIndex((uniform) => uniform.name === name || uniform.name === safeName || uniform.sourceName === name);
             if (uniformIndex >= 0) {
                 return uniformIndex;
             }
-            const samplerIndex = program.hydSamplers.findIndex((sampler) => sampler.name === name || sampler.name === safeName || sampler.sourceName === name);
+            const samplerIndex = publicSamplers.findIndex((sampler) => sampler.name === name || sampler.name === safeName || sampler.sourceName === name || sampler.arrayName === name);
             if (samplerIndex >= 0) {
                 return publicUniforms.length + samplerIndex;
             }
@@ -5618,8 +9111,9 @@ ${assignments}
         });
     }
     getActiveUniforms(program, uniformIndices, pname) {
-        const publicUniforms = program.hydUniforms.filter((uniform) => !uniform.internal);
-        const entries = [...publicUniforms, ...program.hydSamplers];
+        const publicUniforms = program.hydUniforms.filter(isVisibleActiveUniform);
+        const publicSamplers = program.hydSamplers.filter((sampler) => sampler.arrayIndex === undefined || sampler.arrayIndex === 0);
+        const entries = [...publicUniforms, ...publicSamplers];
         return uniformIndices.map((index) => {
             const entry = entries[index];
             if (!entry) {
@@ -5646,23 +9140,26 @@ ${assignments}
         });
     }
     getActiveAttrib(program, index) {
+        if (program === null || program === undefined) {
+            throw new TypeError("getActiveAttrib requires a WebGLProgram");
+        }
         if (!this.isProgram(program)) {
-            this.setObjectValidationError(program);
+            this.setShaderProgramValidationError(program);
             return null;
         }
-        if (index >= program.hydAttributes.length) {
+        if (index < 0 || index >= program.hydAttributes.length) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
             return null;
         }
-        return {
+        return brandHydWebGlObject({
             name: program.hydAttributes[index].name,
             size: program.hydAttributes[index].size,
             type: program.hydAttributes[index].type,
-        };
+        }, "active-info");
     }
     attachShader(program, shader) {
         if (!this.isProgram(program) || !this.isShader(shader)) {
-            this.setObjectValidationError(program, shader);
+            this.setShaderProgramValidationError(program, shader);
             return;
         }
         if (!program.attachShader(shader)) {
@@ -5671,29 +9168,31 @@ ${assignments}
     }
     compileShader(s) {
         if (!this.isShader(s) || (s.deleted && s.attachmentCount === 0)) {
-            this.setObjectValidationError(s);
+            this.setShaderProgramValidationError(s);
             return;
         }
         s.compiled = false;
         s.infoLog = "";
-        if (!GLOB_GL_CTX) {
+        const validationContext = nativeValidationContext(this.hydContextType);
+        if (!validationContext) {
             s.infoLog = "Native WebGL shader validation context is unavailable.";
             return;
         }
-        if (s.validationShader) {
-            GLOB_GL_CTX.deleteShader(s.validationShader);
+        if (s.validationShader && s.validationContext) {
+            s.validationContext.deleteShader(s.validationShader);
         }
-        const shader = GLOB_GL_CTX.createShader(s.type);
+        const shader = validationContext.createShader(s.type);
         if (!shader) {
             s.infoLog = "Unable to create native validation shader.";
             return;
         }
-        GLOB_GL_CTX.shaderSource(shader, s.glsl_shader);
-        GLOB_GL_CTX.compileShader(shader);
+        validationContext.shaderSource(shader, bridgeGlslDunderIdentifiers(s.glsl_shader));
+        validationContext.compileShader(shader);
         s.validationShader = shader;
-        s.compiled = Boolean(GLOB_GL_CTX.getShaderParameter(shader, WebGL2RenderingContext.COMPILE_STATUS));
-        s.infoLog = GLOB_GL_CTX.getShaderInfoLog(shader) || "";
-        const debugShaders = GLOB_GL_CTX.getExtension('WEBGL_debug_shaders');
+        s.validationContext = validationContext;
+        s.compiled = Boolean(validationContext.getShaderParameter(shader, WebGL2RenderingContext.COMPILE_STATUS));
+        s.infoLog = validationContext.getShaderInfoLog(shader) || "";
+        const debugShaders = validationContext.getExtension('WEBGL_debug_shaders');
         s.translated_glsl_shader = debugShaders && s.compiled
             ? debugShaders.getTranslatedShaderSource(shader)
             : "";
@@ -5710,7 +9209,7 @@ ${assignments}
     }
     useProgram(program) {
         if (program !== null && !this.isProgram(program)) {
-            this.setObjectValidationError(program);
+            this.setShaderProgramValidationError(program);
             return;
         }
         if (program !== null && !program.linked) {
@@ -5730,7 +9229,7 @@ ${assignments}
     }
     linkProgram(program) {
         if (!this.isProgram(program) || (program.deleted && this.hydGlobalState.commonState.currentProgram !== program)) {
-            this.setObjectValidationError(program);
+            this.setShaderProgramValidationError(program);
             return;
         }
         program.linkGeneration++;
@@ -5740,28 +9239,35 @@ ${assignments}
             this.currentProgramValid = false;
             this.activateUniformLocations(null);
         }
+        program.uniformBufferLocations = [];
+        program.uniformSamplerLocations = [];
         program.infoLog = "";
         const attachedShaders = program.getAttachedShaders();
         if (attachedShaders.length !== 2 || attachedShaders.some((shader) => !shader.compiled || !shader.validationShader)) {
             program.infoLog = "A successfully compiled vertex shader and fragment shader must both be attached.";
             return;
         }
-        if (GLOB_GL_CTX) {
-            const validationProgram = GLOB_GL_CTX.createProgram();
+        const validationContext = nativeValidationContext(this.hydContextType);
+        if (validationContext) {
+            if (attachedShaders.some((shader) => shader.validationContext !== validationContext)) {
+                program.infoLog = "Attached shaders were not compiled for this WebGL context version.";
+                return;
+            }
+            const validationProgram = validationContext.createProgram();
             if (!validationProgram) {
                 program.infoLog = "Unable to create native validation program.";
                 return;
             }
             for (const shader of attachedShaders) {
-                GLOB_GL_CTX.attachShader(validationProgram, shader.validationShader);
+                validationContext.attachShader(validationProgram, shader.validationShader);
             }
             for (const [name, index] of program.boundAttributeLocations) {
-                GLOB_GL_CTX.bindAttribLocation(validationProgram, index, name);
+                validationContext.bindAttribLocation(validationProgram, index, bridgeGlslDunderIdentifier(name));
             }
-            GLOB_GL_CTX.linkProgram(validationProgram);
-            const linked = Boolean(GLOB_GL_CTX.getProgramParameter(validationProgram, WebGL2RenderingContext.LINK_STATUS));
-            const infoLog = GLOB_GL_CTX.getProgramInfoLog(validationProgram) || "";
-            GLOB_GL_CTX.deleteProgram(validationProgram);
+            validationContext.linkProgram(validationProgram);
+            const linked = Boolean(validationContext.getProgramParameter(validationProgram, WebGL2RenderingContext.LINK_STATUS));
+            const infoLog = validationContext.getProgramInfoLog(validationProgram) || "";
+            validationContext.deleteProgram(validationProgram);
             if (!linked) {
                 program.infoLog = infoLog;
                 return;
@@ -5775,15 +9281,19 @@ ${assignments}
                 }
                 this.hydGlobalState.recordTransition("linkProgram", program.hash, program.linkGeneration);
             }
+            else if (program.infoLog) {
+                console.error("[HYD] Program link failed:", program.infoLog);
+            }
         }
         catch (error) {
             program.linked = false;
             program.infoLog = error instanceof Error ? error.message : String(error);
+            console.error("[HYD] Program link failed after shader translation:", program.infoLog);
         }
     }
     validateProgram(program) {
         if (!this.isProgram(program)) {
-            this.setObjectValidationError(program);
+            this.setShaderProgramValidationError(program);
             return;
         }
         program.validated = program.linked;
@@ -5801,21 +9311,38 @@ ${assignments}
     }
     activeTexture(texture) {
         const target = texture - WebGL2RenderingContext.TEXTURE0;
+        const maxTextureUnits = enumToConstant.get(WebGL2RenderingContext.MAX_COMBINED_TEXTURE_IMAGE_UNITS) || 0;
+        if (target < 0 || target >= maxTextureUnits) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
         if (this.hydGlobalState.commonState.activeTextureUnit !== target) {
             this.hydGlobalState.commonState.activeTextureUnit = target;
         }
     }
     bindTexture(target, texture) {
         const vd = enumToViewDimension.get(target);
-        if (!vd) {
+        const webgl2OnlyTarget = target === WebGL2RenderingContext.TEXTURE_3D ||
+            target === WebGL2RenderingContext.TEXTURE_2D_ARRAY;
+        if (!vd || (this.hydContextType !== "webgl2" && webgl2OnlyTarget)) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
             return;
         }
-        if (texture instanceof HydTexture && (texture.ownerToken !== this.contextToken || texture.deleted)) {
-            this.setObjectValidationError(texture);
-            return;
+        let hydTexture;
+        if (texture instanceof HydTexture) {
+            if (texture.deleted) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            if (texture.ownerToken !== this.contextToken) {
+                this.setObjectValidationError(texture);
+                return;
+            }
+            hydTexture = texture;
         }
-        const hydTexture = this.normalizeTexture(texture);
+        else {
+            hydTexture = this.normalizeTexture(texture);
+        }
         if (hydTexture)
             hydTexture.initialized = true;
         const textureUnit = this.hydGlobalState.commonState.activeTextureUnit;
@@ -5842,7 +9369,6 @@ ${assignments}
         this.hydGlobalState.recordTransitionOne(hydTexture.hash);
     }
     texImage2D(...args) {
-        this._der_flush();
         console.assert(args.length === 9 || args.length === 6);
         const target = args.at(0);
         const level = args.at(1);
@@ -5852,31 +9378,73 @@ ${assignments}
         const border = 0;
         const format = args.at(-3);
         const type = args.at(-2);
-        const pixels = args.at(-1);
+        const sourcePixels = args.at(-1);
+        let pixels = sourcePixels;
+        if (!this.validateTexImage2DTarget(target))
+            return;
         if (args.length === 6) {
-            if (pixels instanceof HTMLVideoElement) {
-                width = pixels.videoWidth;
-                height = pixels.videoHeight;
-            }
-            else if (pixels !== null && "width" in pixels && "height" in pixels) {
-                width = pixels.width;
-                height = pixels.height;
-            }
-            else {
+            const extent = this.resolveTexImageSourceExtent(sourcePixels);
+            if (!extent) {
                 throw new Error("unsupported texImage2D: " + args);
             }
+            width = extent.width;
+            height = extent.height;
         }
         else {
             width = args.at(3);
             height = args.at(4);
+            if (this.hydContextType !== "webgl2" && sourcePixels !== null && !ArrayBuffer.isView(sourcePixels)) {
+                throw new TypeError("texImage2D pixels must be an ArrayBufferView or null");
+            }
         }
+        if ((args.length === 9 && args.at(5) !== 0) ||
+            !this.validateTexImage2DDimensions(target, level, width, height)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (!this.isKnownTextureFormat(format) || !this.isKnownTextureType(type)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (sourcePixels instanceof HTMLCanvasElement) {
+            pixels = hydCanvasContexts.get(sourcePixels)?.prepareCanvasForTextureUpload() || sourcePixels;
+        }
+        if (!this.textureUploadExtensionsAllow(format, type))
+            return;
         if (!this.isSupportedTextureUploadFormat(internalformat, format, type)) {
-            throw new Error("unsupported texImage2D: " + args);
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
         }
+        if (!this.validateTextureUploadView(pixels, width, height, format, type))
+            return;
         const unpack = this.hydGlobalState.miscState.unpackState;
-        this.currentTexture(target).texImage2D(pixels, target, level, internalformat, width, height, border, format, type, unpack);
+        const texture = this.currentTexture(target);
+        if (!texture)
+            return;
+        this._der_flush();
+        try {
+            texture.texImage2D(pixels, target, level, internalformat, width, height, border, format, type, unpack);
+        }
+        catch (error) {
+            if (error?.name === "SecurityError")
+                throw error;
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         this.samplerOriginStateVersion++;
         this.hydGlobalState.recordTransition("texImage2D", target, level, internalformat, width, height, border, format, type);
+    }
+    compressedTexImage2D(...args) {
+        if (this.hydContextType !== "webgl2" && (args.length < 7 || !ArrayBuffer.isView(args[6]))) {
+            throw new TypeError(`compressedTexImage2D requires 7 arguments in WebGL 1, received ${args.length}`);
+        }
+        this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+    }
+    compressedTexSubImage2D(...args) {
+        if (this.hydContextType !== "webgl2" && (args.length < 8 || !ArrayBuffer.isView(args[7]))) {
+            throw new TypeError(`compressedTexSubImage2D requires 8 arguments in WebGL 1, received ${args.length}`);
+        }
+        this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
     }
     texStorage2D(target, levels, internalformat, width, height) {
         this._der_flush();
@@ -5890,7 +9458,6 @@ ${assignments}
         this.hydGlobalState.recordTransition("texStorage2D", target, levels, internalformat, width, height);
     }
     texSubImage2D(...args) {
-        this._der_flush();
         console.assert(args.length === 7 || args.length === 9 || args.length === 8 || args.length === 10);
         const target = args.at(0);
         const level = args.at(1);
@@ -5901,6 +9468,8 @@ ${assignments}
         let format;
         let type;
         let pixels;
+        if (!this.validateTexImage2DTarget(target))
+            return;
         if (args.length === 7 || args.length === 8) {
             format = args.at(4);
             type = args.at(5);
@@ -5910,17 +9479,12 @@ ${assignments}
                 const byteOffset = sourceOffset * (pixels.BYTES_PER_ELEMENT || 1);
                 pixels = new Uint8Array(pixels.buffer, pixels.byteOffset + byteOffset, pixels.byteLength - byteOffset);
             }
-            if (pixels instanceof HTMLVideoElement) {
-                width = pixels.videoWidth;
-                height = pixels.videoHeight;
-            }
-            else if (pixels && "width" in pixels && "height" in pixels) {
-                width = pixels.width;
-                height = pixels.height;
-            }
-            else {
+            const extent = this.resolveTexImageSourceExtent(pixels);
+            if (!extent) {
                 throw new Error("unsupported texSubImage2D: " + args);
             }
+            width = extent.width;
+            height = extent.height;
         }
         else {
             width = args.at(4);
@@ -5928,6 +9492,9 @@ ${assignments}
             format = args.at(6);
             type = args.at(7);
             pixels = args.at(8);
+            if (this.hydContextType !== "webgl2" && pixels !== null && !ArrayBuffer.isView(pixels)) {
+                throw new TypeError("texSubImage2D pixels must be an ArrayBufferView or null");
+            }
             if (typeof pixels === "number") {
                 pixels = this.pixelUnpackBufferSlice(pixels, width, height, 1, format, type);
             }
@@ -5937,11 +9504,57 @@ ${assignments}
                 pixels = new Uint8Array(pixels.buffer, pixels.byteOffset + byteOffset, pixels.byteLength - byteOffset);
             }
         }
-        if (!this.isSupportedTextureSubUploadFormat(format, type)) {
-            throw new Error("unsupported texSubImage2D: " + args);
+        if (level < 0 || xoffset < 0 || yoffset < 0 || width < 0 || height < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
         }
+        if (!this.isKnownTextureFormat(format) || !this.isKnownTextureType(type)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (pixels === null) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (pixels instanceof HTMLCanvasElement) {
+            pixels = hydCanvasContexts.get(pixels)?.prepareCanvasForTextureUpload() || pixels;
+        }
+        if (!this.textureUploadExtensionsAllow(format, type))
+            return;
+        if (!this.isSupportedTextureSubUploadFormat(format, type)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const texture = this.currentTexture(target);
+        if (!texture)
+            return;
+        const image = texture.getImageState(target, level);
+        if (!image) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (xoffset > image.width || yoffset > image.height ||
+            width > image.width - xoffset || height > image.height - yoffset) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (image.format !== format || (this.hydContextType !== "webgl2" && image.type !== type)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (!this.validateTextureUploadView(pixels, width, height, format, type))
+            return;
         const unpack = this.hydGlobalState.miscState.unpackState;
-        this.currentTexture(target).texSubImage2D(pixels, target, level, xoffset, yoffset, width, height, format, type, unpack);
+        this._der_flush();
+        try {
+            texture.texSubImage2D(pixels, target, level, xoffset, yoffset, width, height, format, type, unpack);
+        }
+        catch (error) {
+            if (error?.name === "SecurityError")
+                throw error;
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         this.samplerOriginStateVersion++;
         this.hydGlobalState.recordTransition("texSubImage2D", target, level, xoffset, yoffset, width, height, format, type);
     }
@@ -6053,8 +9666,27 @@ ${assignments}
         this.texParameteri(target, pname, param);
     }
     generateMipmap(target) {
-        console.assert(target === WebGL2RenderingContext.TEXTURE_2D || target === WebGL2RenderingContext.TEXTURE_CUBE_MAP);
-        this.currentTexture(target);
+        if (target !== WebGL2RenderingContext.TEXTURE_2D && target !== WebGL2RenderingContext.TEXTURE_CUBE_MAP) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        const texture = this.currentTexture(target);
+        if (!texture)
+            return;
+        const baseTarget = target === WebGL2RenderingContext.TEXTURE_CUBE_MAP
+            ? WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X
+            : WebGL2RenderingContext.TEXTURE_2D;
+        const baseImage = texture.getImageState(baseTarget, 0);
+        const powerOfTwo = (value) => value > 0 && (value & (value - 1)) === 0;
+        if (!baseImage || baseImage.width <= 0 || baseImage.height <= 0 ||
+            (this.hydContextType !== "webgl2" &&
+                (baseImage.internalFormat === hydWebGLStatic_GL_SRGB_EXT || baseImage.internalFormat === hydWebGLStatic_GL_SRGB_ALPHA_EXT)) ||
+            (target === WebGL2RenderingContext.TEXTURE_CUBE_MAP && !texture.isCubeCompleteAtLevel(0)) ||
+            (this.hydContextType !== "webgl2" && (!powerOfTwo(baseImage.width) || !powerOfTwo(baseImage.height))) ||
+            !texture.generateMipmap(target)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         this.hydGlobalState.recordTransition("generateMipmap", target);
     }
     getTexParameter(target, pname) {
@@ -6081,6 +9713,12 @@ ${assignments}
         return texture.webglParameters.get(pname);
     }
     viewport(x, y, width, height) {
+        if (width < 0 || height < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        width = Math.min(width, this.maxDrawingBufferDimension);
+        height = Math.min(height, this.maxDrawingBufferDimension);
         const viewport = this.hydGlobalState.commonState.viewport;
         if (viewport[0] !== x || viewport[1] !== y || viewport[2] !== width || viewport[3] !== height) {
             this._der_flush();
@@ -6093,6 +9731,10 @@ ${assignments}
         this.hydGlobalState.recordTransition("viewport", x, y, width, height);
     }
     scissor(x, y, width, height) {
+        if (width < 0 || height < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
         const scissorBox = this.hydGlobalState.miscState.scissorBox;
         if (scissorBox[0] !== x || scissorBox[1] !== y || scissorBox[2] !== width || scissorBox[3] !== height) {
             this._der_flush();
@@ -6102,6 +9744,12 @@ ${assignments}
         this.hydGlobalState.recordTransition("scissor", x, y, width, height);
     }
     depthRange(zNear, zFar) {
+        if (zNear > zFar) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        zNear = clampWebGlUnitFloat(zNear);
+        zFar = clampWebGlUnitFloat(zFar);
         const viewport = this.hydGlobalState.commonState.viewport;
         if (viewport[4] !== zNear || viewport[5] !== zFar) {
             this._der_flush();
@@ -6112,18 +9760,66 @@ ${assignments}
         this.hydGlobalState.recordTransition("depthRange", zNear, zFar);
     }
     vertexAttribDivisor(index, divisor) {
-        const buffer = this.hydGlobalState.commonState.arrayBufferBinding;
-        buffer.descriptor.usage |= GPUBufferUsage.VERTEX;
+        index = Number(index) >>> 0;
+        divisor = Number(divisor) >>> 0;
         const attribute = this.hydGlobalState.commonState.vertexArrayBinding.attributes[index];
+        if (!attribute) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (attribute.divisor === divisor)
+            return;
         attribute.divisor = divisor;
         attribute.updateHash();
         this.hydGlobalState.recordTransition("vertexAttribDivisor", index, divisor);
     }
     vertexAttribPointer(index, size, type, normalized, _stride, offset) {
-        const buffer = this.hydGlobalState.commonState.arrayBufferBinding;
+        const repeatAttribute = this.hydGlobalState.commonState.vertexArrayBinding.attributes[index];
+        const repeatBuffer = this.hydGlobalState.commonState.arrayBufferBinding;
+        if (repeatAttribute && repeatBuffer &&
+            repeatAttribute.size === size && repeatAttribute.type === type &&
+            repeatAttribute.normalized === Boolean(normalized) && repeatAttribute.webglStride === _stride &&
+            repeatAttribute.offset === offset && repeatAttribute.buffer === repeatBuffer) {
+            return;
+        }
+        index = Number(index) >>> 0;
+        size = toWebGlInt32(size);
+        type = Number(type) >>> 0;
+        _stride = toWebGlInt32(_stride);
+        offset = toWebGlInt64(offset);
         const attribute = this.hydGlobalState.commonState.vertexArrayBinding.attributes[index];
-        const stride = _stride || size * 4;
-        if (attribute.size !== size || attribute.type !== type || attribute.normalized !== normalized || attribute.stride !== stride || attribute.offset !== offset || attribute.buffer !== buffer) {
+        if (!attribute) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const componentBytes = vertexComponentByteSize(type);
+        const webgl1Type = type === WebGL2RenderingContext.BYTE || type === WebGL2RenderingContext.UNSIGNED_BYTE ||
+            type === WebGL2RenderingContext.SHORT || type === WebGL2RenderingContext.UNSIGNED_SHORT ||
+            type === WebGL2RenderingContext.FLOAT;
+        const validType = webgl1Type || (this.hydContextType === "webgl2" &&
+            (type === WebGL2RenderingContext.HALF_FLOAT || type === WebGL2RenderingContext.INT || type === WebGL2RenderingContext.UNSIGNED_INT));
+        if (!validType) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (size < 1 || size > 4 || _stride < 0 || _stride > 255 || offset < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if ((offset % componentBytes) !== 0 || (_stride % componentBytes) !== 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        normalized = Boolean(normalized);
+        const buffer = this.hydGlobalState.commonState.arrayBufferBinding;
+        if (!buffer && offset !== 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const stride = _stride || size * componentBytes;
+        if (attribute.size !== size || attribute.type !== type || attribute.normalized !== normalized ||
+            attribute.stride !== stride || attribute.webglStride !== _stride ||
+            attribute.offset !== offset || attribute.buffer !== buffer) {
             const formatChanged = attribute.size !== size || attribute.type !== type || attribute.normalized !== normalized;
             attribute.size = size;
             attribute.type = type;
@@ -6135,7 +9831,16 @@ ${assignments}
             attribute.buffer = buffer;
             attribute.shaderLocation = index;
             if (formatChanged || !attribute.format) {
-                attribute.format = getVertexFormat(type, size, normalized);
+                if (vertexFormatNeedsFloatConversion(type, size, normalized)) {
+                    attribute.format = null;
+                }
+                else
+                    try {
+                        attribute.format = getVertexFormat(type, size, normalized);
+                    }
+                    catch (_) {
+                        attribute.format = null;
+                    }
             }
             attribute.updateHash();
             this.hydGlobalState.recordTransition("vertexAttribPointer", index, size, type, normalized, stride, offset);
@@ -6168,28 +9873,79 @@ ${assignments}
             case WebGL2RenderingContext.SAMPLE_ALPHA_TO_COVERAGE:
                 this.hydGlobalState.miscState.sampleAlphaToCoverage = value;
                 break;
+            case WebGL2RenderingContext.SAMPLE_COVERAGE:
+                this.hydGlobalState.miscState.sampleCoverage = value;
+                break;
+            case WebGL2RenderingContext.DITHER:
+                this.hydGlobalState.miscState.dither = value;
+                break;
             default:
-                throw new Error("unsupported enable: " + cap);
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                return false;
         }
+        return true;
     }
     enable(cap) {
-        this.xxable(cap, true);
-        this.hydGlobalState.recordTransition("enable", cap);
+        if (this.xxable(cap, true)) {
+            this.hydGlobalState.recordTransition("enable", cap);
+        }
     }
     disable(cap) {
-        this.xxable(cap, false);
-        this.hydGlobalState.recordTransition("disable", cap);
+        if (this.xxable(cap, false)) {
+            this.hydGlobalState.recordTransition("disable", cap);
+        }
+    }
+    isEnabled(cap) {
+        switch (cap) {
+            case WebGL2RenderingContext.DEPTH_TEST:
+                return this.hydGlobalState.depthState.enabled;
+            case WebGL2RenderingContext.STENCIL_TEST:
+                return this.hydGlobalState.stencilState.enabled;
+            case WebGL2RenderingContext.CULL_FACE:
+                return this.hydGlobalState.polygonState.cullFace;
+            case WebGL2RenderingContext.BLEND:
+                return this.hydGlobalState.blendState.enabled;
+            case WebGL2RenderingContext.SCISSOR_TEST:
+                return this.hydGlobalState.miscState.scissorTest;
+            case WebGL2RenderingContext.POLYGON_OFFSET_FILL:
+                return this.hydGlobalState.polygonState.polygonOffsetFill;
+            case WebGL2RenderingContext.SAMPLE_ALPHA_TO_COVERAGE:
+                return this.hydGlobalState.miscState.sampleAlphaToCoverage;
+            case WebGL2RenderingContext.SAMPLE_COVERAGE:
+                return this.hydGlobalState.miscState.sampleCoverage;
+            case WebGL2RenderingContext.DITHER:
+                return this.hydGlobalState.miscState.dither;
+            default:
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                return false;
+        }
     }
     blendFunc(sfactor, dfactor) {
         const src = enumToBlendFactors.get(sfactor);
         const dst = enumToBlendFactors.get(dfactor);
+        if (!src || !dst || dfactor === WebGL2RenderingContext.SRC_ALPHA_SATURATE) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (mixesConstantColorAndAlpha(sfactor, dfactor)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         this.hydGlobalState.blendState.srcRGB = src;
         this.hydGlobalState.blendState.srcAlpha = src;
         this.hydGlobalState.blendState.dstRGB = dst;
         this.hydGlobalState.blendState.dstAlpha = dst;
+        this.hydGlobalState.blendState.srcRGBEnum = sfactor;
+        this.hydGlobalState.blendState.srcAlphaEnum = sfactor;
+        this.hydGlobalState.blendState.dstRGBEnum = dfactor;
+        this.hydGlobalState.blendState.dstAlphaEnum = dfactor;
         this.hydGlobalState.recordTransition("blendFunc", sfactor, dfactor);
     }
     blendColor(r, g, b, a) {
+        r = clampWebGlUnitFloat(r);
+        g = clampWebGlUnitFloat(g);
+        b = clampWebGlUnitFloat(b);
+        a = clampWebGlUnitFloat(a);
         this.hydGlobalState.blendState.color = [r, g, b, a];
         this.hydGlobalState.recordTransition("blendColor", r, g, b, a);
     }
@@ -6198,30 +9954,69 @@ ${assignments}
         const dstRGB1 = enumToBlendFactors.get(dstRGB);
         const srcAlpha1 = enumToBlendFactors.get(srcAlpha);
         const dstAlpha1 = enumToBlendFactors.get(dstAlpha);
+        if (!srcRGB1 || !dstRGB1 || !srcAlpha1 || !dstAlpha1 ||
+            dstRGB === WebGL2RenderingContext.SRC_ALPHA_SATURATE ||
+            dstAlpha === WebGL2RenderingContext.SRC_ALPHA_SATURATE) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (mixesConstantColorAndAlpha(srcRGB, dstRGB) || mixesConstantColorAndAlpha(srcAlpha, dstAlpha)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         this.hydGlobalState.blendState.srcRGB = srcRGB1;
         this.hydGlobalState.blendState.srcAlpha = srcAlpha1;
         this.hydGlobalState.blendState.dstRGB = dstRGB1;
         this.hydGlobalState.blendState.dstAlpha = dstAlpha1;
+        this.hydGlobalState.blendState.srcRGBEnum = srcRGB;
+        this.hydGlobalState.blendState.srcAlphaEnum = srcAlpha;
+        this.hydGlobalState.blendState.dstRGBEnum = dstRGB;
+        this.hydGlobalState.blendState.dstAlphaEnum = dstAlpha;
         this.hydGlobalState.recordTransition("blendFuncSeparate", srcRGB, dstRGB, srcAlpha, dstAlpha);
     }
     blendEquation(mode) {
         const op = enumToBlendOperations.get(mode);
+        const extensionMinMax = this.enabledExtensions.has("EXT_BLEND_MINMAX");
+        if (!op || (this.hydContextType !== "webgl2" &&
+            (mode === WebGL2RenderingContext.MIN || mode === WebGL2RenderingContext.MAX) && !extensionMinMax)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
         this.hydGlobalState.blendState.equationRGB = op;
         this.hydGlobalState.blendState.equationAlpha = op;
+        this.hydGlobalState.blendState.equationRGBEnum = mode;
+        this.hydGlobalState.blendState.equationAlphaEnum = mode;
         this.hydGlobalState.recordTransition("blendEquation", mode);
     }
     blendEquationSeparate(modeRGB, modeAlpha) {
         const rgbOp = enumToBlendOperations.get(modeRGB);
         const alphaOp = enumToBlendOperations.get(modeAlpha);
+        const extensionMinMax = this.enabledExtensions.has("EXT_BLEND_MINMAX");
+        const webgl1MinMax = this.hydContextType !== "webgl2" && !extensionMinMax &&
+            (modeRGB === WebGL2RenderingContext.MIN || modeRGB === WebGL2RenderingContext.MAX ||
+                modeAlpha === WebGL2RenderingContext.MIN || modeAlpha === WebGL2RenderingContext.MAX);
+        if (!rgbOp || !alphaOp || webgl1MinMax) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
         this.hydGlobalState.blendState.equationRGB = rgbOp;
         this.hydGlobalState.blendState.equationAlpha = alphaOp;
+        this.hydGlobalState.blendState.equationRGBEnum = modeRGB;
+        this.hydGlobalState.blendState.equationAlphaEnum = modeAlpha;
         this.hydGlobalState.recordTransition("blendEquationSeparate", modeRGB, modeAlpha);
     }
     stencilFunc(func, ref, mask) {
-        this.hydGlobalState.stencilState.frontFunc = enumToCompareFunction.get(func);
+        const compare = enumToCompareFunction.get(func);
+        if (!compare) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        this.hydGlobalState.stencilState.frontFunc = compare;
+        this.hydGlobalState.stencilState.frontFuncEnum = func;
         this.hydGlobalState.stencilState.frontRef = ref;
         this.hydGlobalState.stencilState.frontValueMask = mask >>> 0;
-        this.hydGlobalState.stencilState.backFunc = enumToCompareFunction.get(func);
+        this.hydGlobalState.stencilState.backFunc = compare;
+        this.hydGlobalState.stencilState.backFuncEnum = func;
         this.hydGlobalState.stencilState.backRef = ref;
         this.hydGlobalState.stencilState.backValueMask = mask >>> 0;
         this.hydGlobalState.recordTransition("stencilFunc", func, ref, mask);
@@ -6236,19 +10031,23 @@ ${assignments}
         switch (face) {
             case WebGL2RenderingContext.FRONT:
                 this.hydGlobalState.stencilState.frontFunc = compare;
+                this.hydGlobalState.stencilState.frontFuncEnum = func;
                 this.hydGlobalState.stencilState.frontRef = ref;
                 this.hydGlobalState.stencilState.frontValueMask = valueMask;
                 break;
             case WebGL2RenderingContext.BACK:
                 this.hydGlobalState.stencilState.backFunc = compare;
+                this.hydGlobalState.stencilState.backFuncEnum = func;
                 this.hydGlobalState.stencilState.backRef = ref;
                 this.hydGlobalState.stencilState.backValueMask = valueMask;
                 break;
             case WebGL2RenderingContext.FRONT_AND_BACK:
                 this.hydGlobalState.stencilState.frontFunc = compare;
+                this.hydGlobalState.stencilState.frontFuncEnum = func;
                 this.hydGlobalState.stencilState.frontRef = ref;
                 this.hydGlobalState.stencilState.frontValueMask = valueMask;
                 this.hydGlobalState.stencilState.backFunc = compare;
+                this.hydGlobalState.stencilState.backFuncEnum = func;
                 this.hydGlobalState.stencilState.backRef = ref;
                 this.hydGlobalState.stencilState.backValueMask = valueMask;
                 break;
@@ -6284,12 +10083,25 @@ ${assignments}
         this.hydGlobalState.recordTransition("stencilMaskSeparate", face, mask);
     }
     stencilOp(fail, zfail, zpass) {
-        this.hydGlobalState.stencilState.frontFail = enumToStencilOperation.get(fail);
-        this.hydGlobalState.stencilState.frontPassDepthFail = enumToStencilOperation.get(zfail);
-        this.hydGlobalState.stencilState.frontPassDepthPass = enumToStencilOperation.get(zpass);
-        this.hydGlobalState.stencilState.backFail = enumToStencilOperation.get(fail);
-        this.hydGlobalState.stencilState.backPassDepthFail = enumToStencilOperation.get(zfail);
-        this.hydGlobalState.stencilState.backPassDepthPass = enumToStencilOperation.get(zpass);
+        const failOp = enumToStencilOperation.get(fail);
+        const depthFailOp = enumToStencilOperation.get(zfail);
+        const passOp = enumToStencilOperation.get(zpass);
+        if (!failOp || !depthFailOp || !passOp) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        this.hydGlobalState.stencilState.frontFail = failOp;
+        this.hydGlobalState.stencilState.frontFailEnum = fail;
+        this.hydGlobalState.stencilState.frontPassDepthFail = depthFailOp;
+        this.hydGlobalState.stencilState.frontPassDepthFailEnum = zfail;
+        this.hydGlobalState.stencilState.frontPassDepthPass = passOp;
+        this.hydGlobalState.stencilState.frontPassDepthPassEnum = zpass;
+        this.hydGlobalState.stencilState.backFail = failOp;
+        this.hydGlobalState.stencilState.backFailEnum = fail;
+        this.hydGlobalState.stencilState.backPassDepthFail = depthFailOp;
+        this.hydGlobalState.stencilState.backPassDepthFailEnum = zfail;
+        this.hydGlobalState.stencilState.backPassDepthPass = passOp;
+        this.hydGlobalState.stencilState.backPassDepthPassEnum = zpass;
         this.hydGlobalState.recordTransition("stencilOp", fail, zfail, zpass);
     }
     stencilOpSeparate(face, fail, zfail, zpass) {
@@ -6303,21 +10115,33 @@ ${assignments}
         switch (face) {
             case WebGL2RenderingContext.FRONT:
                 this.hydGlobalState.stencilState.frontFail = failOp;
+                this.hydGlobalState.stencilState.frontFailEnum = fail;
                 this.hydGlobalState.stencilState.frontPassDepthFail = depthFailOp;
+                this.hydGlobalState.stencilState.frontPassDepthFailEnum = zfail;
                 this.hydGlobalState.stencilState.frontPassDepthPass = passOp;
+                this.hydGlobalState.stencilState.frontPassDepthPassEnum = zpass;
                 break;
             case WebGL2RenderingContext.BACK:
                 this.hydGlobalState.stencilState.backFail = failOp;
+                this.hydGlobalState.stencilState.backFailEnum = fail;
                 this.hydGlobalState.stencilState.backPassDepthFail = depthFailOp;
+                this.hydGlobalState.stencilState.backPassDepthFailEnum = zfail;
                 this.hydGlobalState.stencilState.backPassDepthPass = passOp;
+                this.hydGlobalState.stencilState.backPassDepthPassEnum = zpass;
                 break;
             case WebGL2RenderingContext.FRONT_AND_BACK:
                 this.hydGlobalState.stencilState.frontFail = failOp;
+                this.hydGlobalState.stencilState.frontFailEnum = fail;
                 this.hydGlobalState.stencilState.frontPassDepthFail = depthFailOp;
+                this.hydGlobalState.stencilState.frontPassDepthFailEnum = zfail;
                 this.hydGlobalState.stencilState.frontPassDepthPass = passOp;
+                this.hydGlobalState.stencilState.frontPassDepthPassEnum = zpass;
                 this.hydGlobalState.stencilState.backFail = failOp;
+                this.hydGlobalState.stencilState.backFailEnum = fail;
                 this.hydGlobalState.stencilState.backPassDepthFail = depthFailOp;
+                this.hydGlobalState.stencilState.backPassDepthFailEnum = zfail;
                 this.hydGlobalState.stencilState.backPassDepthPass = passOp;
+                this.hydGlobalState.stencilState.backPassDepthPassEnum = zpass;
                 break;
             default:
                 this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
@@ -6326,6 +10150,8 @@ ${assignments}
         this.hydGlobalState.recordTransition("stencilOpSeparate", face, fail, zfail, zpass);
     }
     bindFramebuffer(target, framebuffer) {
+        if (!this.validateFramebufferTarget(target))
+            return;
         if (framebuffer !== null && (!(framebuffer instanceof HydFramebuffer) || framebuffer.ownerToken !== this.contextToken || framebuffer.deleted)) {
             this.setObjectValidationError(framebuffer);
             return;
@@ -6352,19 +10178,36 @@ ${assignments}
                 framebuffer.initialized = true;
             this.hydGlobalState.commonState.readFramebufferBinding = framebuffer;
         }
-        else {
-            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
-            return;
-        }
         this.hydGlobalState.recordTransition("bindFramebuffer", target, framebuffer.hash);
     }
     framebufferTexture2D(target, attachment, texTarget, texture, level) {
+        if (!this.validateFramebufferTarget(target))
+            return;
+        if (this.hydContextType !== "webgl2" && level !== 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (this.hydContextType !== "webgl2" &&
+            attachment >= WebGL2RenderingContext.COLOR_ATTACHMENT1 &&
+            attachment <= WebGL2RenderingContext.COLOR_ATTACHMENT15 &&
+            !this.enabledExtensions.has("WEBGL_DRAW_BUFFERS")) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
         if (texture !== null && !this.isTexture(texture)) {
+            if (texture instanceof HydTexture && texture.ownerToken === this.contextToken) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
             this.setObjectValidationError(texture);
             return;
         }
         this._der_flush();
         const framebuffer = this.getFramebufferForTarget(target);
+        if (framebuffer === this.hydGlobalState.defaultFramebuffer) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         if (texture === null) {
             framebuffer.attachments.delete(attachment);
             framebuffer.resetHash();
@@ -6373,11 +10216,13 @@ ${assignments}
             this.hydGlobalState.recordTransition("framebufferTexture2D", target, attachment, texTarget, "null", level);
             return;
         }
-        texture.markFramebufferRenderTarget();
-        this.samplerOriginStateVersion++;
         const attrib = new FramebufferAttributes(attachment, level, texTarget, texture);
+        texture.onStorageChange.push(() => {
+            if (framebuffer.attachments.get(attachment) === attrib)
+                framebuffer.resetHash();
+        });
         texture.onDelete.push(() => {
-            if (framebuffer.attachments.get(attachment) === attrib) {
+            if (this.isFramebufferBound(framebuffer) && framebuffer.attachments.get(attachment) === attrib) {
                 framebuffer.attachments.delete(attachment);
                 framebuffer.resetHash();
             }
@@ -6401,6 +10246,10 @@ ${assignments}
     }
     framebufferTextureLayer(target, attachment, texture, level, layer) {
         if (texture !== null && !this.isTexture(texture)) {
+            if (texture instanceof HydTexture && texture.ownerToken === this.contextToken) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
             this.setObjectValidationError(texture);
             return;
         }
@@ -6414,11 +10263,13 @@ ${assignments}
             this.hydGlobalState.recordTransition("framebufferTextureLayer", target, attachment, "null", level, layer);
             return;
         }
-        texture.markFramebufferRenderTarget();
-        this.samplerOriginStateVersion++;
         const attrib = new FramebufferAttributes(attachment, level, undefined, texture, layer);
+        texture.onStorageChange.push(() => {
+            if (framebuffer.attachments.get(attachment) === attrib)
+                framebuffer.resetHash();
+        });
         texture.onDelete.push(() => {
-            if (framebuffer.attachments.get(attachment) === attrib) {
+            if (this.isFramebufferBound(framebuffer) && framebuffer.attachments.get(attachment) === attrib) {
                 framebuffer.attachments.delete(attachment);
                 framebuffer.resetHash();
             }
@@ -6430,7 +10281,20 @@ ${assignments}
         this.hydGlobalState.recordTransition("framebufferTextureLayer", target, attachment, texture.hash, level, layer);
     }
     framebufferRenderbuffer(target, attachment, renderbufferTarget, renderbuffer) {
+        if (!this.validateFramebufferTarget(target))
+            return;
+        if (this.hydContextType !== "webgl2" &&
+            attachment >= WebGL2RenderingContext.COLOR_ATTACHMENT1 &&
+            attachment <= WebGL2RenderingContext.COLOR_ATTACHMENT15 &&
+            !this.enabledExtensions.has("WEBGL_DRAW_BUFFERS")) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
         if (renderbuffer !== null && !this.isRenderbuffer(renderbuffer)) {
+            if (renderbuffer instanceof HydTexture && renderbuffer.ownerToken === this.contextToken) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
             this.setObjectValidationError(renderbuffer);
             return;
         }
@@ -6440,6 +10304,10 @@ ${assignments}
         }
         this._der_flush();
         const framebuffer = this.getFramebufferForTarget(target);
+        if (framebuffer === this.hydGlobalState.defaultFramebuffer) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         if (renderbuffer === null) {
             framebuffer.attachments.delete(attachment);
             framebuffer.resetHash();
@@ -6448,11 +10316,13 @@ ${assignments}
             this.hydGlobalState.recordTransition("framebufferRenderbuffer", target, attachment, renderbufferTarget, "null");
             return;
         }
-        renderbuffer.markFramebufferRenderTarget();
-        this.samplerOriginStateVersion++;
         const attrib = new FramebufferAttributes(attachment, undefined, undefined, renderbuffer, undefined, WebGL2RenderingContext.RENDERBUFFER);
+        renderbuffer.onStorageChange.push(() => {
+            if (framebuffer.attachments.get(attachment) === attrib)
+                framebuffer.resetHash();
+        });
         renderbuffer.onDelete.push(() => {
-            if (framebuffer.attachments.get(attachment) === attrib) {
+            if (this.isFramebufferBound(framebuffer) && framebuffer.attachments.get(attachment) === attrib) {
                 framebuffer.attachments.delete(attachment);
                 framebuffer.resetHash();
             }
@@ -6467,23 +10337,404 @@ ${assignments}
         this._der_flush();
         this.hydGlobalState.recordTransition("blitFramebuffer", srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
     }
+    copyAliasesReadAttachment(texture, target, level) {
+        if (this.hydGlobalState.commonState.readFramebufferBinding === this.hydGlobalState.defaultFramebuffer) {
+            return false;
+        }
+        const attachment = this.getReadColorAttachment();
+        if (!attachment || attachment.attachment !== texture || (attachment.level || 0) !== level) {
+            return false;
+        }
+        const sourceLayer = attachment.layer !== undefined
+            ? attachment.layer
+            : this.isCubeFaceTarget(attachment.face)
+                ? attachment.face - WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X
+                : 0;
+        const destinationLayer = this.isCubeFaceTarget(target)
+            ? target - WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X
+            : 0;
+        return sourceLayer === destinationLayer;
+    }
     copyTexImage2D(target, level, internalformat, x, y, width, height, border) {
-        this._der_flush();
+        if (!this.validateTexImage2DTarget(target))
+            return;
+        if (border !== 0 || !this.validateTexImage2DDimensions(target, level, width, height)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const validInternalFormats = new Set([
+            WebGL2RenderingContext.ALPHA,
+            WebGL2RenderingContext.LUMINANCE,
+            WebGL2RenderingContext.LUMINANCE_ALPHA,
+            WebGL2RenderingContext.RGB,
+            WebGL2RenderingContext.RGBA,
+        ]);
+        if (this.hydContextType !== "webgl2" && !validInternalFormats.has(internalformat)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (this.framebufferStatus(this.hydGlobalState.commonState.readFramebufferBinding) !== WebGL2RenderingContext.FRAMEBUFFER_COMPLETE) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_FRAMEBUFFER_OPERATION);
+            return;
+        }
+        const readFramebuffer = this.hydGlobalState.commonState.readFramebufferBinding;
+        const sourceHasAlpha = readFramebuffer === this.hydGlobalState.defaultFramebuffer
+            ? this.hydGlobalState.contextAttributes.alpha !== false
+            : (this.getReadColorAttachment()?.colorBits[3] || 0) > 0;
+        const destinationNeedsAlpha = internalformat === WebGL2RenderingContext.ALPHA ||
+            internalformat === WebGL2RenderingContext.LUMINANCE_ALPHA ||
+            internalformat === WebGL2RenderingContext.RGBA;
+        if (destinationNeedsAlpha && !sourceHasAlpha) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         const texture = this.currentTexture(target);
-        texture.texImage2D(null, target, level, internalformat, width, height, border, WebGL2RenderingContext.RGBA, WebGL2RenderingContext.UNSIGNED_BYTE);
+        if (!texture)
+            return;
+        if (this.copyAliasesReadAttachment(texture, target, level)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        this._der_flush();
+        texture.texImage2D(null, target, level, internalformat, width, height, border, internalformat, WebGL2RenderingContext.UNSIGNED_BYTE);
+        if (!this.copyReadFramebufferRegionToTexture(texture, target, level, 0, 0, x, y, width, height))
+            return;
         texture.markCopyDestination();
         this.samplerOriginStateVersion++;
         this.hydGlobalState.recordTransition("copyTexImage2D", target, level, internalformat, x, y, width, height, border);
     }
     copyTexSubImage2D(target, level, xoffset, yoffset, x, y, width, height) {
+        if (!this.validateTexImage2DTarget(target))
+            return;
+        if (level < 0 || xoffset < 0 || yoffset < 0 || width < 0 || height < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (this.framebufferStatus(this.hydGlobalState.commonState.readFramebufferBinding) !== WebGL2RenderingContext.FRAMEBUFFER_COMPLETE) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_FRAMEBUFFER_OPERATION);
+            return;
+        }
+        const texture = this.currentTexture(target);
+        if (!texture)
+            return;
+        const destinationImage = texture.getImageState(target, level);
+        if (!destinationImage) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (xoffset > destinationImage.width || yoffset > destinationImage.height ||
+            width > destinationImage.width - xoffset || height > destinationImage.height - yoffset) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const readFramebuffer = this.hydGlobalState.commonState.readFramebufferBinding;
+        const sourceHasAlpha = readFramebuffer === this.hydGlobalState.defaultFramebuffer
+            ? this.hydGlobalState.contextAttributes.alpha !== false
+            : (this.getReadColorAttachment()?.colorBits[3] || 0) > 0;
+        const destinationNeedsAlpha = destinationImage.internalFormat === WebGL2RenderingContext.ALPHA ||
+            destinationImage.internalFormat === WebGL2RenderingContext.LUMINANCE_ALPHA ||
+            destinationImage.internalFormat === WebGL2RenderingContext.RGBA;
+        if (destinationNeedsAlpha && !sourceHasAlpha) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (this.copyAliasesReadAttachment(texture, target, level)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         this._der_flush();
-        this.currentTexture(target).markCopyDestination();
+        if (!this.copyReadFramebufferRegionToTexture(texture, target, level, xoffset, yoffset, x, y, width, height))
+            return;
+        texture.markCopyDestination();
         this.samplerOriginStateVersion++;
         this.hydGlobalState.recordTransition("copyTexSubImage2D", target, level, xoffset, yoffset, x, y, width, height);
+    }
+    copyReadFramebufferRegionToTexture(destination, target, level, xoffset, yoffset, x, y, width, height) {
+        if (width === 0 || height === 0)
+            return true;
+        if (destination.format !== "rgba8unorm" && destination.format !== "bgra8unorm") {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return false;
+        }
+        const framebuffer = this.hydGlobalState.commonState.readFramebufferBinding;
+        const readsDefault = framebuffer === this.hydGlobalState.defaultFramebuffer;
+        const attachment = readsDefault ? null : this.getReadColorAttachment();
+        const sourceWidth = readsDefault ? this.hydCanvas.width : attachment?.width || 0;
+        const sourceHeight = readsDefault ? this.hydCanvas.height : attachment?.height || 0;
+        if (!readsDefault && !attachment) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return false;
+        }
+        const sourceX0 = Math.max(0, x);
+        const sourceY0 = Math.max(0, y);
+        const sourceX1 = Math.min(sourceWidth, x + width);
+        const sourceY1 = Math.min(sourceHeight, y + height);
+        const copyWidth = Math.max(0, sourceX1 - sourceX0);
+        const copyHeight = Math.max(0, sourceY1 - sourceY0);
+        if (copyWidth === 0 || copyHeight === 0)
+            return true;
+        const pixels = new Uint8Array(copyWidth * copyHeight * 4);
+        const read = readsDefault
+            ? this.readDefaultFramebufferSynchronously(sourceX0, sourceY0, copyWidth, copyHeight, pixels, 0)
+            : this.readColorAttachmentSynchronously(attachment, sourceX0, sourceY0, copyWidth, copyHeight, pixels, 0);
+        if (!read) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return false;
+        }
+        const destinationImage = destination.getImageState(target, level);
+        const logicalFormat = destinationImage?.internalFormat || WebGL2RenderingContext.RGBA;
+        for (let offset = 0; offset < pixels.length; offset += 4) {
+            const red = pixels[offset];
+            const alpha = pixels[offset + 3];
+            if (logicalFormat === WebGL2RenderingContext.ALPHA) {
+                pixels[offset] = 0;
+                pixels[offset + 1] = 0;
+                pixels[offset + 2] = 0;
+                pixels[offset + 3] = alpha;
+            }
+            else if (logicalFormat === WebGL2RenderingContext.LUMINANCE) {
+                pixels[offset] = red;
+                pixels[offset + 1] = red;
+                pixels[offset + 2] = red;
+                pixels[offset + 3] = 255;
+            }
+            else if (logicalFormat === WebGL2RenderingContext.LUMINANCE_ALPHA) {
+                pixels[offset] = red;
+                pixels[offset + 1] = red;
+                pixels[offset + 2] = red;
+                pixels[offset + 3] = alpha;
+            }
+            else if (logicalFormat === WebGL2RenderingContext.RGB) {
+                pixels[offset + 3] = 255;
+            }
+        }
+        const rowBytes = copyWidth * 4;
+        const gpuRows = new Uint8Array(pixels.byteLength);
+        for (let row = 0; row < copyHeight; row++) {
+            const sourceOffset = row * rowBytes;
+            const destinationOffset = (copyHeight - row - 1) * rowBytes;
+            gpuRows.set(pixels.subarray(sourceOffset, sourceOffset + rowBytes), destinationOffset);
+        }
+        const destinationLogicalX = xoffset + sourceX0 - x;
+        const destinationLogicalY = yoffset + sourceY0 - y;
+        const destinationHeight = Math.max(1, destination.height >> level);
+        const layer = target >= WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X &&
+            target <= WebGL2RenderingContext.TEXTURE_CUBE_MAP_NEGATIVE_Z
+            ? target - WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X
+            : 0;
+        this.hydDevice.queue.writeTexture({
+            texture: destination.texture,
+            mipLevel: level,
+            origin: {
+                x: destinationLogicalX,
+                y: destinationHeight - destinationLogicalY - copyHeight,
+                z: layer,
+            },
+        }, gpuRows, { bytesPerRow: rowBytes, rowsPerImage: copyHeight }, { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 });
+        return true;
+    }
+    readSnapshotSynchronously(snapshot, sourceWidth, sourceHeight, x, y, width, height, destination, destinationOffset) {
+        const scratch = getSynchronousReadbackScratch();
+        if (!scratch)
+            return false;
+        const { canvas, gl: readbackGl, texture, framebuffer } = scratch;
+        try {
+            if (canvas.width !== sourceWidth || canvas.height !== sourceHeight) {
+                canvas.width = sourceWidth;
+                canvas.height = sourceHeight;
+            }
+            readbackGl.bindTexture(readbackGl.TEXTURE_2D, texture);
+            readbackGl.pixelStorei(readbackGl.UNPACK_FLIP_Y_WEBGL, false);
+            readbackGl.pixelStorei(readbackGl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+            readbackGl.pixelStorei(readbackGl.UNPACK_COLORSPACE_CONVERSION_WEBGL, readbackGl.NONE);
+            readbackGl.texParameteri(readbackGl.TEXTURE_2D, readbackGl.TEXTURE_MIN_FILTER, readbackGl.NEAREST);
+            readbackGl.texParameteri(readbackGl.TEXTURE_2D, readbackGl.TEXTURE_MAG_FILTER, readbackGl.NEAREST);
+            if (globalThis.__HYD_DEBUG_READBACK) {
+                const probeCanvas = new OffscreenCanvas(snapshot.width, snapshot.height);
+                const probeContext = probeCanvas.getContext("2d");
+                probeContext?.drawImage(snapshot, 0, 0);
+                console.debug("[HYD] readback snapshot center", Array.from(probeContext?.getImageData(snapshot.width >> 1, snapshot.height >> 1, 1, 1).data || []));
+            }
+            readbackGl.texImage2D(readbackGl.TEXTURE_2D, 0, readbackGl.RGBA, readbackGl.RGBA, readbackGl.UNSIGNED_BYTE, snapshot);
+            readbackGl.bindFramebuffer(readbackGl.FRAMEBUFFER, framebuffer);
+            readbackGl.framebufferTexture2D(readbackGl.FRAMEBUFFER, readbackGl.COLOR_ATTACHMENT0, readbackGl.TEXTURE_2D, texture, 0);
+            if (readbackGl.checkFramebufferStatus(readbackGl.FRAMEBUFFER) !== readbackGl.FRAMEBUFFER_COMPLETE) {
+                return false;
+            }
+            const target = new Uint8Array(destination.buffer, destination.byteOffset + destinationOffset, width * height * 4);
+            const nativeY = sourceHeight - y - height;
+            readbackGl.readPixels(x, nativeY, width, height, readbackGl.RGBA, readbackGl.UNSIGNED_BYTE, target);
+            if (readbackGl.getError() !== readbackGl.NO_ERROR) {
+                return false;
+            }
+            const rowBytes = width * 4;
+            const temporaryRow = new Uint8Array(rowBytes);
+            for (let row = 0; row < Math.floor(height / 2); row++) {
+                const opposite = height - row - 1;
+                const rowOffset = row * rowBytes;
+                const oppositeOffset = opposite * rowBytes;
+                temporaryRow.set(target.subarray(rowOffset, rowOffset + rowBytes));
+                target.copyWithin(rowOffset, oppositeOffset, oppositeOffset + rowBytes);
+                target.set(temporaryRow, oppositeOffset);
+            }
+            if (globalThis.__HYD_DEBUG_READBACK && width * height <= 16) {
+                console.debug("[HYD] synchronous readback pixels", width, height, Array.from(target));
+            }
+            return true;
+        }
+        catch (error) {
+            console.warn("[HYD] native WebGL snapshot readPixels failed:", error);
+            return false;
+        }
+    }
+    readTextureChannelsSynchronously(texture, sourceWidth, sourceHeight, x, y, width, height, destination, destinationOffset, mipLevel = 0, layer = 0, opaqueAlpha = false, viewFormat) {
+        if (width === 0 || height === 0)
+            return true;
+        const byteLength = width * height * 4;
+        const rgb = new Uint8Array(byteLength);
+        const alpha = opaqueAlpha ? null : new Uint8Array(byteLength);
+        let snapshot = null;
+        try {
+            snapshot = this.snapshotTextureChannel(texture, sourceWidth, sourceHeight, "rgb", mipLevel, layer, viewFormat);
+            if (!snapshot || !this.readSnapshotSynchronously(snapshot, sourceWidth, sourceHeight, x, y, width, height, rgb, 0)) {
+                return false;
+            }
+            snapshot.close();
+            snapshot = null;
+            if (alpha) {
+                snapshot = this.snapshotTextureChannel(texture, sourceWidth, sourceHeight, "alpha", mipLevel, layer, viewFormat);
+                if (!snapshot || !this.readSnapshotSynchronously(snapshot, sourceWidth, sourceHeight, x, y, width, height, alpha, 0)) {
+                    return false;
+                }
+            }
+            for (let offset = 0; offset < byteLength; offset += 4) {
+                const target = destinationOffset + offset;
+                destination[target] = rgb[offset];
+                destination[target + 1] = rgb[offset + 1];
+                destination[target + 2] = rgb[offset + 2];
+                destination[target + 3] = alpha ? alpha[offset] : 255;
+            }
+            return true;
+        }
+        catch (error) {
+            console.warn("[HYD] lossless texture-channel readback failed:", error);
+            return false;
+        }
+        finally {
+            snapshot?.close();
+        }
+    }
+    prepareExactExternalReadCanvas() {
+        if (!this.defaultFramebufferBackingTexture || this.hydCanvas.width <= 0 || this.hydCanvas.height <= 0) {
+            return null;
+        }
+        const width = this.hydCanvas.width;
+        const height = this.hydCanvas.height;
+        const pixels = new Uint8Array(width * height * 4);
+        if (!this.readTextureChannelsSynchronously(this.defaultFramebufferBackingTexture, width, height, 0, 0, width, height, pixels, 0)) {
+            return null;
+        }
+        if (this.hydGlobalState.contextAttributes.alpha !== false &&
+            this.hydGlobalState.contextAttributes.premultipliedAlpha === false) {
+            return prepareStraightAlphaCanvas(pixels, width, height);
+        }
+        const rowBytes = width * 4;
+        const temporaryRow = new Uint8Array(rowBytes);
+        for (let row = 0; row < Math.floor(height / 2); row++) {
+            const opposite = height - row - 1;
+            const rowOffset = row * rowBytes;
+            const oppositeOffset = opposite * rowBytes;
+            temporaryRow.set(pixels.subarray(rowOffset, rowOffset + rowBytes));
+            pixels.copyWithin(rowOffset, oppositeOffset, oppositeOffset + rowBytes);
+            pixels.set(temporaryRow, oppositeOffset);
+        }
+        const premultiplied = this.hydGlobalState.contextAttributes.alpha !== false &&
+            this.hydGlobalState.contextAttributes.premultipliedAlpha !== false;
+        for (let offset = 0; offset < pixels.length; offset += 4) {
+            if (this.hydGlobalState.contextAttributes.alpha === false) {
+                pixels[offset + 3] = 255;
+            }
+            else if (premultiplied) {
+                const alpha = pixels[offset + 3];
+                if (alpha === 0) {
+                    pixels[offset] = 0;
+                    pixels[offset + 1] = 0;
+                    pixels[offset + 2] = 0;
+                }
+                else {
+                    pixels[offset] = Math.min(255, Math.round(pixels[offset] * 255 / alpha));
+                    pixels[offset + 1] = Math.min(255, Math.round(pixels[offset + 1] * 255 / alpha));
+                    pixels[offset + 2] = Math.min(255, Math.round(pixels[offset + 2] * 255 / alpha));
+                }
+            }
+        }
+        if (!this.exactExternalReadCanvas) {
+            this.exactExternalReadCanvas = document.createElement("canvas");
+            this.exactExternalReadContext = this.exactExternalReadCanvas.getContext("2d");
+        }
+        const canvas = this.exactExternalReadCanvas;
+        const context = this.exactExternalReadContext;
+        if (!canvas || !context) {
+            return null;
+        }
+        if (canvas.width !== width || canvas.height !== height) {
+            canvas.width = width;
+            canvas.height = height;
+        }
+        context.putImageData(new ImageData(new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, pixels.byteLength), width, height), 0, 0);
+        return canvas;
+    }
+    readColorAttachmentSynchronously(attachment, x, y, width, height, destination, destinationOffset) {
+        if (attachment.format !== "rgba8unorm" &&
+            attachment.format !== "bgra8unorm" &&
+            attachment.format !== "rgba8unorm-srgb") {
+            return false;
+        }
+        const level = attachment.level || 0;
+        const sourceWidth = attachment.width;
+        const sourceHeight = attachment.height;
+        const cubeLayer = attachment.face >= WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X &&
+            attachment.face <= WebGL2RenderingContext.TEXTURE_CUBE_MAP_NEGATIVE_Z
+            ? attachment.face - WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X
+            : 0;
+        const layer = attachment.layer === undefined ? cubeLayer : attachment.layer;
+        const framebufferOriented = this.samplerNeedsOriginFlip(attachment.attachment);
+        const readY = framebufferOriented ? y : sourceHeight - y - height;
+        try {
+            const read = this.readTextureChannelsSynchronously(attachment.attachment.texture, sourceWidth, sourceHeight, x, readY, width, height, destination, destinationOffset, level, layer, false, attachment.format === "rgba8unorm-srgb" ? "rgba8unorm" : undefined);
+            if (read && !framebufferOriented) {
+                const rowBytes = width * 4;
+                const temporaryRow = new Uint8Array(rowBytes);
+                for (let row = 0; row < Math.floor(height / 2); row++) {
+                    const opposite = height - row - 1;
+                    const rowOffset = destinationOffset + row * rowBytes;
+                    const oppositeOffset = destinationOffset + opposite * rowBytes;
+                    temporaryRow.set(destination.subarray(rowOffset, rowOffset + rowBytes));
+                    destination.copyWithin(rowOffset, oppositeOffset, oppositeOffset + rowBytes);
+                    destination.set(temporaryRow, oppositeOffset);
+                }
+            }
+            return read;
+        }
+        catch (error) {
+            console.warn("[HYD] synchronous color-attachment readPixels failed:", error);
+            return false;
+        }
     }
     readDefaultFramebufferSynchronously(x, y, width, height, destination, destinationOffset) {
         if (width === 0 || height === 0) {
             return true;
+        }
+        try {
+            this.activateDefaultFramebufferBacking(true);
+            this.materializeImplicitDefaultFramebufferClear();
+            this._der_flush();
+            if (this.readTextureChannelsSynchronously(this.defaultFramebufferBackingTexture, this.hydCanvas.width, this.hydCanvas.height, x, y, width, height, destination, destinationOffset, 0, 0, this.hydGlobalState.contextAttributes.alpha === false)) {
+                return true;
+            }
+        }
+        catch (error) {
+            console.warn("[HYD] native WebGL default-framebuffer readPixels failed:", error);
         }
         if (!this.synchronousReadbackCanvas) {
             this.synchronousReadbackCanvas = document.createElement("canvas");
@@ -6516,95 +10767,103 @@ ${assignments}
             return false;
         }
     }
-    readPixels(x, y, width, height, format, type, pixels) {
+    readPixels(x, y, width, height, format, type, pixels, dstOffset = 0) {
         if (width < 0 || height < 0) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
             return;
         }
-        this._der_flush();
-        const bytesPerPixel = textureUploadBytesPerPixel(format, type);
-        const rowBytes = width * bytesPerPixel;
-        const readbackBytesPerRow = this.alignReadbackBytesPerRow(rowBytes);
-        const byteLength = rowBytes * height;
-        const attachment = this.getReadColorAttachment();
+        if (format !== WebGL2RenderingContext.RGBA || type !== WebGL2RenderingContext.UNSIGNED_BYTE) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (pixels === null) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const readFramebuffer = this.hydGlobalState.commonState.readFramebufferBinding;
+        if (this.framebufferStatus(readFramebuffer) !== WebGL2RenderingContext.FRAMEBUFFER_COMPLETE) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_FRAMEBUFFER_OPERATION);
+            return;
+        }
+        if (this.canvasSizeDirty)
+            this.updateCanvasSize();
+        const layout = packedPixelLayout(width, height, 4, this.hydGlobalState.miscState.packAlignment);
         let destination = null;
         let destinationOffset = 0;
         if (typeof pixels === "number") {
             const buffer = this.hydGlobalState.commonState.pixelPackBufferBinding;
             if (!buffer) {
                 this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
-                throw new Error("readPixels offset requires PIXEL_PACK_BUFFER binding");
+                return;
             }
             destinationOffset = pixels;
-            if (destinationOffset + byteLength > buffer.shadowData.byteLength) {
+            if (destinationOffset < 0 || destinationOffset + layout.requiredBytes > buffer.shadowData.byteLength) {
                 this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
-                throw new Error(`readPixels exceeds PIXEL_PACK_BUFFER size: ${destinationOffset}+${byteLength}/${buffer.shadowData.byteLength}`);
+                return;
             }
             destination = buffer.shadowData;
         }
         else if (pixels && "byteLength" in pixels) {
-            destination = new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength);
-            if (byteLength > destination.byteLength) {
+            const bytesPerElement = pixels.BYTES_PER_ELEMENT;
+            if (bytesPerElement !== 1) {
                 this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
-                throw new Error(`readPixels destination too small: ${byteLength}/${destination.byteLength}`);
+                return;
+            }
+            destination = new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength);
+            if (dstOffset < 0 || dstOffset > pixels.length) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+                return;
+            }
+            destinationOffset = dstOffset * bytesPerElement;
+            if (destinationOffset + layout.requiredBytes > destination.byteLength) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
             }
         }
         if (!destination) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (width === 0 || height === 0) {
             this.hydGlobalState.recordTransition("readPixels", x, y, width, height, format, type);
             return;
         }
-        const readsDefaultFramebuffer = this.hydGlobalState.commonState.readFramebufferBinding === this.hydGlobalState.defaultFramebuffer;
-        if (readsDefaultFramebuffer &&
-            format === WebGL2RenderingContext.RGBA &&
-            type === WebGL2RenderingContext.UNSIGNED_BYTE &&
-            this.readDefaultFramebufferSynchronously(x, y, width, height, destination, destinationOffset)) {
+        const readsDefaultFramebuffer = readFramebuffer === this.hydGlobalState.defaultFramebuffer;
+        const attachment = readsDefaultFramebuffer ? null : this.getReadColorAttachment();
+        if (!readsDefaultFramebuffer && !attachment) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const sourceWidth = readsDefaultFramebuffer ? this.hydCanvas.width : attachment.width;
+        const sourceHeight = readsDefaultFramebuffer ? this.hydCanvas.height : attachment.height;
+        const sourceX0 = Math.max(0, x);
+        const sourceY0 = Math.max(0, y);
+        const sourceX1 = Math.min(sourceWidth, x + width);
+        const sourceY1 = Math.min(sourceHeight, y + height);
+        const clippedWidth = Math.max(0, sourceX1 - sourceX0);
+        const clippedHeight = Math.max(0, sourceY1 - sourceY0);
+        if (clippedWidth === 0 || clippedHeight === 0) {
             this.hydGlobalState.recordTransition("readPixels", x, y, width, height, format, type);
             return;
         }
-        if (!attachment) {
-            destination.fill(0, destinationOffset, destinationOffset + byteLength);
-            this.hydGlobalState.recordTransition("readPixels", x, y, width, height, format, type);
+        this._der_flush();
+        const tightPixels = new Uint8Array(clippedWidth * clippedHeight * 4);
+        const read = readsDefaultFramebuffer
+            ? this.readDefaultFramebufferSynchronously(sourceX0, sourceY0, clippedWidth, clippedHeight, tightPixels, 0)
+            : this.readColorAttachmentSynchronously(attachment, sourceX0, sourceY0, clippedWidth, clippedHeight, tightPixels, 0);
+        if (!read) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
-        const readbackBuffer = this.hydDevice.createBuffer({
-            size: readbackBytesPerRow * height,
-            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-            label: "readPixels",
-        });
-        const encoder = this.hydDevice.createCommandEncoder({ label: "readPixels" });
-        const gpuY = Math.max(0, attachment.height - y - height);
-        encoder.copyTextureToBuffer({
-            texture: attachment.attachment.texture,
-            mipLevel: attachment.level || 0,
-            origin: {
-                x,
-                y: gpuY,
-                z: attachment.layer || 0,
-            },
-        }, {
-            buffer: readbackBuffer,
-            bytesPerRow: readbackBytesPerRow,
-            rowsPerImage: height,
-        }, {
-            width,
-            height,
-            depthOrArrayLayers: 1,
-        });
-        this.hydDevice.queue.submit([encoder.finish()]);
-        const readback = readbackBuffer.mapAsync(GPUMapMode.READ).then(() => {
-            const mapped = new Uint8Array(readbackBuffer.getMappedRange());
-            for (let row = 0; row < height; row++) {
-                const sourceOffset = row * readbackBytesPerRow;
-                const targetOffset = destinationOffset + row * rowBytes;
-                destination.set(mapped.subarray(sourceOffset, sourceOffset + rowBytes), targetOffset);
-            }
-            readbackBuffer.unmap();
-            readbackBuffer.destroy();
-        }).catch((error) => {
-            readbackBuffer.destroy();
-            console.error("[HYD] readPixels failed:", error);
-        });
-        this.pendingReadbacks.push(readback);
+        const destinationColumnOffset = (sourceX0 - x) * 4;
+        const destinationFirstRow = sourceY0 - y;
+        const tightRowBytes = clippedWidth * 4;
+        for (let row = 0; row < clippedHeight; row++) {
+            const sourceOffset = row * tightRowBytes;
+            const targetOffset = destinationOffset +
+                (destinationFirstRow + row) * layout.rowStride + destinationColumnOffset;
+            destination.set(tightPixels.subarray(sourceOffset, sourceOffset + tightRowBytes), targetOffset);
+        }
         this.hydGlobalState.recordTransition("readPixels", x, y, width, height, format, type);
     }
     drawBuffers(buffers) {
@@ -6696,11 +10955,72 @@ ${assignments}
                 this.hydGlobalState.recordTransition("pixelStorei", pname, value);
                 return;
             default:
-                console.warn("pixelStorei not implemented. Args:", pname, param);
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
         }
     }
-    checkFramebufferStatus() {
+    isFramebufferBound(framebuffer) {
+        return this.hydGlobalState.commonState.drawFramebufferBinding === framebuffer ||
+            this.hydGlobalState.commonState.readFramebufferBinding === framebuffer;
+    }
+    framebufferStatus(framebuffer) {
+        if (framebuffer === this.hydGlobalState.defaultFramebuffer) {
+            return WebGL2RenderingContext.FRAMEBUFFER_COMPLETE;
+        }
+        if (framebuffer.attachments.size === 0) {
+            return WebGL2RenderingContext.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
+        }
+        const depthStencilAttachmentCount = [
+            WebGL2RenderingContext.DEPTH_ATTACHMENT,
+            WebGL2RenderingContext.STENCIL_ATTACHMENT,
+            WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT,
+        ].filter((point) => framebuffer.attachments.has(point)).length;
+        if (depthStencilAttachmentCount > 1) {
+            return WebGL2RenderingContext.FRAMEBUFFER_UNSUPPORTED;
+        }
+        let width = null;
+        let height = null;
+        for (const [attachmentPoint, attachment] of framebuffer.attachments) {
+            if (!attachment.attachment.isConfigured || attachment.width <= 0 || attachment.height <= 0) {
+                return WebGL2RenderingContext.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            }
+            if (attachment.isCubeFace && !attachment.attachment.isCubeCompleteAtLevel(attachment.level || 0)) {
+                return WebGL2RenderingContext.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            }
+            const format = attachment.format;
+            const colorAttachment = attachmentPoint >= WebGL2RenderingContext.COLOR_ATTACHMENT0 &&
+                attachmentPoint <= WebGL2RenderingContext.COLOR_ATTACHMENT15;
+            if ((attachmentPoint === WebGL2RenderingContext.DEPTH_ATTACHMENT &&
+                (!format.includes("depth") || format.includes("stencil"))) ||
+                (attachmentPoint === WebGL2RenderingContext.STENCIL_ATTACHMENT &&
+                    (!format.includes("stencil") || format.includes("depth"))) ||
+                (attachmentPoint === WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT &&
+                    (!format.includes("depth") || !format.includes("stencil"))) ||
+                (colorAttachment && !attachment.colorRenderable)) {
+                return WebGL2RenderingContext.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            }
+            width ??= attachment.width;
+            height ??= attachment.height;
+            if (attachment.width !== width || attachment.height !== height) {
+                return WebGL2RenderingContext.FRAMEBUFFER_INCOMPLETE_DIMENSIONS;
+            }
+        }
+        for (const drawBuffer of framebuffer.drawBuffers) {
+            if (drawBuffer >= WebGL2RenderingContext.COLOR_ATTACHMENT0 &&
+                drawBuffer <= WebGL2RenderingContext.COLOR_ATTACHMENT15 &&
+                !framebuffer.attachments.has(drawBuffer)) {
+                return WebGL2RenderingContext.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
+            }
+        }
         return WebGL2RenderingContext.FRAMEBUFFER_COMPLETE;
+    }
+    checkFramebufferStatus(target = WebGL2RenderingContext.FRAMEBUFFER) {
+        const webgl2Target = this.hydContextType === "webgl2" &&
+            (target === WebGL2RenderingContext.DRAW_FRAMEBUFFER || target === WebGL2RenderingContext.READ_FRAMEBUFFER);
+        if (target !== WebGL2RenderingContext.FRAMEBUFFER && !webgl2Target) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return 0;
+        }
+        return this.framebufferStatus(this.getFramebufferForTarget(target));
     }
     updateSamplerOriginUniforms(program, collectFlips) {
         if (collectFlips && program.originVariantStateVersion === this.samplerOriginStateVersion) {
@@ -6732,34 +11052,262 @@ ${assignments}
         }
         return samplerOriginFlips;
     }
-    validateDrawState() {
-        if (!this.currentProgramValid) {
+    getDrawValidationLimits() {
+        const stateToken = this.hydGlobalState.stateToken;
+        const cached = this.drawValidationCache.get(stateToken);
+        if (cached)
+            return cached;
+        let valid = true;
+        let vertexCapacity = Number.POSITIVE_INFINITY;
+        let instanceCapacity = Number.POSITIVE_INFINITY;
+        let hasActivePerVertexAttribute = false;
+        const attributes = this.hydGlobalState.commonState.vertexArrayBinding.attributes;
+        const activeLocations = this.hydGlobalState.commonState.currentProgram?.hydAttributeLocations || new Set();
+        for (let location = 0; location < attributes.length; location++) {
+            const attribute = attributes[location];
+            if (!attribute.enabled)
+                continue;
+            const buffer = attribute.buffer;
+            if (!buffer || buffer.deleted) {
+                valid = false;
+                break;
+            }
+            if (!activeLocations.has(location))
+                continue;
+            const componentBytes = vertexComponentByteSize(attribute.type);
+            const elementBytes = componentBytes * attribute.size;
+            const stride = attribute.webglStride || elementBytes;
+            if (!buffer.buffer || componentBytes === 0 ||
+                !Number.isInteger(attribute.size) || attribute.size < 1 || attribute.size > 4 ||
+                attribute.offset < 0 || stride <= 0) {
+                valid = false;
+                break;
+            }
+            const capacity = buffer.webglSize < attribute.offset + elementBytes
+                ? 0
+                : Math.floor((buffer.webglSize - attribute.offset - elementBytes) / stride) + 1;
+            if (attribute.divisor > 0) {
+                instanceCapacity = Math.min(instanceCapacity, capacity * attribute.divisor);
+            }
+            else {
+                hasActivePerVertexAttribute = true;
+                vertexCapacity = Math.min(vertexCapacity, capacity);
+            }
+        }
+        const validation = { valid, vertexCapacity, instanceCapacity, hasActivePerVertexAttribute };
+        this.drawValidationCache.set(stateToken, validation);
+        return validation;
+    }
+    validateDrawVertexState(maxVertexIndex, instanceCount, instancedApi) {
+        const limits = this.getDrawValidationLimits();
+        if (!limits.valid || maxVertexIndex >= limits.vertexCapacity || instanceCount > limits.instanceCapacity ||
+            (instancedApi && !limits.hasActivePerVertexAttribute)) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return false;
         }
         return true;
     }
+    primitiveTopology(mode) {
+        if (!VALID_DRAW_MODES.has(mode)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return null;
+        }
+        if (mode === WebGL2RenderingContext.LINE_LOOP)
+            return "line-list";
+        if (mode === WebGL2RenderingContext.TRIANGLE_FAN)
+            return "triangle-list";
+        return enum2PT[mode];
+    }
+    setPrimitiveState(topology, stripIndexFormat) {
+        const nextStripIndexFormat = topology === "line-strip" || topology === "triangle-strip"
+            ? stripIndexFormat
+            : undefined;
+        if (this.hydGlobalState.topology === topology && this.hydGlobalState.stripIndexFormat === nextStripIndexFormat) {
+            return;
+        }
+        this.hydGlobalState.topology = topology;
+        this.hydGlobalState.stripIndexFormat = nextStripIndexFormat;
+        this.hydGlobalState.recordTransition("primitive", topology, nextStripIndexFormat || "none");
+    }
+    finishDraw() {
+        if (this.hydUniOff >= this.hydMaxUniSize) {
+            this._der_flush();
+        }
+        if (this.hydGlobalState.clearState.target !== 0) {
+            this.hydGlobalState.clearState.target = 0;
+            this.hydGlobalState.recordTransitionOne('!!d0');
+        }
+    }
+    findPreparedIndexedDraw(mode, count, type, offset, instanceCount, instancedApi) {
+        if (!this.currentProgramValid)
+            return null;
+        const stateToken = this.hydGlobalState.stateToken;
+        const elementArrayBuffer = this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding;
+        const last = this.lastIndexedDraw;
+        if (last && last.stateToken === stateToken && last.mode === mode && last.count === count && last.type === type &&
+            last.offset === offset && last.instanceCount === instanceCount &&
+            last.instancedApi === instancedApi &&
+            last.elementArrayBuffer === elementArrayBuffer && last.bufferVersion === last.elementArrayBuffer.version) {
+            return last;
+        }
+        const preparedDraws = this.indexedDrawCache.get(stateToken);
+        if (!preparedDraws)
+            return null;
+        for (const prepared of preparedDraws) {
+            if (prepared.mode === mode && prepared.count === count && prepared.type === type &&
+                prepared.offset === offset && prepared.instanceCount === instanceCount &&
+                prepared.instancedApi === instancedApi &&
+                prepared.elementArrayBuffer === elementArrayBuffer && prepared.bufferVersion === prepared.elementArrayBuffer.version) {
+                this.lastIndexedDraw = prepared;
+                return prepared;
+            }
+        }
+        return null;
+    }
+    executePreparedIndexedDraw(prepared) {
+        this.setPBV();
+        this.hydRpCache.RpSetIndexBuffer(prepared.indexBuffer, prepared.indexFormat);
+        this.hydRpCache.RpDrawIndexed(prepared.indexCount, prepared.instanceCount, prepared.firstIndex, 0, 0);
+        this.finishDraw();
+    }
+    cachePreparedIndexedDraw(prepared) {
+        let preparedDraws = this.indexedDrawCache.get(prepared.stateToken);
+        if (!preparedDraws) {
+            this.indexedDrawCache.set(prepared.stateToken, [prepared]);
+            return;
+        }
+        const existing = preparedDraws.findIndex((candidate) => candidate.mode === prepared.mode && candidate.count === prepared.count &&
+            candidate.type === prepared.type && candidate.offset === prepared.offset &&
+            candidate.instanceCount === prepared.instanceCount &&
+            candidate.instancedApi === prepared.instancedApi &&
+            candidate.elementArrayBuffer === prepared.elementArrayBuffer);
+        if (existing >= 0) {
+            preparedDraws[existing] = prepared;
+        }
+        else {
+            preparedDraws.push(prepared);
+        }
+    }
+    findPreparedArrayDraw(mode, first, count, instanceCount, instancedApi) {
+        if (!this.currentProgramValid)
+            return null;
+        const stateToken = this.hydGlobalState.stateToken;
+        const last = this.lastArrayDraw;
+        if (last && last.stateToken === stateToken && last.mode === mode && last.first === first &&
+            last.count === count && last.instanceCount === instanceCount && last.instancedApi === instancedApi) {
+            return last;
+        }
+        const preparedDraws = this.arrayDrawCache.get(stateToken);
+        if (!preparedDraws)
+            return null;
+        for (const prepared of preparedDraws) {
+            if (prepared.mode === mode && prepared.first === first &&
+                prepared.count === count && prepared.instanceCount === instanceCount &&
+                prepared.instancedApi === instancedApi) {
+                this.lastArrayDraw = prepared;
+                return prepared;
+            }
+        }
+        return null;
+    }
+    executePreparedArrayDraw(prepared) {
+        this.setPBV();
+        if (prepared.indexBuffer) {
+            this.hydRpCache.RpSetIndexBuffer(prepared.indexBuffer, "uint32");
+            this.hydRpCache.RpDrawIndexed(prepared.indexCount, prepared.instanceCount, 0, prepared.first, 0);
+        }
+        else {
+            this.hydRpCache.RpDraw(prepared.count, prepared.instanceCount, prepared.first, 0);
+        }
+        this.finishDraw();
+    }
+    cachePreparedArrayDraw(prepared) {
+        let preparedDraws = this.arrayDrawCache.get(prepared.stateToken);
+        if (!preparedDraws) {
+            this.arrayDrawCache.set(prepared.stateToken, [prepared]);
+            return;
+        }
+        const existing = preparedDraws.findIndex((candidate) => candidate.mode === prepared.mode && candidate.first === prepared.first &&
+            candidate.count === prepared.count && candidate.instanceCount === prepared.instanceCount &&
+            candidate.instancedApi === prepared.instancedApi);
+        if (existing >= 0) {
+            preparedDraws[existing] = prepared;
+        }
+        else {
+            preparedDraws.push(prepared);
+        }
+    }
     setPBV() {
         if (frameDepth === 0) {
             ensureAutoFrame();
         }
-        this.updateCanvasSize();
+        if (this.canvasSizeDirty)
+            this.updateCanvasSize();
+        this.ensureDefaultFramebufferRenderTarget();
+        if (this.hydGlobalState.commonState.drawFramebufferBinding === this.hydGlobalState.defaultFramebuffer &&
+            this.defaultFramebufferNeedsImplicitClear) {
+            this.materializeImplicitDefaultFramebufferClear();
+            this._der_flush();
+            this.ensureDefaultFramebufferRenderTarget();
+        }
+        let framebufferWriteMask = this.getColorWriteMask() !== 0
+            ? WebGL2RenderingContext.COLOR_BUFFER_BIT
+            : 0;
+        if (this.hydGlobalState.depthState.enabled && this.hydGlobalState.depthState.writeMask) {
+            framebufferWriteMask |= WebGL2RenderingContext.DEPTH_BUFFER_BIT;
+        }
+        if (this.hydGlobalState.stencilState.enabled &&
+            ((this.hydGlobalState.stencilState.frontWriteMask | this.hydGlobalState.stencilState.backWriteMask) & 0xff) !== 0) {
+            framebufferWriteMask |= WebGL2RenderingContext.STENCIL_BUFFER_BIT;
+        }
+        this.markDrawFramebufferAttachmentsAsRenderTargets(framebufferWriteMask);
+        if ((framebufferWriteMask & WebGL2RenderingContext.COLOR_BUFFER_BIT) &&
+            this.hydGlobalState.commonState.drawFramebufferBinding === this.hydGlobalState.defaultFramebuffer &&
+            this.hydGlobalState.__canvasTexture === this.defaultFramebufferBackingTexture) {
+            this.defaultFramebufferBackingNeedsPresentation = true;
+        }
         const program = this.hydGlobalState.commonState.currentProgram;
-        const useSamplerOriginVariants = program.staticSamplerOriginVariants;
-        if ((useSamplerOriginVariants ? program.hydSampler2D.length : program.hydSamplers.length) > 0) {
-            const samplerOriginFlips = this.updateSamplerOriginUniforms(program, useSamplerOriginVariants);
-            if (useSamplerOriginVariants && samplerOriginFlips) {
-                program.applySamplerOriginVariant(samplerOriginFlips);
+        if (program.fragCoordHeightUniform) {
+            const framebufferHeight = this.getDrawFramebufferHeight();
+            if (program.fragCoordHeightValue !== framebufferHeight) {
+                program.fragCoordHeightValue = framebufferHeight;
+                program.write_uniform_f1(program.fragCoordHeightUniform.offset, framebufferHeight);
+            }
+        }
+        if (program.depthRangeUniforms.some(Boolean)) {
+            const near = this.hydGlobalState.commonState.viewport[4];
+            const far = this.hydGlobalState.commonState.viewport[5];
+            if (program.depthRangeValue[0] !== near || program.depthRangeValue[1] !== far) {
+                program.depthRangeValue = [near, far];
+                const values = [near, far, far - near];
+                program.depthRangeUniforms.forEach((uniform, index) => {
+                    if (uniform)
+                        program.write_uniform_f1(uniform.offset, values[index]);
+                });
+            }
+        }
+        if (program.hydSamplers.length > 0) {
+            const useSamplerOriginVariants = program.staticSamplerOriginVariants;
+            const samplerCount = useSamplerOriginVariants ? program.hydSampler2D.length : program.hydSamplers.length;
+            const samplerOriginVersion = useSamplerOriginVariants
+                ? program.originVariantStateVersion
+                : program.originUniformStateVersion;
+            if (samplerCount > 0 && samplerOriginVersion !== this.samplerOriginStateVersion) {
+                const samplerOriginFlips = this.updateSamplerOriginUniforms(program, useSamplerOriginVariants);
+                if (useSamplerOriginVariants && samplerOriginFlips) {
+                    program.applySamplerOriginVariant(samplerOriginFlips);
+                }
             }
         }
         const pbv = this.hydGlobalState.getPBV();
-        const { pipelineHash, pipeline, bindGroup, vertexBuffersHash, vertexBufferHashes, vertexBuffers, vertexBufferOffsets, renderPassHash, renderBundleEncoderDescriptor } = pbv;
+        const { pipelineHash, pipeline, bindGroup, vertexBuffersHash, vertexBufferHashes, vertexBuffers, vertexBufferOffsets, } = pbv;
         const canReuseDrawState = pbv === this.lastDrawPbv &&
             this.hydRpCache.hasActiveRenderPass() &&
             !this.gpuViewportDirty &&
             !(this.hydGlobalState.miscState.scissorTest && this.gpuScissorDirty);
         if (!canReuseDrawState) {
-            const passChanged = this.hydRpCache.RpSetDescriptor(renderPassHash, renderBundleEncoderDescriptor, this.bindedGetRenderPassDesc);
+            const currentRenderPass = this.hydGlobalState.getCurrentRenderPassInfo();
+            const passChanged = this.hydRpCache.RpSetDescriptor(currentRenderPass.hash, currentRenderPass.bundleDescriptor, () => currentRenderPass.passDescriptor);
             if (passChanged || this.gpuViewportDirty) {
                 this.setGpuViewport();
                 this.gpuViewportDirty = false;
@@ -6769,7 +11317,8 @@ ${assignments}
                 this.gpuScissorDirty = false;
             }
             if (this.hydGlobalState.stencilState.enabled) {
-                this.hydRpCache.RpSetStencilReference(this.hydGlobalState.stencilState.frontRef);
+                const reference = Math.min(0xff, Math.max(0, this.hydGlobalState.stencilState.frontRef | 0));
+                this.hydRpCache.RpSetStencilReference(reference);
             }
             if (this.hydGlobalState.blendState.enabled && this.blendUsesConstantFactor()) {
                 const color = this.hydGlobalState.blendState.color;
@@ -6783,6 +11332,63 @@ ${assignments}
         if (program.alignedUniformSize > 0) {
             this.hydUniOff = program.setUniform(this.hydUniArr, this.hydUniOff);
         }
+    }
+    currentDrawTargetHasSize() {
+        if (this.hydGlobalState.commonState.drawFramebufferBinding !== this.hydGlobalState.defaultFramebuffer ||
+            (this.hydCanvas.width > 0 && this.hydCanvas.height > 0)) {
+            return true;
+        }
+        this.hydGlobalState.clearState.target = 0;
+        return false;
+    }
+    shouldCullAllTriangles(mode) {
+        if (!this.hydGlobalState.polygonState.cullFace ||
+            this.hydGlobalState.polygonState.cullFaceModeEnum !== WebGL2RenderingContext.FRONT_AND_BACK) {
+            return false;
+        }
+        return mode === WebGL2RenderingContext.TRIANGLES ||
+            mode === WebGL2RenderingContext.TRIANGLE_STRIP ||
+            mode === WebGL2RenderingContext.TRIANGLE_FAN;
+    }
+    validateFramebufferAndStencilForDraw() {
+        const framebuffer = this.hydGlobalState.commonState.drawFramebufferBinding;
+        if (this.framebufferStatus(framebuffer) !== WebGL2RenderingContext.FRAMEBUFFER_COMPLETE) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_FRAMEBUFFER_OPERATION);
+            return false;
+        }
+        if (this.currentProgramValid && framebuffer !== this.hydGlobalState.defaultFramebuffer) {
+            const attachedTextures = new Set(Array.from(framebuffer.attachments.values(), (attachment) => attachment.attachment));
+            const feedbackLoop = this.hydGlobalState.commonState.currentProgram.hydSamplers.some((sampler) => {
+                const texture = this.hydGlobalState.getTextureUnitBinding(sampler.textureUnit, sampler.viewDimension);
+                return texture !== null &&
+                    texture.isSamplingComplete(sampler.viewDimension, this.hydContextType === "webgl2" ? 2 : 1) &&
+                    attachedTextures.has(texture);
+            });
+            if (feedbackLoop) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return false;
+            }
+        }
+        if (!this.hydGlobalState.stencilState.enabled)
+            return true;
+        const hasStencil = framebuffer === this.hydGlobalState.defaultFramebuffer
+            ? this.hydGlobalState.contextAttributes.stencil === true
+            : Array.from(framebuffer.attachments.entries()).some(([point, attachment]) => (point === WebGL2RenderingContext.STENCIL_ATTACHMENT ||
+                point === WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT) &&
+                attachment.format.includes("stencil"));
+        if (!hasStencil)
+            return true;
+        const state = this.hydGlobalState.stencilState;
+        const stencilMask = 0xff;
+        const clampRef = (value) => Math.min(stencilMask, Math.max(0, value | 0));
+        const mismatch = clampRef(state.frontRef) !== clampRef(state.backRef) ||
+            (state.frontValueMask & stencilMask) !== (state.backValueMask & stencilMask) ||
+            (state.frontWriteMask & stencilMask) !== (state.backWriteMask & stencilMask);
+        if (mismatch) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return false;
+        }
+        return true;
     }
     getTriangleFanIndexBuffer(vertexCount) {
         let buffer = this.triangleFanIndexBuffers.get(vertexCount);
@@ -6806,107 +11412,273 @@ ${assignments}
         this.triangleFanIndexBuffers.set(vertexCount, buffer);
         return buffer;
     }
+    getLineLoopIndexBuffer(vertexCount) {
+        let buffer = this.lineLoopIndexBuffers.get(vertexCount);
+        if (buffer)
+            return buffer;
+        const indices = new Uint32Array(vertexCount >= 2 ? vertexCount * 2 : 0);
+        if (vertexCount >= 2) {
+            for (let i = 0; i < vertexCount - 1; i++) {
+                indices[i * 2] = i;
+                indices[i * 2 + 1] = i + 1;
+            }
+            indices[(vertexCount - 1) * 2] = vertexCount - 1;
+            indices[(vertexCount - 1) * 2 + 1] = 0;
+        }
+        buffer = this.hydDevice.createBuffer({
+            label: `lineLoopIndexBuffer-${vertexCount}`,
+            size: Math.max(4, indices.byteLength),
+            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        });
+        if (indices.byteLength > 0) {
+            this.hydDevice.queue.writeBuffer(buffer, 0, indices.buffer, indices.byteOffset, indices.byteLength);
+        }
+        this.lineLoopIndexBuffers.set(vertexCount, buffer);
+        return buffer;
+    }
     drawArrays(mode, first, count) {
-        if (!this.validateDrawState())
+        if (!this.validateFramebufferAndStencilForDraw())
             return;
-        if (mode === WebGL2RenderingContext.TRIANGLE_FAN) {
-            const topology = "triangle-list";
-            if (this.hydGlobalState.topology !== topology) {
-                this.hydGlobalState.topology = topology;
-                this.hydGlobalState.recordTransitionOne(topology);
-            }
+        if (this.shouldCullAllTriangles(mode)) {
+            this.drawArraysInternal(mode, first, count, 1, false, true);
+            return;
+        }
+        const stateToken = this.hydGlobalState.stateToken;
+        const prepared = this.lastArrayDraw;
+        if (this.currentProgramValid && prepared && prepared.stateToken === stateToken &&
+            prepared.mode === mode && prepared.first === first && prepared.count === count &&
+            prepared.instanceCount === 1 && !prepared.instancedApi && !prepared.indexBuffer) {
             this.setPBV();
-            this.hydRpCache.RpSetIndexBuffer(this.getTriangleFanIndexBuffer(count), "uint32");
-            this.hydRpCache.RpDrawIndexed(Math.max(0, count - 2) * 3, 1, 0, first, 0);
-            if (this.hydUniOff >= this.hydMaxUniSize) {
+            this.hydRpCache.RpDraw(count, 1, first, 0);
+            if (this.hydUniOff >= this.hydMaxUniSize)
                 this._der_flush();
-            }
             if (this.hydGlobalState.clearState.target !== 0) {
                 this.hydGlobalState.clearState.target = 0;
                 this.hydGlobalState.recordTransitionOne('!!d0');
             }
             return;
         }
-        const topology = enum2PT[mode];
-        if (this.hydGlobalState.topology !== topology) {
-            this.hydGlobalState.topology = topology;
-            this.hydGlobalState.recordTransitionOne(topology);
+        if (this.currentProgramValid) {
+            const preparedDraws = this.arrayDrawCache.get(stateToken);
+            if (preparedDraws) {
+                for (const candidate of preparedDraws) {
+                    if (candidate.mode === mode && candidate.first === first && candidate.count === count &&
+                        candidate.instanceCount === 1 && !candidate.instancedApi) {
+                        this.lastArrayDraw = candidate;
+                        this.executePreparedArrayDraw(candidate);
+                        return;
+                    }
+                }
+            }
         }
-        this.setPBV();
-        this.hydRpCache.RpDraw(count, 1, first, 0);
-        if (this.hydUniOff >= this.hydMaxUniSize) {
-            this._der_flush();
-        }
-        if (this.hydGlobalState.clearState.target !== 0) {
-            this.hydGlobalState.clearState.target = 0;
-            this.hydGlobalState.recordTransitionOne('!!d0');
-        }
+        this.drawArraysInternal(mode, first, count, 1, false);
     }
     drawArraysInstanced(mode, first, count, instanceCount) {
-        if (!this.validateDrawState())
+        if (!this.validateFramebufferAndStencilForDraw())
             return;
-        const topology = enum2PT[mode];
-        if (this.hydGlobalState.topology !== topology) {
-            this.hydGlobalState.topology = topology;
-            this.hydGlobalState.recordTransitionOne(topology);
+        if (this.shouldCullAllTriangles(mode)) {
+            this.drawArraysInternal(mode, first, count, instanceCount, true, true);
+            return;
         }
+        const prepared = this.findPreparedArrayDraw(mode, first, count, instanceCount, true);
+        if (prepared) {
+            this.executePreparedArrayDraw(prepared);
+            return;
+        }
+        this.drawArraysInternal(mode, first, count, instanceCount, true);
+    }
+    drawArraysInternal(mode, first, count, instanceCount, instancedApi, cullAll = false) {
+        mode = Number(mode) >>> 0;
+        first = toWebGlInt32(first);
+        count = toWebGlInt32(count);
+        instanceCount = toWebGlInt32(instanceCount);
+        const topology = this.primitiveTopology(mode);
+        if (!topology)
+            return;
+        if (first < 0 || count < 0 || instanceCount < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (!this.currentProgramValid) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (count === 0 || instanceCount === 0)
+            return;
+        if (!this.validateDrawVertexState(first + count - 1, instanceCount, instancedApi))
+            return;
+        if (cullAll)
+            return;
+        if (!this.currentDrawTargetHasSize())
+            return;
+        this.setPrimitiveState(topology);
         this.setPBV();
-        this.hydRpCache.RpDraw(count, instanceCount, first, 0);
-        if (this.hydUniOff >= this.hydMaxUniSize) {
-            this._der_flush();
+        let indexBuffer;
+        let indexCount;
+        if (mode === WebGL2RenderingContext.TRIANGLE_FAN) {
+            indexBuffer = this.getTriangleFanIndexBuffer(count);
+            indexCount = Math.max(0, count - 2) * 3;
+            this.hydRpCache.RpSetIndexBuffer(indexBuffer, "uint32");
+            this.hydRpCache.RpDrawIndexed(indexCount, instanceCount, 0, first, 0);
         }
-        if (this.hydGlobalState.clearState.target !== 0) {
-            this.hydGlobalState.clearState.target = 0;
-            this.hydGlobalState.recordTransitionOne('!!d0');
+        else if (mode === WebGL2RenderingContext.LINE_LOOP) {
+            indexBuffer = this.getLineLoopIndexBuffer(count);
+            indexCount = count >= 2 ? count * 2 : 0;
+            this.hydRpCache.RpSetIndexBuffer(indexBuffer, "uint32");
+            this.hydRpCache.RpDrawIndexed(indexCount, instanceCount, 0, first, 0);
         }
+        else {
+            this.hydRpCache.RpDraw(count, instanceCount, first, 0);
+        }
+        this.finishDraw();
+        const cached = {
+            stateToken: this.hydGlobalState.stateToken,
+            mode,
+            first,
+            count,
+            instanceCount,
+            instancedApi,
+            indexBuffer,
+            indexCount,
+        };
+        this.lastArrayDraw = cached;
+        this.cachePreparedArrayDraw(cached);
     }
     drawElements(mode, count, type, offset) {
-        if (!this.validateDrawState())
+        if (!this.validateFramebufferAndStencilForDraw())
             return;
-        const topology = enum2PT[mode];
-        if (this.hydGlobalState.topology !== topology) {
-            this.hydGlobalState.topology = topology;
-            this.hydGlobalState.recordTransitionOne(topology);
-        }
-        const elementArrayBuffer = this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding;
-        if (!elementArrayBuffer || !elementArrayBuffer.buffer) {
-            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+        if (this.shouldCullAllTriangles(mode)) {
+            this.drawElementsInternal(mode, count, type, offset, 1, false, true);
             return;
         }
-        this.setPBV();
-        this.hydRpCache.RpSetIndexBuffer(elementArrayBuffer.buffer, enumToIndexFormat.get(type));
-        this.hydRpCache.RpDrawIndexed(count, 1, Math.floor(offset / indexEnumToBytes.get(type)), 0, 0);
-        if (this.hydUniOff >= this.hydMaxUniSize) {
-            this._der_flush();
+        if (this.currentProgramValid) {
+            const stateToken = this.hydGlobalState.stateToken;
+            const prepared = this.lastIndexedDraw;
+            const elementArrayBuffer = this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding;
+            if (prepared && prepared.stateToken === stateToken && prepared.mode === mode &&
+                prepared.count === count && prepared.type === type && prepared.offset === offset &&
+                prepared.instanceCount === 1 && !prepared.instancedApi &&
+                prepared.elementArrayBuffer === elementArrayBuffer &&
+                prepared.bufferVersion === prepared.elementArrayBuffer.version) {
+                this.setPBV();
+                this.hydRpCache.RpSetIndexBuffer(prepared.indexBuffer, prepared.indexFormat);
+                this.hydRpCache.RpDrawIndexed(prepared.indexCount, 1, prepared.firstIndex, 0, 0);
+                this.finishDraw();
+                return;
+            }
         }
-        if (this.hydGlobalState.clearState.target !== 0) {
-            this.hydGlobalState.clearState.target = 0;
-            this.hydGlobalState.recordTransitionOne('!!d0');
+        const prepared = this.findPreparedIndexedDraw(mode, count, type, offset, 1, false);
+        if (prepared) {
+            this.executePreparedIndexedDraw(prepared);
+            return;
         }
+        this.drawElementsInternal(mode, count, type, offset, 1, false);
     }
     drawElementsInstanced(mode, count, type, offset, instanceCount) {
-        if (!this.validateDrawState())
+        if (!this.validateFramebufferAndStencilForDraw())
             return;
-        const topology = enum2PT[mode];
-        if (this.hydGlobalState.topology !== topology) {
-            this.hydGlobalState.topology = topology;
-            this.hydGlobalState.recordTransitionOne(topology);
+        if (this.shouldCullAllTriangles(mode)) {
+            this.drawElementsInternal(mode, count, type, offset, instanceCount, true, true);
+            return;
         }
-        const elementArrayBuffer = this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding;
-        if (!elementArrayBuffer || !elementArrayBuffer.buffer) {
+        const prepared = this.findPreparedIndexedDraw(mode, count, type, offset, instanceCount, true);
+        if (prepared) {
+            this.executePreparedIndexedDraw(prepared);
+            return;
+        }
+        this.drawElementsInternal(mode, count, type, offset, instanceCount, true);
+    }
+    drawElementsInternal(mode, count, type, offset, instanceCount, instancedApi, cullAll = false) {
+        mode = Number(mode) >>> 0;
+        count = toWebGlInt32(count);
+        type = Number(type) >>> 0;
+        offset = toWebGlInt64(offset);
+        instanceCount = toWebGlInt32(instanceCount);
+        const topology = this.primitiveTopology(mode);
+        if (!topology)
+            return;
+        if (count < 0 || offset < 0 || instanceCount < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const uint32Enabled = this.hydContextType === "webgl2" || this.enabledExtensions.has("OES_ELEMENT_INDEX_UINT");
+        if (type !== WebGL2RenderingContext.UNSIGNED_BYTE &&
+            type !== WebGL2RenderingContext.UNSIGNED_SHORT &&
+            (type !== WebGL2RenderingContext.UNSIGNED_INT || !uint32Enabled)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        const indexSize = type === WebGL2RenderingContext.UNSIGNED_BYTE ? 1 :
+            type === WebGL2RenderingContext.UNSIGNED_SHORT ? 2 : 4;
+        if ((offset % indexSize) !== 0) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
+        if (!this.currentProgramValid) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const elementArrayBuffer = this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding;
+        if (!elementArrayBuffer) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (count === 0 || instanceCount === 0)
+            return;
+        if (!elementArrayBuffer.buffer || offset + count * indexSize > elementArrayBuffer.webglSize) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const maxIndex = elementArrayBuffer.maxIndex(type, offset, count);
+        if (!this.validateDrawVertexState(maxIndex, instanceCount, instancedApi))
+            return;
+        if (cullAll)
+            return;
+        if (!this.currentDrawTargetHasSize())
+            return;
+        let indexBuffer = elementArrayBuffer.buffer;
+        let indexFormat;
+        if (type === WebGL2RenderingContext.UNSIGNED_SHORT) {
+            indexFormat = "uint16";
+        }
+        else if (type === WebGL2RenderingContext.UNSIGNED_INT) {
+            indexFormat = "uint32";
+        }
+        else {
+            indexBuffer = elementArrayBuffer.getUint16IndexBuffer();
+            indexFormat = "uint16";
+        }
+        let drawIndexCount = count;
+        let firstIndex = Math.floor(offset / indexSize);
+        if (mode === WebGL2RenderingContext.TRIANGLE_FAN || mode === WebGL2RenderingContext.LINE_LOOP) {
+            const expanded = elementArrayBuffer.getExpandedIndexBuffer(mode, type, offset, count);
+            indexBuffer = expanded.buffer;
+            indexFormat = expanded.format;
+            drawIndexCount = expanded.indexCount;
+            firstIndex = 0;
+        }
+        this.setPrimitiveState(topology, indexFormat);
         this.setPBV();
-        this.hydRpCache.RpSetIndexBuffer(elementArrayBuffer.buffer, enumToIndexFormat.get(type));
-        this.hydRpCache.RpDrawIndexed(count, instanceCount, Math.floor(offset / indexEnumToBytes.get(type)), 0, 0);
-        if (this.hydUniOff >= this.hydMaxUniSize) {
-            this._der_flush();
-        }
-        if (this.hydGlobalState.clearState.target !== 0) {
-            this.hydGlobalState.clearState.target = 0;
-            this.hydGlobalState.recordTransitionOne('!!d0');
-        }
+        this.hydRpCache.RpSetIndexBuffer(indexBuffer, indexFormat);
+        this.hydRpCache.RpDrawIndexed(drawIndexCount, instanceCount, firstIndex, 0, 0);
+        this.finishDraw();
+        const prepared = {
+            stateToken: this.hydGlobalState.stateToken,
+            elementArrayBuffer,
+            bufferVersion: elementArrayBuffer.version,
+            mode,
+            count,
+            type,
+            offset,
+            instanceCount,
+            instancedApi,
+            indexBuffer,
+            indexFormat,
+            indexCount: drawIndexCount,
+            firstIndex,
+        };
+        this.lastIndexedDraw = prepared;
+        this.cachePreparedIndexedDraw(prepared);
     }
 }
 
@@ -6971,12 +11743,634 @@ async function Module(moduleArg={}){var moduleRtn;var Module=moduleArg;var ENVIR
   };
 })());
 
+;// ./src/components/shaderGlslCompatibility.ts
+
+function shaderGlslCompatibility_maskComments(source) {
+    return source
+        .replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\r\n]/g, " "))
+        .replace(/\/\/.*$/gm, (comment) => " ".repeat(comment.length));
+}
+function replaceMaskedToken(source, masked, token, replacement) {
+    let out = "";
+    let cursor = 0;
+    token.lastIndex = 0;
+    for (let match = token.exec(masked); match !== null; match = token.exec(masked)) {
+        out += source.slice(cursor, match.index) + replacement;
+        cursor = match.index + match[0].length;
+    }
+    return out + source.slice(cursor);
+}
+function updateBlockCommentState(line, initiallyInComment) {
+    let inComment = initiallyInComment;
+    for (let index = 0; index < line.length; index++) {
+        if (inComment) {
+            if (line[index] === "*" && line[index + 1] === "/") {
+                inComment = false;
+                index++;
+            }
+            continue;
+        }
+        if (line[index] === "/" && line[index + 1] === "/")
+            break;
+        if (line[index] === "/" && line[index + 1] === "*") {
+            inComment = true;
+            index++;
+        }
+    }
+    return inComment;
+}
+function materializeWebGlLineMacros(source) {
+    const sourceLines = source.split(/(?<=\n)/);
+    const maskedLines = shaderGlslCompatibility_maskComments(source).split(/(?<=\n)/);
+    const objectLineMacros = new Map();
+    let logicalLine = 1;
+    let inBlockComment = false;
+    let defineContinuation = false;
+    return sourceLines.map((line, index) => {
+        const masked = maskedLines[index] || "";
+        const directive = defineContinuation
+            ? null
+            : /^\s*#\s*([A-Za-z_]\w*)\b([^\r\n]*)/.exec(masked);
+        let out = line;
+        if (!defineContinuation && !directive && logicalLine !== null) {
+            out = replaceMaskedToken(line, masked, /\b__LINE__\b/g, String(logicalLine));
+        }
+        if (directive?.[1] === "define") {
+            const definition = /^\s+([A-Za-z_]\w*)(?!\s*\()\s+([0-9]+)\s*$/.exec(directive[2]);
+            if (definition)
+                objectLineMacros.set(definition[1], Number(definition[2]));
+        }
+        else if (directive?.[1] === "undef") {
+            const name = /^\s+([A-Za-z_]\w*)\s*$/.exec(directive[2])?.[1];
+            if (name)
+                objectLineMacros.delete(name);
+        }
+        let nextLogicalLine = logicalLine === null ? null : logicalLine + 1;
+        if (directive?.[1] === "line") {
+            const argument = /^\s+([A-Za-z_]\w*|[0-9]+)(?:\s+(?:[A-Za-z_]\w*|[0-9]+))?\s*$/.exec(directive[2])?.[1];
+            const value = argument && (/^\d+$/.test(argument)
+                ? Number(argument)
+                : objectLineMacros.get(argument));
+            nextLogicalLine = value === undefined ? null : value;
+        }
+        const currentDefine = defineContinuation || directive?.[1] === "define";
+        inBlockComment = updateBlockCommentState(line, inBlockComment);
+        const lineContinuation = /\\\s*(?:\r?\n)?$/.test(masked);
+        defineContinuation = currentDefine && (inBlockComment || lineContinuation);
+        logicalLine = nextLogicalLine;
+        return out;
+    }).join("");
+}
+function stripGlslVersionDirectives(source) {
+    const sourceLines = source.split(/(?<=\n)/);
+    const maskedLines = shaderGlslCompatibility_maskComments(source).split(/(?<=\n)/);
+    return sourceLines.map((line, index) => /^\s*#\s*version\b/.test(maskedLines[index] || "")
+        ? line.replace(/[^\r\n]/g, " ")
+        : line).join("");
+}
+const WEBGL1_GLSL_BUILTIN_LIMITS = {
+    gl_MaxVertexAttribs: 16,
+    gl_MaxVertexUniformVectors: 1024,
+    gl_MaxVaryingVectors: 32,
+    gl_MaxVertexTextureImageUnits: 16,
+    gl_MaxCombinedTextureImageUnits: 16,
+    gl_MaxTextureImageUnits: 16,
+    gl_MaxFragmentUniformVectors: 1024,
+    gl_MaxDrawBuffers: 1,
+};
+function normalizeWebGl1BuiltinLimits(source) {
+    let out = source;
+    for (const [name, value] of Object.entries(WEBGL1_GLSL_BUILTIN_LIMITS)) {
+        out = out.replace(new RegExp(`\\b${name}\\b`, "g"), String(value));
+    }
+    return out;
+}
+function staticallyKnownPreprocessorCondition(expression, webglVersion) {
+    const version = webglVersion === 2 ? 300 : 100;
+    const normalized = expression
+        .replace(/\/\*[\s\S]*?\*\//g, " ")
+        .replace(/\/\/.*$/g, " ")
+        .replace(/\b__VERSION__\b/g, String(version))
+        .replace(/\bdefined\s*\(\s*GL_ES\s*\)/g, "1")
+        .replace(/\bdefined\s+GL_ES\b/g, "1")
+        .trim()
+        .replace(/^\((.*)\)$/s, "$1")
+        .trim();
+    if (normalized === "0")
+        return false;
+    if (normalized === "1")
+        return true;
+    const comparison = /^(\d+)\s*(==|!=|<=|>=|<|>)\s*(\d+)$/.exec(normalized);
+    if (!comparison)
+        return undefined;
+    const left = Number(comparison[1]);
+    const right = Number(comparison[3]);
+    switch (comparison[2]) {
+        case "==": return left === right;
+        case "!=": return left !== right;
+        case "<=": return left <= right;
+        case ">=": return left >= right;
+        case "<": return left < right;
+        case ">": return left > right;
+        default: return undefined;
+    }
+}
+function maskStaticallyInactivePreprocessorBranches(source, webglVersion) {
+    const lines = source.split(/(?<=\n)/);
+    const stack = [];
+    const effectiveActive = () => stack.length === 0 || stack[stack.length - 1].active;
+    return lines.map((line) => {
+        const directive = /^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b([\s\S]*?)(?:\r?\n)?$/i.exec(line);
+        if (directive) {
+            const kind = directive[1].toLowerCase();
+            const expression = directive[2].trim();
+            if (kind === "if" || kind === "ifdef" || kind === "ifndef") {
+                const parentActive = effectiveActive();
+                let condition;
+                if (kind === "ifdef" && expression === "GL_ES")
+                    condition = true;
+                else if (kind === "ifndef" && expression === "GL_ES")
+                    condition = false;
+                else if (kind === "if")
+                    condition = staticallyKnownPreprocessorCondition(expression, webglVersion);
+                stack.push({
+                    parentActive,
+                    conditionKnown: condition !== undefined,
+                    branchTaken: condition === true,
+                    active: parentActive && condition !== false,
+                });
+            }
+            else if (kind === "elif" && stack.length > 0) {
+                const frame = stack[stack.length - 1];
+                const condition = staticallyKnownPreprocessorCondition(expression, webglVersion);
+                if (frame.conditionKnown && condition !== undefined) {
+                    frame.active = frame.parentActive && !frame.branchTaken && condition;
+                    frame.branchTaken ||= condition;
+                }
+                else {
+                    frame.conditionKnown = false;
+                    frame.active = frame.parentActive;
+                }
+            }
+            else if (kind === "else" && stack.length > 0) {
+                const frame = stack[stack.length - 1];
+                frame.active = frame.conditionKnown
+                    ? frame.parentActive && !frame.branchTaken
+                    : frame.parentActive;
+                frame.branchTaken = true;
+            }
+            else if (kind === "endif") {
+                stack.pop();
+            }
+            return line;
+        }
+        return effectiveActive() ? line : line.replace(/[^\r\n]/g, " ");
+    }).join("");
+}
+function wrapVertexMainForWebGpuClipSpace(source) {
+    const signature = /\bvoid\s+main\s*\(\s*(?:void\s*)?\)\s*\{/;
+    if (!signature.test(source))
+        return source;
+    let innerName = "_hyd_webgl_vertex_main";
+    while (new RegExp(`\\b${innerName}\\b`).test(source))
+        innerName += "_";
+    const body = source.replace(signature, (match) => match.replace(/\bmain\b/, innerName));
+    return `${body}\n\nvoid main() {\n  ${innerName}();\n  gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;\n}\n`;
+}
+function lowerWebGlPointSizeToPrivateState(source) {
+    const masked = shaderGlslCompatibility_maskComments(source);
+    if (!/\bgl_PointSize\b/.test(masked))
+        return source;
+    let privateName = "_hydWebGlPointSize";
+    while (new RegExp(`\\b${privateName}\\b`).test(masked))
+        privateName += "_";
+    const token = /\bgl_PointSize\b/g;
+    let out = "";
+    let cursor = 0;
+    for (let match = token.exec(masked); match !== null; match = token.exec(masked)) {
+        out += source.slice(cursor, match.index) + privateName;
+        cursor = match.index + match[0].length;
+    }
+    out += source.slice(cursor);
+    return `float ${privateName};\n${out}`;
+}
+function normalizeWebGlDepthRange(source) {
+    if (!/\bgl_DepthRange\s*\./.test(shaderGlslCompatibility_maskComments(source)))
+        return source;
+    return source
+        .replace(/\bgl_DepthRange\s*\.\s*near\b/g, DEPTH_RANGE_NEAR_UNIFORM_NAME)
+        .replace(/\bgl_DepthRange\s*\.\s*far\b/g, DEPTH_RANGE_FAR_UNIFORM_NAME)
+        .replace(/\bgl_DepthRange\s*\.\s*diff\b/g, DEPTH_RANGE_DIFF_UNIFORM_NAME);
+}
+function shaderGlslCompatibility_isTopLevelAt(source, index) {
+    let braceDepth = 0;
+    let parenDepth = 0;
+    for (let cursor = 0; cursor < index; cursor++) {
+        if (source[cursor] === "{")
+            braceDepth++;
+        else if (source[cursor] === "}")
+            braceDepth--;
+        else if (source[cursor] === "(")
+            parenDepth++;
+        else if (source[cursor] === ")")
+            parenDepth--;
+    }
+    return braceDepth === 0 && parenDepth === 0;
+}
+function splitTopLevelArguments(source) {
+    const parts = [];
+    let start = 0;
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let braceDepth = 0;
+    for (let index = 0; index < source.length; index++) {
+        const ch = source[index];
+        if (ch === "(")
+            parenDepth++;
+        else if (ch === ")")
+            parenDepth--;
+        else if (ch === "[")
+            bracketDepth++;
+        else if (ch === "]")
+            bracketDepth--;
+        else if (ch === "{")
+            braceDepth++;
+        else if (ch === "}")
+            braceDepth--;
+        else if (ch === "," && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
+            parts.push(source.slice(start, index));
+            start = index + 1;
+        }
+    }
+    parts.push(source.slice(start));
+    return parts;
+}
+function topLevelAssignmentIndex(source) {
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let braceDepth = 0;
+    for (let index = 0; index < source.length; index++) {
+        const ch = source[index];
+        if (ch === "(")
+            parenDepth++;
+        else if (ch === ")")
+            parenDepth--;
+        else if (ch === "[")
+            bracketDepth++;
+        else if (ch === "]")
+            bracketDepth--;
+        else if (ch === "{")
+            braceDepth++;
+        else if (ch === "}")
+            braceDepth--;
+        else if (ch === "=" && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
+            const previous = source[index - 1] || "";
+            const next = source[index + 1] || "";
+            if (previous !== "=" && previous !== "!" && previous !== "<" && previous !== ">" && next !== "=") {
+                return index;
+            }
+        }
+    }
+    return -1;
+}
+function simpleMacroDefinitions(source) {
+    const macros = new Map();
+    for (const line of shaderGlslCompatibility_maskComments(source).split(/\r?\n/)) {
+        const match = /^\s*#\s*define\s+([A-Za-z_]\w*)(\([^)]*\))?(?:[ \t]+(.*))?$/.exec(line);
+        if (!match || /\\\s*$/.test(line))
+            continue;
+        macros.set(match[1], {
+            functionLike: match[2] !== undefined,
+            replacement: (match[3] || "").trim(),
+        });
+    }
+    return macros;
+}
+function matchingParen(source, open) {
+    let depth = 0;
+    for (let index = open; index < source.length; index++) {
+        if (source[index] === "(")
+            depth++;
+        else if (source[index] === ")" && --depth === 0)
+            return index;
+    }
+    return -1;
+}
+function provablyExpandsToEmpty(source, macros) {
+    let current = source.trim();
+    const expandedObjects = new Set();
+    for (let step = 0; step < 32 && current; step++) {
+        const identifier = /^([A-Za-z_]\w*)/.exec(current);
+        if (!identifier)
+            return false;
+        const name = identifier[1];
+        const macro = macros.get(name);
+        if (!macro)
+            return false;
+        let suffix = current.slice(identifier[0].length);
+        if (!macro.functionLike) {
+            if (expandedObjects.has(name))
+                return false;
+            expandedObjects.add(name);
+            current = `${macro.replacement}${suffix}`.trim();
+            continue;
+        }
+        if (macro.replacement.length !== 0)
+            return false;
+        const open = suffix.search(/\S/);
+        if (open < 0 || suffix[open] !== "(")
+            return false;
+        const close = matchingParen(suffix, open);
+        if (close < 0)
+            return false;
+        current = suffix.slice(close + 1).trim();
+    }
+    return current.length === 0;
+}
+function stripProvablyEmptyTopLevelMacroInvocations(source) {
+    const macros = simpleMacroDefinitions(source);
+    if (macros.size === 0)
+        return source;
+    const maskedLines = shaderGlslCompatibility_maskComments(source).split(/(?<=\n)/);
+    const sourceLines = source.split(/(?<=\n)/);
+    let braceDepth = 0;
+    return sourceLines.map((line, index) => {
+        const masked = maskedLines[index] || "";
+        const trimmed = masked.trim();
+        if (braceDepth === 0 && trimmed && !trimmed.startsWith("#") &&
+            provablyExpandsToEmpty(trimmed, macros)) {
+            return line.replace(/[^\r\n]/g, " ");
+        }
+        if (!trimmed.startsWith("#")) {
+            for (const ch of masked) {
+                if (ch === "{")
+                    braceDepth++;
+                else if (ch === "}")
+                    braceDepth--;
+            }
+        }
+        return line;
+    }).join("");
+}
+function lowerEs100GlobalInitializers(source) {
+    const masked = shaderGlslCompatibility_maskComments(source).replace(/^\s*#.*$/gm, (line) => line.replace(/[^\r\n]/g, " "));
+    const declaration = /((?:(?:const|lowp|mediump|highp)\s+)*[A-Za-z_]\w*)\s+([^;{}]+);/g;
+    const assignments = [];
+    const hoistedDeclarations = [];
+    const mainIndex = masked.search(/\bvoid\s+main\s*\(\s*(?:void\s*)?\)\s*\{/);
+    let out = "";
+    let cursor = 0;
+    for (let match = declaration.exec(masked); match !== null; match = declaration.exec(masked)) {
+        if (!shaderGlslCompatibility_isTopLevelAt(masked, match.index) || /\bconst\b/.test(match[1]))
+            continue;
+        const declaratorOffset = match.index + match[0].indexOf(match[2]);
+        const declarators = splitTopLevelArguments(source.slice(declaratorOffset, declaration.lastIndex - 1));
+        if (declarators.every((item) => topLevelAssignmentIndex(item) < 0))
+            continue;
+        const loweredDeclarations = [];
+        for (const declarator of declarators) {
+            const assignmentIndex = topLevelAssignmentIndex(declarator);
+            if (assignmentIndex < 0) {
+                loweredDeclarations.push(declarator.trim());
+                continue;
+            }
+            const target = declarator.slice(0, assignmentIndex).trim();
+            const initializer = declarator.slice(assignmentIndex + 1).trim();
+            const name = /^([A-Za-z_]\w*)/.exec(target)?.[1];
+            if (!name || !initializer) {
+                loweredDeclarations.push(declarator.trim());
+                continue;
+            }
+            loweredDeclarations.push(target);
+            assignments.push(`${name} = ${initializer};`);
+        }
+        const loweredDeclaration = `${match[1]} ${loweredDeclarations.join(", ")};`;
+        out += source.slice(cursor, match.index);
+        if (mainIndex >= 0 && match.index > mainIndex) {
+            hoistedDeclarations.push(loweredDeclaration);
+            out += source.slice(match.index, declaration.lastIndex).replace(/[^\r\n]/g, " ");
+        }
+        else {
+            out += loweredDeclaration;
+        }
+        cursor = declaration.lastIndex;
+    }
+    if (assignments.length === 0)
+        return source;
+    out += source.slice(cursor);
+    return out.replace(/\bvoid\s+main\s*\(\s*(?:void\s*)?\)\s*\{/, (signature) => `${hoistedDeclarations.join("\n")}${hoistedDeclarations.length ? "\n" : ""}${signature}\n  ${assignments.join("\n  ")}`);
+}
+function normalizeEs100SequenceArrayDimensions(source) {
+    return source.replace(/\[\s*\(\s*([^()[\]]*?,[^()[\]]*?)\s*\)\s*\]/g, (full, expression) => {
+        const values = splitTopLevelArguments(expression);
+        return values.length > 1 ? `[${values[values.length - 1].trim()}]` : full;
+    });
+}
+
+;// ./src/components/shaderGlslStructs.ts
+const VALUE_TYPES = new Set([
+    "float", "int", "uint", "bool",
+    "vec2", "vec3", "vec4", "ivec2", "ivec3", "ivec4", "uvec2", "uvec3", "uvec4",
+    "bvec2", "bvec3", "bvec4",
+    "mat2", "mat3", "mat4", "mat2x2", "mat2x3", "mat2x4", "mat3x2", "mat3x3", "mat3x4",
+    "mat4x2", "mat4x3", "mat4x4",
+]);
+function integerDefines(source) {
+    const defines = new Map();
+    const pattern = /^\s*#define\s+([A-Za-z_]\w*)\s+(\d+)\s*$/gm;
+    for (let match = pattern.exec(source); match !== null; match = pattern.exec(source)) {
+        defines.set(match[1], Math.max(1, Number(match[2])));
+    }
+    return defines;
+}
+function arrayInfo(rawName, defines) {
+    const compact = rawName.replace(/\s+/g, "");
+    const match = /^([A-Za-z_]\w*)(?:\[([A-Za-z_]\w*|\d+)\])?$/.exec(compact);
+    if (!match)
+        return { name: compact, size: 1, isArray: false };
+    const size = match[2]
+        ? (/^\d+$/.test(match[2]) ? Math.max(1, Number(match[2])) : defines.get(match[2]) || 1)
+        : 1;
+    return { name: match[1], size, isArray: !!match[2] };
+}
+function stableHash(value) {
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < value.length; index++) {
+        hash ^= value.charCodeAt(index);
+        hash = Math.imul(hash, 0x01000193);
+    }
+    return (hash >>> 0).toString(36);
+}
+function internalLeafName(sourceName) {
+    const readable = sourceName.replace(/[^A-Za-z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_|_$/g, "");
+    return `hydgl2gpu_uniform_${readable}_${stableHash(sourceName)}`;
+}
+function shaderGlslStructs_isTopLevelAt(source, index) {
+    let depth = 0;
+    for (let cursor = 0; cursor < index; cursor++) {
+        if (source[cursor] === "{")
+            depth++;
+        else if (source[cursor] === "}")
+            depth--;
+    }
+    return depth === 0;
+}
+function normalizeAnonymousUniformStructs(source) {
+    let index = 0;
+    return source.replace(/\buniform\s+struct(?:\s+([A-Za-z_]\w*))?\s*\{([\s\S]*?)\}\s*([A-Za-z_]\w*(?:\s*\[[^\]]+\])?)\s*;/g, (_full, declaredTypeName, fields, rawName) => {
+        const typeName = declaredTypeName || `hydgl2gpu_anon_uniform_${index++}`;
+        return `struct ${typeName} {${fields}};\nuniform ${typeName} ${rawName};`;
+    });
+}
+function shaderGlslStructs_escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function readsAggregate(body, sourceName) {
+    return new RegExp(`(^|[^A-Za-z0-9_])${shaderGlslStructs_escapeRegExp(sourceName)}(?![A-Za-z0-9_])(?!\\s*[.\\[])`, "m").test(body);
+}
+function parseDefinitions(source, defines) {
+    const definitions = new Map();
+    const structPattern = /\bstruct\s+([A-Za-z_]\w*)\s*\{([\s\S]*?)\}\s*;/g;
+    for (let match = structPattern.exec(source); match !== null; match = structPattern.exec(source)) {
+        const fields = [];
+        const fieldPattern = /(?:^|;)\s*(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([A-Za-z_]\w*(?:\s*\[[^\]]+\])?)\s*(?=;|$)/g;
+        for (let field = fieldPattern.exec(match[2]); field !== null; field = fieldPattern.exec(match[2])) {
+            const info = arrayInfo(field[2], defines);
+            fields.push({ name: info.name, glslType: field[1], size: info.size, isArray: info.isArray });
+        }
+        definitions.set(match[1], { name: match[1], fields });
+    }
+    return definitions;
+}
+function blankRanges(source, ranges) {
+    const chars = source.split("");
+    for (const range of ranges) {
+        for (let index = range.start; index < range.end; index++) {
+            if (chars[index] !== "\n" && chars[index] !== "\r")
+                chars[index] = " ";
+        }
+    }
+    return chars.join("");
+}
+function planValueStructUniforms(rawSource) {
+    const source = normalizeAnonymousUniformStructs(rawSource);
+    const defines = integerDefines(source);
+    const definitions = parseDefinitions(source, defines);
+    const parsedRoots = [];
+    const declarationRanges = [];
+    const uniformPattern = /\buniform\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([A-Za-z_]\w*(?:\s*\[[^\]]+\])?)\s*;/g;
+    for (let match = uniformPattern.exec(source); match !== null; match = uniformPattern.exec(source)) {
+        if (!shaderGlslStructs_isTopLevelAt(source, match.index) || !definitions.has(match[1]))
+            continue;
+        const info = arrayInfo(match[2], defines);
+        parsedRoots.push({ name: info.name, glslType: match[1], size: info.size, isArray: info.isArray });
+        declarationRanges.push({ start: match.index, end: uniformPattern.lastIndex });
+    }
+    const body = blankRanges(source, declarationRanges);
+    const roots = parsedRoots.map((root) => ({
+        ...root,
+        aggregateRead: !root.isArray && readsAggregate(body, root.name),
+    }));
+    const allLeaves = [];
+    const aggregates = [];
+    const expand = (rootName, glslType, sourceName) => {
+        if (VALUE_TYPES.has(glslType)) {
+            allLeaves.push({
+                rootName,
+                sourceName,
+                name: internalLeafName(sourceName),
+                glslType,
+                size: 1,
+                isArray: false,
+            });
+            return;
+        }
+        const definition = definitions.get(glslType);
+        if (!definition)
+            return;
+        if (readsAggregate(body, sourceName))
+            aggregates.push({ sourceName, glslType });
+        for (const field of definition.fields) {
+            const fieldPath = `${sourceName}.${field.name}`;
+            if (field.isArray && VALUE_TYPES.has(field.glslType)) {
+                allLeaves.push({
+                    rootName,
+                    sourceName: fieldPath,
+                    name: internalLeafName(fieldPath),
+                    glslType: field.glslType,
+                    size: field.size,
+                    isArray: true,
+                });
+            }
+            else if (field.isArray) {
+                for (let index = 0; index < field.size; index++)
+                    expand(rootName, field.glslType, `${fieldPath}[${index}]`);
+            }
+            else {
+                expand(rootName, field.glslType, fieldPath);
+            }
+        }
+    };
+    for (const root of roots) {
+        if (root.isArray) {
+            for (let index = 0; index < root.size; index++)
+                expand(root.name, root.glslType, `${root.name}[${index}]`);
+        }
+        else {
+            expand(root.name, root.glslType, root.name);
+        }
+    }
+    const leaves = allLeaves.filter((leaf) => {
+        const root = roots.find((item) => item.name === leaf.rootName);
+        return !!root && (root.aggregateRead || body.includes(leaf.sourceName) ||
+            aggregates.some((aggregate) => leaf.sourceName.startsWith(`${aggregate.sourceName}.`)));
+    });
+    return { definitions, roots, leaves, aggregates };
+}
+function constructorFor(plan, glslType, sourceName) {
+    const definition = plan.definitions.get(glslType);
+    if (!definition)
+        return null;
+    const args = [];
+    for (const field of definition.fields) {
+        if (field.isArray)
+            return null;
+        const fieldPath = `${sourceName}.${field.name}`;
+        if (VALUE_TYPES.has(field.glslType)) {
+            const leaf = plan.leaves.find((item) => item.sourceName === fieldPath);
+            if (!leaf)
+                return null;
+            args.push(leaf.name);
+        }
+        else {
+            const nested = constructorFor(plan, field.glslType, fieldPath);
+            if (!nested)
+                return null;
+            args.push(nested);
+        }
+    }
+    return `${glslType}(${args.join(", ")})`;
+}
+function rewriteStructUniformAggregateReads(source, plan) {
+    let out = source;
+    for (const aggregate of [...plan.aggregates].sort((left, right) => right.sourceName.length - left.sourceName.length)) {
+        const constructor = constructorFor(plan, aggregate.glslType, aggregate.sourceName);
+        if (!constructor)
+            continue;
+        out = out.replace(new RegExp(`(^|[^A-Za-z0-9_])${shaderGlslStructs_escapeRegExp(aggregate.sourceName)}(?![A-Za-z0-9_])(?!\\s*[.\\[])`, "gm"), (_match, prefix) => `${prefix}${constructor}`);
+    }
+    return out;
+}
+
 ;// ./src/components/shaderSource.ts
 function hydTrim(s) {
     return s.trim().replace(/\r\n/g, "\n");
 }
 
 ;// ./src/components/shaderMetadata.ts
+
+
+
 
 const TYPE_MAP = new Map([
     ["float", "f32"],
@@ -7030,16 +12424,169 @@ function stripComments(source) {
 function normalizeIdentifierName(raw) {
     return raw.replace(/\[[^\]]*\]$/, "").replace(/;$/, "").trim();
 }
+function tokenizeIntegerExpression(expression) {
+    const tokens = [];
+    const token = /\s*(?:(0[xX][0-9a-fA-F]+[uU]?|\d+[uU]?)|([A-Za-z_]\w*)|(<<|>>|[()+\-*/%~&^|]))/gy;
+    let cursor = 0;
+    while (cursor < expression.length) {
+        token.lastIndex = cursor;
+        const match = token.exec(expression);
+        if (!match || match.index !== cursor)
+            return null;
+        tokens.push({
+            kind: match[1] ? "number" : match[2] ? "identifier" : "operator",
+            value: match[1] || match[2] || match[3],
+        });
+        cursor = token.lastIndex;
+    }
+    return tokens;
+}
+function evaluateIntegerExpression(expression, constants) {
+    const tokens = tokenizeIntegerExpression(expression);
+    if (!tokens)
+        return null;
+    let index = 0;
+    const accept = (value) => tokens[index]?.value === value ? (index++, true) : false;
+    const binary = (next, operators, apply) => {
+        let left = next();
+        if (left === null)
+            return null;
+        while (operators.includes(tokens[index]?.value)) {
+            const operator = tokens[index++].value;
+            const right = next();
+            if (right === null)
+                return null;
+            left = apply(left, operator, right);
+            if (left === null)
+                return null;
+        }
+        return left;
+    };
+    const primary = () => {
+        const current = tokens[index];
+        if (!current)
+            return null;
+        if (accept("(")) {
+            const value = bitwiseOr();
+            return value !== null && accept(")") ? value : null;
+        }
+        index++;
+        if (current.kind === "number")
+            return Number(current.value.replace(/[uU]$/, ""));
+        return current.kind === "identifier" ? constants.get(current.value) ?? null : null;
+    };
+    const unary = () => {
+        const operator = tokens[index]?.value;
+        if (operator !== "+" && operator !== "-" && operator !== "~")
+            return primary();
+        index++;
+        const value = unary();
+        if (value === null)
+            return null;
+        return operator === "+" ? value : operator === "-" ? -value : ~value;
+    };
+    const multiply = () => binary(unary, ["*", "/", "%"], (left, operator, right) => {
+        if ((operator === "/" || operator === "%") && right === 0)
+            return null;
+        if (operator === "*")
+            return left * right;
+        if (operator === "/")
+            return Math.trunc(left / right);
+        return left % right;
+    });
+    const add = () => binary(multiply, ["+", "-"], (left, operator, right) => operator === "+" ? left + right : left - right);
+    const shift = () => binary(add, ["<<", ">>"], (left, operator, right) => operator === "<<" ? left << right : left >> right);
+    const bitwiseAnd = () => binary(shift, ["&"], (left, _operator, right) => left & right);
+    const bitwiseXor = () => binary(bitwiseAnd, ["^"], (left, _operator, right) => left ^ right);
+    const bitwiseOr = () => binary(bitwiseXor, ["|"], (left, _operator, right) => left | right);
+    const value = bitwiseOr();
+    return value !== null && index === tokens.length && Number.isFinite(value) ? Math.trunc(value) : null;
+}
+function splitIntegerDeclarators(source) {
+    const result = [];
+    let start = 0;
+    let depth = 0;
+    for (let index = 0; index < source.length; index++) {
+        if (source[index] === "(")
+            depth++;
+        else if (source[index] === ")")
+            depth--;
+        else if (source[index] === "," && depth === 0) {
+            result.push(source.slice(start, index));
+            start = index + 1;
+        }
+    }
+    result.push(source.slice(start));
+    return result;
+}
+function shaderMetadata_integerDefines(source) {
+    const constants = new Map();
+    const pending = [];
+    const defineRegex = /^\s*#define\s+([A-Za-z_]\w*)\s+([^\r\n]+)$/gm;
+    for (let match = defineRegex.exec(source); match !== null; match = defineRegex.exec(source)) {
+        pending.push({ name: match[1], expression: match[2].trim() });
+    }
+    const constRegex = /\bconst\s+(?:(?:lowp|mediump|highp)\s+)?(?:int|uint)\s+([^;]+);/g;
+    for (let match = constRegex.exec(source); match !== null; match = constRegex.exec(source)) {
+        if (!shaderMetadata_isTopLevelAt(source, match.index))
+            continue;
+        for (const declarator of splitIntegerDeclarators(match[1])) {
+            const assignment = /^\s*([A-Za-z_]\w*)\s*=\s*([\s\S]+)$/.exec(declarator);
+            if (assignment)
+                pending.push({ name: assignment[1], expression: assignment[2].trim() });
+        }
+    }
+    for (let pass = 0; pass <= pending.length; pass++) {
+        let changed = false;
+        for (const item of pending) {
+            if (constants.has(item.name))
+                continue;
+            const value = evaluateIntegerExpression(item.expression, constants);
+            if (value !== null) {
+                constants.set(item.name, value);
+                changed = true;
+            }
+        }
+        if (!changed)
+            break;
+    }
+    return constants;
+}
+function identifierArraySize(raw, defines) {
+    const match = raw.match(/\[\s*([^\]]+)\s*\]\s*$/);
+    if (!match)
+        return 1;
+    const value = evaluateIntegerExpression(match[1], defines);
+    return value === null ? 1 : Math.max(1, value);
+}
+function identifierIsArray(raw) {
+    return /\[\s*[^\]]+\s*\]\s*$/.test(raw);
+}
+function appendSamplerDeclarations(output, name, glslType, textureType, size, sourceName, isArray = false) {
+    for (let index = 0; index < size; index++) {
+        output.push({
+            name: isArray ? `${name}_${index}` : name,
+            glsl_type: glslType,
+            wgsl_texture_type: textureType,
+            wgsl_sampler_type: "sampler",
+            source_name: isArray ? `${sourceName || name}[${index}]` : sourceName,
+            size,
+            is_array: isArray,
+            array_name: isArray ? (sourceName || name) : undefined,
+            array_index: isArray ? index : undefined,
+        });
+    }
+}
 function sanitizeResourceName(name) {
     return name.replace(/[^A-Za-z0-9_]/g, "_").replace(/_+$/g, "");
 }
-function escapeRegExp(value) {
+function shaderMetadata_escapeRegExp(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 function isIdentifierReferenced(source, name) {
-    return new RegExp(`\\b${escapeRegExp(name)}\\b`).test(source);
+    return new RegExp(`\\b${shaderMetadata_escapeRegExp(name)}\\b`).test(source);
 }
-function isTopLevelAt(source, index) {
+function shaderMetadata_isTopLevelAt(source, index) {
     let braceDepth = 0;
     let parenDepth = 0;
     for (let i = 0; i < index; i++) {
@@ -7080,13 +12627,16 @@ function toUniformWgslType(glslType) {
             return toWgslType(glslType);
     }
 }
-function declarationFrom(glslType, name, interpolation = "", sourceName, uniform = false) {
+function declarationFrom(glslType, name, interpolation = "", sourceName, uniform = false, size = 1, isArray = false) {
+    const elementType = uniform ? toUniformWgslType(glslType) : toWgslType(glslType);
     return {
         name,
         glsl_type: glslType,
-        wgsl_type: uniform ? toUniformWgslType(glslType) : toWgslType(glslType),
+        wgsl_type: isArray ? `array<${elementType}, ${size}>` : elementType,
         interpolation,
         source_name: sourceName,
+        size,
+        is_array: isArray,
     };
 }
 function isKnownValueType(glslType) {
@@ -7095,43 +12645,48 @@ function isKnownValueType(glslType) {
 function isKnownSamplerType(glslType) {
     return SAMPLER_TEXTURE_MAP.has(glslType);
 }
-function parseStructDefinitions(source) {
+function parseStructDefinitions(source, defines) {
     const structs = new Map();
     const structRegex = /\bstruct\s+([A-Za-z_]\w*)\s*\{([\s\S]*?)\}\s*;/g;
     let match;
     while ((match = structRegex.exec(source)) !== null) {
         const fields = [];
-        const fieldRegex = /^\s*(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*;/gm;
+        const fieldRegex = /^\s*(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([A-Za-z_]\w*\s*(?:\[[^\]]*\])?)\s*;/gm;
         let fieldMatch;
         while ((fieldMatch = fieldRegex.exec(match[2])) !== null) {
+            const rawName = fieldMatch[2].replace(/\s+/g, "");
             fields.push({
                 glslType: fieldMatch[1],
-                name: fieldMatch[2],
+                name: normalizeIdentifierName(rawName),
+                size: identifierArraySize(rawName, defines),
+                isArray: identifierIsArray(rawName),
             });
         }
         structs.set(match[1], fields);
     }
     return structs;
 }
-function scanGlslDeclarations(source, stage) {
-    const cleaned = stripComments(source);
+function scanGlslDeclarations(source, stage, options = {}) {
+    const cleaned = normalizeAnonymousUniformStructs(stripComments(source));
+    const defines = shaderMetadata_integerDefines(cleaned);
     const declarations = {
         attributes: [],
         uniforms: [],
         samplers: [],
         varyings: [],
     };
-    const structs = parseStructDefinitions(cleaned);
+    const structs = parseStructDefinitions(cleaned, defines);
+    const valueStructUniforms = planValueStructUniforms(cleaned);
     const seen = new Set();
-    const declarationPattern = /\b(?:(?:layout\s*\([^)]*\)\s*)?)(?:(?:lowp|mediump|highp)\s+)?((?:(?:flat|smooth|noperspective|centroid|sample)\s+)*)(attribute|uniform|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([^;]+)\s*;/g;
+    const declarationPattern = /\b(?:(?:layout\s*\([^)]*\)\s*)?)(?:invariant\s+)?(?:(?:lowp|mediump|highp)\s+)?((?:(?:flat|smooth|noperspective|centroid|sample)\s+)*)(attribute|uniform|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([^;]+)\s*;/g;
     const bodyWithoutGlobalDeclarations = cleaned.replace(declarationPattern, (full, ...args) => {
         const offset = args[args.length - 2];
-        return isTopLevelAt(cleaned, offset) ? "\n" : full;
+        return shaderMetadata_isTopLevelAt(cleaned, offset) ? "\n" : full;
     });
     const declarationRegex = new RegExp(declarationPattern);
     let match;
     while ((match = declarationRegex.exec(cleaned)) !== null) {
-        if (!isTopLevelAt(cleaned, match.index)) {
+        if (!shaderMetadata_isTopLevelAt(cleaned, match.index)) {
             continue;
         }
         const interpolation = match[1].trim();
@@ -7139,7 +12694,10 @@ function scanGlslDeclarations(source, stage) {
         const glslType = match[3];
         const names = match[4].split(",");
         for (const rawName of names) {
-            const name = normalizeIdentifierName(rawName);
+            const sourceName = normalizeIdentifierName(rawName);
+            const name = bridgeGlslIdentifier(sourceName);
+            const size = identifierArraySize(rawName, defines);
+            const isArray = identifierIsArray(rawName);
             if (!name)
                 continue;
             const key = `${qualifier}:${glslType}:${name}`;
@@ -7147,42 +12705,48 @@ function scanGlslDeclarations(source, stage) {
                 continue;
             seen.add(key);
             if (qualifier === "uniform") {
-                if (!isIdentifierReferenced(bodyWithoutGlobalDeclarations, name)) {
+                if (!isIdentifierReferenced(bodyWithoutGlobalDeclarations, sourceName)) {
                     continue;
                 }
                 const textureType = SAMPLER_TEXTURE_MAP.get(glslType);
                 if (textureType) {
-                    declarations.samplers.push({
-                        name,
-                        glsl_type: glslType,
-                        wgsl_texture_type: textureType,
-                        wgsl_sampler_type: "sampler",
-                    });
+                    appendSamplerDeclarations(declarations.samplers, name, glslType, textureType, size, name === sourceName ? undefined : sourceName, isArray);
                 }
                 else if (structs.has(glslType)) {
+                    const rootReferenced = isIdentifierReferenced(bodyWithoutGlobalDeclarations, sourceName);
                     for (const field of structs.get(glslType)) {
-                        const sourceName = `${name}.${field.name}`;
-                        if (!isIdentifierReferenced(bodyWithoutGlobalDeclarations, sourceName)) {
-                            continue;
-                        }
                         const fieldTextureType = SAMPLER_TEXTURE_MAP.get(field.glslType);
-                        const fieldName = sanitizeResourceName(sourceName);
                         if (fieldTextureType) {
-                            declarations.samplers.push({
-                                name: fieldName,
-                                glsl_type: field.glslType,
-                                wgsl_texture_type: fieldTextureType,
-                                wgsl_sampler_type: "sampler",
-                                source_name: sourceName,
-                            });
+                            if (!rootReferenced)
+                                continue;
+                            const outerCount = isArray ? size : 1;
+                            const fieldCount = field.isArray ? field.size : 1;
+                            for (let outerIndex = 0; outerIndex < outerCount; outerIndex++) {
+                                const rootName = isArray ? `${sourceName}[${outerIndex}]` : sourceName;
+                                const fieldBase = `${rootName}.${field.name}`;
+                                for (let fieldIndex = 0; fieldIndex < fieldCount; fieldIndex++) {
+                                    const sourceName = field.isArray ? `${fieldBase}[${fieldIndex}]` : fieldBase;
+                                    declarations.samplers.push({
+                                        name: sanitizeResourceName(sourceName),
+                                        glsl_type: field.glslType,
+                                        wgsl_texture_type: fieldTextureType,
+                                        wgsl_sampler_type: "sampler",
+                                        source_name: sourceName,
+                                        size: outerCount * fieldCount,
+                                        is_array: isArray || field.isArray,
+                                        array_name: field.isArray ? fieldBase : undefined,
+                                        array_index: field.isArray ? fieldIndex : undefined,
+                                    });
+                                }
+                            }
                         }
-                        else if (isKnownValueType(field.glslType)) {
-                            declarations.uniforms.push(declarationFrom(field.glslType, fieldName, "", sourceName, true));
-                        }
+                    }
+                    for (const leaf of valueStructUniforms.leaves.filter((item) => item.rootName === sourceName)) {
+                        declarations.uniforms.push(declarationFrom(leaf.glslType, leaf.name, "", leaf.sourceName, true, leaf.size, leaf.isArray));
                     }
                 }
                 else if (isKnownValueType(glslType)) {
-                    declarations.uniforms.push(declarationFrom(glslType, name, "", undefined, true));
+                    declarations.uniforms.push(declarationFrom(glslType, name, "", name === sourceName ? undefined : sourceName, true, size, isArray));
                 }
                 else {
                     continue;
@@ -7190,28 +12754,62 @@ function scanGlslDeclarations(source, stage) {
                 continue;
             }
             if (qualifier === "attribute" || (qualifier === "in" && stage === "vertex")) {
-                if (!isIdentifierReferenced(bodyWithoutGlobalDeclarations, name)) {
+                if (!isIdentifierReferenced(bodyWithoutGlobalDeclarations, sourceName)) {
                     continue;
                 }
                 if (!isKnownValueType(glslType)) {
                     continue;
                 }
-                declarations.attributes.push(declarationFrom(glslType, name, interpolation));
+                declarations.attributes.push(declarationFrom(glslType, name, interpolation, name === sourceName ? undefined : sourceName, false, size, isArray));
                 continue;
             }
             if (qualifier === "varying" || (qualifier === "out" && stage === "vertex") || (qualifier === "in" && stage === "fragment")) {
+                if (!options.includeUnusedVaryings && !isIdentifierReferenced(bodyWithoutGlobalDeclarations, sourceName)) {
+                    continue;
+                }
                 if (!isKnownValueType(glslType)) {
                     continue;
                 }
-                declarations.varyings.push(declarationFrom(glslType, name, interpolation));
+                declarations.varyings.push(declarationFrom(glslType, name, interpolation, name === sourceName ? undefined : sourceName, false, size, isArray));
             }
         }
     }
     return declarations;
 }
 function makeShaderMetadata(source, type, wgsl = "") {
-    const stage = type === WebGLRenderingContext.VERTEX_SHADER ? "vertex" : "fragment";
+    const stage = type === 0x8B31 ? "vertex" : "fragment";
     const declarations = scanGlslDeclarations(source, stage);
+    const sourceWithoutComments = stripComments(source);
+    const readsFragCoord = stage === "fragment" && /\bgl_FragCoord\b/.test(sourceWithoutComments.replace(/\binvariant\s+gl_FragCoord\s*;/g, ""));
+    if (readsFragCoord) {
+        declarations.uniforms.push({
+            name: FRAG_COORD_HEIGHT_UNIFORM_NAME,
+            glsl_type: "float",
+            wgsl_type: "f32",
+            internal: true,
+        });
+    }
+    if (/\bgl_DepthRange\s*\./.test(sourceWithoutComments)) {
+        declarations.uniforms.push({
+            name: DEPTH_RANGE_NEAR_UNIFORM_NAME,
+            source_name: "gl_DepthRange.near",
+            glsl_type: "float",
+            wgsl_type: "f32",
+            internal: true,
+        }, {
+            name: DEPTH_RANGE_FAR_UNIFORM_NAME,
+            source_name: "gl_DepthRange.far",
+            glsl_type: "float",
+            wgsl_type: "f32",
+            internal: true,
+        }, {
+            name: DEPTH_RANGE_DIFF_UNIFORM_NAME,
+            source_name: "gl_DepthRange.diff",
+            glsl_type: "float",
+            wgsl_type: "f32",
+            internal: true,
+        });
+    }
     return {
         attributes: stage === "vertex" ? declarations.attributes : [],
         uniforms: declarations.uniforms,
@@ -7245,7 +12843,7 @@ function shaderTexCoord_findMatchingParen(source, openIndex) {
     }
     return -1;
 }
-function splitTopLevelArguments(source) {
+function shaderTexCoord_splitTopLevelArguments(source) {
     const args = [];
     let start = 0;
     let parenDepth = 0;
@@ -7367,7 +12965,7 @@ function normalizeFragmentTextureCoordinates(wgsl, metadata, source) {
         if (closeParen < 0) {
             break;
         }
-        const args = splitTopLevelArguments(wgsl.slice(openParen + 1, closeParen));
+        const args = shaderTexCoord_splitTopLevelArguments(wgsl.slice(openParen + 1, closeParen));
         if (args.length >= 3) {
             const samplerName = sampler2DNames.find((name) => isTextureArgForSampler(args[0], args[1], name));
             if (samplerName && expressionUsesTexCoord(args[2], texCoordAliases)) {
@@ -7543,6 +13141,86 @@ function splitTopLevelParameters(source) {
     params.push(source.slice(start));
     return params.map((param) => param.trim()).filter((param) => param.length > 0);
 }
+function stripWholeExpressionParentheses(source) {
+    let out = source.trim();
+    while (out.startsWith("(") && findMatching(out, 0, "(", ")") === out.length - 1) {
+        out = out.slice(1, -1).trim();
+    }
+    return out;
+}
+function rightmostTopLevelPlus(source) {
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    for (let index = source.length - 1; index >= 0; index--) {
+        const ch = source[index];
+        if (ch === ")")
+            parenDepth++;
+        else if (ch === "(")
+            parenDepth--;
+        else if (ch === "]")
+            bracketDepth++;
+        else if (ch === "[")
+            bracketDepth--;
+        else if (ch === "+" && parenDepth === 0 && bracketDepth === 0) {
+            let previous = index - 1;
+            let next = index + 1;
+            while (previous >= 0 && /\s/.test(source[previous]))
+                previous--;
+            while (next < source.length && /\s/.test(source[next]))
+                next++;
+            if (previous >= 0 && next < source.length && !/[+\-*/%(<>=!,&|^]/.test(source[previous])) {
+                return index;
+            }
+        }
+    }
+    return -1;
+}
+function leftAssociativeAddTerms(source) {
+    const rightTerms = [];
+    let left = stripWholeExpressionParentheses(source);
+    while (true) {
+        const plus = rightmostTopLevelPlus(left);
+        if (plus < 0)
+            break;
+        rightTerms.push(left.slice(plus + 1).trim());
+        left = stripWholeExpressionParentheses(left.slice(0, plus));
+    }
+    return [left, ...rightTerms.reverse()];
+}
+function splitDeepAssociativeExpressions(source) {
+    const lines = source.split("\n");
+    let split = 0;
+    let temporary = 0;
+    const out = [];
+    const assignment = /^(\s*)((?:(?:let|var)\s+[A-Za-z_]\w*(?:\s*:\s*[^=;]+)?|[A-Za-z_]\w*)\s*=\s*)(.+);\s*$/;
+    for (const line of lines) {
+        const match = assignment.exec(line);
+        if (!match) {
+            out.push(line);
+            continue;
+        }
+        const terms = leftAssociativeAddTerms(match[3]);
+        if (terms.length <= 48) {
+            out.push(line);
+            continue;
+        }
+        let expression = terms[0];
+        let chunkTerms = 0;
+        for (let index = 1; index < terms.length; index++) {
+            expression = `(${expression} + ${terms[index]})`;
+            chunkTerms++;
+            if (chunkTerms === 24 && index < terms.length - 1) {
+                const name = `_hyd_add_chain_${temporary++}`;
+                out.push(`${match[1]}let ${name} = ${expression};`);
+                expression = name;
+                chunkTerms = 0;
+                split++;
+            }
+        }
+        out.push(`${match[1]}${match[2]}${expression};`);
+    }
+    return { wgsl: out.join("\n"), split };
+}
 function parseFunctions(source) {
     const functions = [];
     const regex = /((?:@[A-Za-z_]\w*(?:\([^)]*\))?\s*)*)fn\s+([A-Za-z_]\w*)\s*\(/g;
@@ -7592,7 +13270,7 @@ function parsePrivateDeclarations(source) {
     }
     return declarations;
 }
-function parseStructs(source) {
+function shaderWgslOptimizer_parseStructs(source) {
     const structs = [];
     const regex = /\bstruct\s+([A-Za-z_]\w*)\s*\{/g;
     for (let match = regex.exec(source); match !== null; match = regex.exec(source)) {
@@ -7674,6 +13352,18 @@ function applyIdentifierMap(source, replacements) {
     }
     return out;
 }
+function applyExpressionMap(source, replacements) {
+    let out = source;
+    const expressions = Array.from(replacements.keys()).sort((a, b) => b.length - a.length);
+    for (const expression of expressions) {
+        out = out.replace(new RegExp(`\\b${shaderWgslOptimizer_escapeRegExp(expression)}(?=$|[^A-Za-z0-9_])`, "g"), replacements.get(expression));
+    }
+    return out;
+}
+function exactAssignmentCount(source, expression) {
+    const regex = new RegExp(`(?:^|[;\\n]\\s*)${shaderWgslOptimizer_escapeRegExp(expression)}\\s*(?:[+\\-*/%&|^]?=)`, "g");
+    return source.match(regex)?.length ?? 0;
+}
 function lowerEntryWrapper(source) {
     const functions = parseFunctions(source);
     const entries = functions.filter((fn) => /@(vertex|fragment)\b/.test(fn.attributes));
@@ -7707,7 +13397,7 @@ function lowerEntryWrapper(source) {
         return { wgsl: source, loweredPrivateVars: 0, skipped: "entry-return-constructor-not-found" };
     }
     const outputStructName = returnMatch[1];
-    const outputStruct = parseStructs(source).find((item) => item.name === outputStructName);
+    const outputStruct = shaderWgslOptimizer_parseStructs(source).find((item) => item.name === outputStructName);
     if (!outputStruct) {
         return { wgsl: source, loweredPrivateVars: 0, skipped: "entry-output-struct-not-found" };
     }
@@ -7720,13 +13410,31 @@ function lowerEntryWrapper(source) {
         inputMap.set(assignment.target, assignment.value);
     }
     const outputMap = new Map();
+    const outputExpressionMap = new Map();
+    const outputPrivateNames = new Set();
     for (let i = 0; i < returnArgs.length; i++) {
         const arg = returnArgs[i].trim();
         if (/^[A-Za-z_]\w*$/.test(arg) && privateNames.has(arg)) {
+            if (outputMap.has(arg)) {
+                return { wgsl: source, loweredPrivateVars: 0, skipped: "duplicate-output-expression" };
+            }
             outputMap.set(arg, `_hyd_output.${outputStruct.fields[i]}`);
+            outputPrivateNames.add(arg);
+            continue;
         }
+        const indexed = /^([A-Za-z_]\w*)\s*\[\s*([^\]]+)\s*\]$/.exec(arg);
+        if (indexed && privateNames.has(indexed[1])) {
+            const expression = `${indexed[1]}[${indexed[2].trim()}]`;
+            if (outputExpressionMap.has(expression)) {
+                return { wgsl: source, loweredPrivateVars: 0, skipped: "duplicate-output-expression" };
+            }
+            outputExpressionMap.set(expression, `_hyd_output.${outputStruct.fields[i]}`);
+            outputPrivateNames.add(indexed[1]);
+            continue;
+        }
+        return { wgsl: source, loweredPrivateVars: 0, skipped: "unsupported-output-expression" };
     }
-    const mappedPrivateNames = new Set([...inputMap.keys(), ...outputMap.keys()]);
+    const mappedPrivateNames = new Set([...inputMap.keys(), ...outputPrivateNames]);
     if (mappedPrivateNames.size === 0) {
         return { wgsl: source, loweredPrivateVars: 0, skipped: "no-mapped-private-io" };
     }
@@ -7757,10 +13465,21 @@ function lowerEntryWrapper(source) {
             return { wgsl: source, loweredPrivateVars: 0, skipped: "output-private-never-written" };
         }
     }
+    for (const expression of outputExpressionMap.keys()) {
+        if (exactAssignmentCount(helper.body, expression) < 1) {
+            return { wgsl: source, loweredPrivateVars: 0, skipped: "output-private-never-written" };
+        }
+    }
     const replacements = new Map([...inputMap, ...outputMap]);
-    let loweredBody = applyIdentifierMap(helper.body, replacements)
+    let loweredBody = applyExpressionMap(helper.body, outputExpressionMap);
+    loweredBody = applyIdentifierMap(loweredBody, replacements)
         .replace(/^\s*return\s*;\s*$/gm, "")
         .trim();
+    for (const name of mappedPrivateNames) {
+        if (countIdentifier(loweredBody, name) > 0) {
+            return { wgsl: source, loweredPrivateVars: 0, skipped: "private-io-has-unmapped-uses" };
+        }
+    }
     loweredBody = loweredBody.split("\n").map((line) => `  ${line}`).join("\n");
     const newEntry = `${entry.attributes}fn ${entry.name}(${entry.params})${entry.returnType} {\n  var _hyd_output: ${outputStructName};\n${loweredBody}\n  return _hyd_output;\n}`;
     const mappedDeclarations = privateDeclarations
@@ -7926,6 +13645,10 @@ function collectVectorDimensions(source) {
     const typePattern = "vec\\s*([234])\\s*(?:f|<\\s*f32\\s*>)";
     const declarationRegex = new RegExp(`\\b(?:var(?:<[^>]+>)?|let)\\s+([A-Za-z_]\\w*)\\s*:\\s*${typePattern}`, "g");
     for (let match = declarationRegex.exec(source); match !== null; match = declarationRegex.exec(source)) {
+        dimensions.set(match[1], Number(match[2]));
+    }
+    const inferredConstructorRegex = /\b(?:var|let)\s+([A-Za-z_]\w*)\s*=\s*vec([234])f\s*\(/g;
+    for (let match = inferredConstructorRegex.exec(source); match !== null; match = inferredConstructorRegex.exec(source)) {
         dimensions.set(match[1], Number(match[2]));
     }
     const paramRegex = new RegExp(`\\b([A-Za-z_]\\w*)\\s*:\\s*${typePattern}`, "g");
@@ -8297,7 +14020,7 @@ function foldOutputComponentStores(source) {
     while (changed) {
         changed = false;
         const functions = parseFunctions(out);
-        const structs = parseStructs(out);
+        const structs = shaderWgslOptimizer_parseStructs(out);
         for (const fn of functions) {
             if (!/@(vertex|fragment)\b/.test(fn.attributes)) {
                 continue;
@@ -8355,7 +14078,7 @@ function collectVec2ValueNames(fn) {
 }
 function constructOutputStructReturnsOnce(source) {
     const functions = parseFunctions(source);
-    const structs = parseStructs(source);
+    const structs = shaderWgslOptimizer_parseStructs(source);
     for (const fn of functions) {
         if (!/@(vertex|fragment)\b/.test(fn.attributes)) {
             continue;
@@ -8460,7 +14183,7 @@ function constructOutputStructReturns(source) {
 }
 function collapseSingleFieldOutputStructsOnce(source) {
     const functions = parseFunctions(source);
-    const structs = parseStructs(source);
+    const structs = shaderWgslOptimizer_parseStructs(source);
     for (const fn of functions) {
         if (!/@(vertex|fragment)\b/.test(fn.attributes)) {
             continue;
@@ -8870,9 +14593,12 @@ function optimizeTintWgsl(wgsl) {
         collapsedOutputStructs: 0,
         removedTemporaries: 0,
         foldedConstructors: 0,
+        splitDeepExpressions: 0,
         skippedPasses: [],
     };
-    const lowered = lowerEntryWrapper(wgsl);
+    const initialDepth = splitDeepAssociativeExpressions(wgsl);
+    stats.splitDeepExpressions += initialDepth.split;
+    const lowered = lowerEntryWrapper(initialDepth.wgsl);
     let out = lowered.wgsl;
     stats.loweredPrivateVars = lowered.loweredPrivateVars;
     if (lowered.skipped && !["no-entry-wrapper", "no-private-io"].includes(lowered.skipped)) {
@@ -8895,13 +14621,477 @@ function optimizeTintWgsl(wgsl) {
     stats.collapsedOutputStructs = peepholes.collapsedOutputStructs;
     stats.removedTemporaries = peepholes.removedTemporaries;
     stats.foldedConstructors = peepholes.foldedConstructors;
+    const finalDepth = splitDeepAssociativeExpressions(out);
+    out = finalDepth.wgsl;
+    stats.splitDeepExpressions += finalDepth.split;
     return {
         wgsl: out.trim() + "\n",
         stats,
     };
 }
 
+;// ./src/components/shaderGlslUniforms.ts
+function glslMatrixDimensions(glslType) {
+    const square = /^mat([234])$/.exec(glslType);
+    if (square) {
+        const size = Number(square[1]);
+        return { columns: size, rows: size };
+    }
+    const rectangular = /^mat([234])x([234])$/.exec(glslType);
+    return rectangular ? { columns: Number(rectangular[1]), rows: Number(rectangular[2]) } : null;
+}
+function matrixArrayLoaderName(name) {
+    return `_hyd_load_matrix_array_${name}`;
+}
+function matrixArrayStorageDeclaration(uniform) {
+    const dimensions = glslMatrixDimensions(uniform.glsl_type);
+    const size = uniform.size || 1;
+    if (!dimensions || !uniform.is_array)
+        return null;
+    return `vec${dimensions.rows} ${uniform.name}[${size * dimensions.columns}];`;
+}
+function makeMatrixArrayLoaders(uniforms) {
+    const loaders = [];
+    for (const uniform of uniforms) {
+        const dimensions = glslMatrixDimensions(uniform.glsl_type);
+        if (!dimensions || !uniform.is_array)
+            continue;
+        const columns = [];
+        for (let column = 0; column < dimensions.columns; column++) {
+            columns.push(`${uniform.name}[(index * ${dimensions.columns}) + ${column}]`);
+        }
+        loaders.push([
+            `${uniform.glsl_type} ${matrixArrayLoaderName(uniform.name)}(int index) {`,
+            `  return ${uniform.glsl_type}(${columns.join(", ")});`,
+            "}",
+        ].join("\n"));
+    }
+    return loaders;
+}
+function findMatchingBracket(source, openIndex) {
+    let depth = 0;
+    let lineComment = false;
+    let blockComment = false;
+    for (let i = openIndex; i < source.length; i++) {
+        const ch = source[i];
+        const next = source[i + 1];
+        if (lineComment) {
+            if (ch === "\n")
+                lineComment = false;
+            continue;
+        }
+        if (blockComment) {
+            if (ch === "*" && next === "/") {
+                blockComment = false;
+                i++;
+            }
+            continue;
+        }
+        if (ch === "/" && next === "/") {
+            lineComment = true;
+            i++;
+            continue;
+        }
+        if (ch === "/" && next === "*") {
+            blockComment = true;
+            i++;
+            continue;
+        }
+        if (ch === "[") {
+            depth++;
+        }
+        else if (ch === "]") {
+            depth--;
+            if (depth === 0)
+                return i;
+        }
+    }
+    return -1;
+}
+function rewriteMatrixArrayUniform(source, uniform) {
+    const size = uniform.size || 1;
+    const name = uniform.name;
+    const loader = matrixArrayLoaderName(name);
+    let out = "";
+    let cursor = 0;
+    let index = 0;
+    let lineComment = false;
+    let blockComment = false;
+    while (index < source.length) {
+        const ch = source[index];
+        const next = source[index + 1];
+        if (lineComment) {
+            if (ch === "\n")
+                lineComment = false;
+            index++;
+            continue;
+        }
+        if (blockComment) {
+            if (ch === "*" && next === "/") {
+                blockComment = false;
+                index += 2;
+            }
+            else {
+                index++;
+            }
+            continue;
+        }
+        if (ch === "/" && next === "/") {
+            lineComment = true;
+            index += 2;
+            continue;
+        }
+        if (ch === "/" && next === "*") {
+            blockComment = true;
+            index += 2;
+            continue;
+        }
+        if (source.startsWith(name, index) &&
+            (index === 0 || !/[A-Za-z0-9_]/.test(source[index - 1])) &&
+            !/[A-Za-z0-9_]/.test(source[index + name.length] || "")) {
+            let suffix = index + name.length;
+            while (/\s/.test(source[suffix] || ""))
+                suffix++;
+            if (source[suffix] === "[") {
+                const close = findMatchingBracket(source, suffix);
+                if (close < 0)
+                    throw new Error(`unterminated matrix array access for ${name}`);
+                const expression = source.slice(suffix + 1, close).trim();
+                if (!expression)
+                    throw new Error(`empty matrix array index for ${name}`);
+                out += source.slice(cursor, index) + `${loader}(int(${expression}))`;
+                cursor = close + 1;
+                index = cursor;
+                continue;
+            }
+            const lengthCall = source.slice(suffix).match(/^\.\s*length\s*\(\s*\)/);
+            if (lengthCall) {
+                out += source.slice(cursor, index) + `${size}`;
+                cursor = suffix + lengthCall[0].length;
+                index = cursor;
+                continue;
+            }
+            if (source[suffix] === ";") {
+                let previous = index - 1;
+                while (previous >= 0 && /\s/.test(source[previous]))
+                    previous--;
+                if (previous < 0 || source[previous] === ";" || source[previous] === "{" || source[previous] === "}") {
+                    out += source.slice(cursor, index);
+                    cursor = suffix;
+                    index = cursor;
+                    continue;
+                }
+            }
+            throw new Error(`unsupported whole-array use of matrix uniform ${name}`);
+        }
+        index++;
+    }
+    return out + source.slice(cursor);
+}
+function rewriteMatrixArrayUniformReads(source, uniforms) {
+    let out = source;
+    for (const uniform of uniforms) {
+        if (glslMatrixDimensions(uniform.glsl_type) && uniform.is_array) {
+            out = rewriteMatrixArrayUniform(out, uniform);
+        }
+    }
+    return out;
+}
+
+;// ./src/components/shaderGlslSamplers.ts
+const SAMPLER_TYPE_PATTERN = /^[iu]?sampler(?:2D|Cube|2DArray|3D)$/;
+const STRUCT_FUNCTION_SIGNATURE = /((?:^|[;\n{}])\s*(?:[A-Za-z_]\w*\s+)+([A-Za-z_]\w*)\s*)\(([^()]*)\)(\s*[;{])/gm;
+function shaderGlslSamplers_escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function shaderGlslSamplers_sanitizeResourceName(name) {
+    return name.replace(/[^A-Za-z0-9_]/g, "_").replace(/_+$/g, "");
+}
+function parseSamplerOnlyStructs(source) {
+    const structs = new Map();
+    const regex = /\bstruct\s+([A-Za-z_]\w*)\s*\{([\s\S]*?)\}\s*;/g;
+    for (let match = regex.exec(source); match !== null; match = regex.exec(source)) {
+        const fields = [];
+        let totalFields = 0;
+        const fieldRegex = /^\s*(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*(?:\[\s*(\d+)\s*\])?\s*;/gm;
+        for (let field = fieldRegex.exec(match[2]); field !== null; field = fieldRegex.exec(match[2])) {
+            totalFields++;
+            if (!SAMPLER_TYPE_PATTERN.test(field[1]))
+                continue;
+            fields.push({
+                glslType: field[1],
+                name: field[2],
+                size: field[3] ? Math.max(1, Number(field[3])) : 1,
+            });
+        }
+        if (fields.length > 0 && fields.length === totalFields) {
+            structs.set(match[1], { name: match[1], fields });
+        }
+    }
+    return structs;
+}
+function parseSamplerStructParam(raw, structs) {
+    const normalized = raw.trim()
+        .replace(/^(?:const|in|out|inout)\s+/, "")
+        .replace(/^(?:lowp|mediump|highp)\s+/, "");
+    const match = /^([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*(?:\[\s*(\d+)\s*\])?$/.exec(normalized);
+    if (!match)
+        return null;
+    const struct = structs.get(match[1]);
+    return struct ? { name: match[2], struct, size: match[3] ? Math.max(1, Number(match[3])) : 1 } : null;
+}
+function samplerStructExpansions(parameterName, struct, parameterSize) {
+    const expansions = [];
+    for (let parameterIndex = 0; parameterIndex < parameterSize; parameterIndex++) {
+        const parameterSuffix = parameterSize > 1 ? `[${parameterIndex}]` : "";
+        for (const field of struct.fields) {
+            for (let fieldIndex = 0; fieldIndex < field.size; fieldIndex++) {
+                const fieldSuffix = field.size > 1 ? `[${fieldIndex}]` : "";
+                const suffix = `${parameterSuffix}.${field.name}${fieldSuffix}`;
+                expansions.push({
+                    suffix,
+                    name: shaderGlslSamplers_sanitizeResourceName(`${parameterName}${suffix}`),
+                    glslType: field.glslType,
+                });
+            }
+        }
+    }
+    return expansions;
+}
+function rewriteSamplerStructCalls(source, lowerings, samplers) {
+    const samplerBySourceName = new Map(samplers.filter((sampler) => sampler.source_name).map((sampler) => [sampler.source_name, sampler.name]));
+    let out = source;
+    for (const lowering of lowerings) {
+        let result = "";
+        let cursor = 0;
+        const callRegex = new RegExp(`\\b${shaderGlslSamplers_escapeRegExp(lowering.name)}\\s*\\(`, "g");
+        for (let match = callRegex.exec(out); match !== null; match = callRegex.exec(out)) {
+            const open = callRegex.lastIndex - 1;
+            const close = shaderGlslSamplers_findMatchingParen(out, open);
+            if (close < 0)
+                break;
+            const next = out.slice(close + 1).match(/^\s*([;{])/);
+            const statementStart = Math.max(out.lastIndexOf(";", match.index - 1), out.lastIndexOf("{", match.index - 1), out.lastIndexOf("}", match.index - 1), out.lastIndexOf("\n", match.index - 1)) + 1;
+            const prefix = out.slice(statementStart, match.index);
+            const isPrototype = !!(next && next[1] === ";" && /^\s*(?:[A-Za-z_]\w*\s+)+$/.test(prefix));
+            if ((next && next[1] === "{") || isPrototype) {
+                callRegex.lastIndex = close + 1;
+                continue;
+            }
+            const args = shaderGlslSamplers_splitTopLevelArguments(out.slice(open + 1, close));
+            const loweringByIndex = new Map(lowering.params.map((param) => [param.index, param]));
+            const rewritten = [];
+            for (let index = 0; index < args.length; index++) {
+                const param = loweringByIndex.get(index);
+                if (!param) {
+                    rewritten.push(args[index].trim());
+                    continue;
+                }
+                const argument = args[index].trim();
+                for (const expansion of param.expansions) {
+                    const sourceName = `${argument}${expansion.suffix}`.replace(/\s+/g, "");
+                    rewritten.push(samplerBySourceName.get(sourceName) || shaderGlslSamplers_sanitizeResourceName(sourceName));
+                }
+            }
+            result += out.slice(cursor, match.index);
+            result += `${lowering.name}(${rewritten.join(", ")})`;
+            cursor = close + 1;
+            callRegex.lastIndex = close + 1;
+        }
+        if (cursor !== 0)
+            out = result + out.slice(cursor);
+    }
+    return out;
+}
+function lowerSamplerStructFunctionParameters(source, samplers) {
+    const structs = parseSamplerOnlyStructs(source);
+    if (structs.size === 0)
+        return source;
+    const loweringByName = new Map();
+    let out = source.replace(STRUCT_FUNCTION_SIGNATURE, (full, prefix, functionName, rawParams, suffix) => {
+        const params = shaderGlslSamplers_splitTopLevelArguments(rawParams);
+        const structParams = [];
+        const rewrittenParams = [];
+        for (let index = 0; index < params.length; index++) {
+            const parsed = parseSamplerStructParam(params[index], structs);
+            if (!parsed) {
+                rewrittenParams.push(params[index].trim());
+                continue;
+            }
+            const expansions = samplerStructExpansions(parsed.name, parsed.struct, parsed.size);
+            structParams.push({ index, name: parsed.name, expansions });
+            for (const expansion of expansions) {
+                rewrittenParams.push(`${expansion.glslType} ${expansion.name}`);
+            }
+        }
+        if (structParams.length === 0)
+            return full;
+        loweringByName.set(functionName, { name: functionName, params: structParams });
+        return `${prefix}(${rewrittenParams.join(", ")})${suffix}`;
+    });
+    const lowerings = Array.from(loweringByName.values());
+    if (lowerings.length === 0)
+        return source;
+    for (const lowering of lowerings) {
+        for (const param of lowering.params) {
+            for (const expansion of param.expansions) {
+                const access = `${param.name}${expansion.suffix}`;
+                const accessPattern = new RegExp(`\\b${shaderGlslSamplers_escapeRegExp(access)}(?=$|[^A-Za-z0-9_])`, "g");
+                out = out.replace(accessPattern, expansion.name);
+            }
+        }
+    }
+    out = rewriteSamplerStructCalls(out, lowerings, samplers);
+    for (const struct of structs.values()) {
+        out = out.replace(new RegExp(`\\bstruct\\s+${shaderGlslSamplers_escapeRegExp(struct.name)}\\s*\\{[\\s\\S]*?\\}\\s*;`, "g"), "");
+    }
+    return out;
+}
+function samplerGroups(samplers) {
+    const groups = new Map();
+    for (const sampler of samplers) {
+        if (!sampler.array_name)
+            continue;
+        let group = groups.get(sampler.array_name);
+        if (!group) {
+            group = { name: sampler.array_name, elements: [] };
+            groups.set(sampler.array_name, group);
+        }
+        group.elements.push(sampler);
+    }
+    for (const group of groups.values()) {
+        group.elements.sort((a, b) => (a.array_index || 0) - (b.array_index || 0));
+    }
+    return groups;
+}
+function shaderGlslSamplers_findMatchingParen(source, openIndex) {
+    let depth = 0;
+    for (let i = openIndex; i < source.length; i++) {
+        if (source[i] === "(")
+            depth++;
+        else if (source[i] === ")" && --depth === 0)
+            return i;
+    }
+    return -1;
+}
+function shaderGlslSamplers_splitTopLevelArguments(source) {
+    const args = [];
+    let start = 0;
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let braceDepth = 0;
+    for (let i = 0; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === "(")
+            parenDepth++;
+        else if (ch === ")")
+            parenDepth--;
+        else if (ch === "[")
+            bracketDepth++;
+        else if (ch === "]")
+            bracketDepth--;
+        else if (ch === "{")
+            braceDepth++;
+        else if (ch === "}")
+            braceDepth--;
+        else if (ch === "," && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
+            args.push(source.slice(start, i).trim());
+            start = i + 1;
+        }
+    }
+    args.push(source.slice(start).trim());
+    return args;
+}
+function sampleResultType(glslType) {
+    if (glslType.startsWith("isampler"))
+        return "ivec4";
+    if (glslType.startsWith("usampler"))
+        return "uvec4";
+    return "vec4";
+}
+function sampleCoordinateType(glslType) {
+    return glslType.endsWith("2D") ? "vec2" : "vec3";
+}
+function helperName(group, argumentCount) {
+    return `_hyd_texture_sampler_array_${group.elements[0].name.replace(/_0$/, "")}_${argumentCount}`;
+}
+function makeTextureHelper(group, argumentCount, stage) {
+    const glslType = group.elements[0].glsl_type;
+    const resultType = sampleResultType(glslType);
+    const params = ["int index", `${sampleCoordinateType(glslType)} coord`];
+    if (argumentCount === 3) {
+        params.push("float bias");
+    }
+    const lines = [`${resultType} ${helperName(group, argumentCount)}(${params.join(", ")}) {`];
+    for (let i = 0; i < group.elements.length; i++) {
+        const element = group.elements[i];
+        const combinedSampler = `${glslType}(${element.name}T, ${element.name}S)`;
+        const sample = stage === "fragment"
+            ? `texture(${combinedSampler}, coord${argumentCount === 3 ? ", bias" : ""})`
+            : `textureLod(${combinedSampler}, coord, 0.0)`;
+        if (i < group.elements.length - 1)
+            lines.push(`  if (index == ${i}) return ${sample};`);
+        else
+            lines.push(`  return ${sample};`);
+    }
+    lines.push("}");
+    return lines.join("\n");
+}
+function lowerDynamicSamplerArrayTextureCalls(source, samplers, stage = "fragment") {
+    const groups = samplerGroups(samplers);
+    if (groups.size === 0)
+        return { source, helpers: [] };
+    const helperKeys = new Map();
+    let result = "";
+    let cursor = 0;
+    const callRegex = /\btexture\s*\(/g;
+    for (let match = callRegex.exec(source); match !== null; match = callRegex.exec(source)) {
+        const open = callRegex.lastIndex - 1;
+        const close = shaderGlslSamplers_findMatchingParen(source, open);
+        if (close < 0)
+            break;
+        const args = shaderGlslSamplers_splitTopLevelArguments(source.slice(open + 1, close));
+        if (args.length < 2 || args.length > 3) {
+            callRegex.lastIndex = close + 1;
+            continue;
+        }
+        const arrayAccess = /^([A-Za-z_]\w*)\s*\[([\s\S]+)\]$/.exec(args[0]);
+        const group = arrayAccess ? groups.get(arrayAccess[1]) : undefined;
+        if (!group) {
+            callRegex.lastIndex = close + 1;
+            continue;
+        }
+        const indexExpression = arrayAccess[2].trim();
+        const constantIndex = /^\d+$/.test(indexExpression) ? Number(indexExpression) : -1;
+        let replacement;
+        if (constantIndex >= 0 && constantIndex < group.elements.length) {
+            const rewrittenArgs = args.slice();
+            rewrittenArgs[0] = group.elements[constantIndex].name;
+            replacement = `texture(${rewrittenArgs.join(", ")})`;
+        }
+        else {
+            const key = `${group.name}:${args.length}`;
+            helperKeys.set(key, { group, argumentCount: args.length });
+            replacement = `${helperName(group, args.length)}(int(${indexExpression}), ${args.slice(1).join(", ")})`;
+        }
+        result += source.slice(cursor, match.index) + replacement;
+        cursor = close + 1;
+        callRegex.lastIndex = close + 1;
+    }
+    return {
+        source: cursor === 0 ? source : result + source.slice(cursor),
+        helpers: Array.from(helperKeys.values()).map(({ group, argumentCount }) => makeTextureHelper(group, argumentCount, stage)),
+    };
+}
+
 ;// ./src/components/shaderTranslator.ts
+
+
+
+
+
+
+
 
 
 
@@ -8931,7 +15121,10 @@ const DEFAULT_WASM_BASE_URL = (() => {
 function locateBundledWasm(path) {
     return DEFAULT_WASM_BASE_URL ? new URL(path, DEFAULT_WASM_BASE_URL).href : path;
 }
-const GLOBAL_DECLARATION_REGEX = /\b(?:layout\s*\([^)]*\)\s*)?(?:(?:lowp|mediump|highp)\s+)?((?:(?:flat|smooth|noperspective|centroid|sample)\s+)*)(attribute|uniform|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([^;]+)\s*;/g;
+function compiledShaderSource(shader) {
+    return shader.compiled_glsl_shader || shader.glsl_shader;
+}
+const GLOBAL_DECLARATION_REGEX = /\b(?:layout\s*\([^)]*\)\s*)?(?:invariant\s+)?(?:(?:lowp|mediump|highp)\s+)?((?:(?:flat|smooth|noperspective|centroid|sample)\s+)*)(attribute|uniform|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([^;]+)\s*;/g;
 const SPV_OP_NAME = 5;
 const SPV_OP_TYPE_SAMPLED_IMAGE = 27;
 const SPV_OP_TYPE_POINTER = 32;
@@ -8958,7 +15151,9 @@ function shaderTranslator_wordBoundaryReplace(source, from, to) {
 function sourceNameReplace(source, from, to) {
     const parts = from.split(".");
     if (parts.length === 1) {
-        return shaderTranslator_wordBoundaryReplace(source, from, to);
+        if (/^[A-Za-z_]\w*$/.test(from))
+            return shaderTranslator_wordBoundaryReplace(source, from, to);
+        return source.replace(new RegExp(`(^|[^A-Za-z0-9_])${shaderTranslator_escapeRegExp(from)}(?=$|[^A-Za-z0-9_])`, "g"), (_match, prefix) => `${prefix}${to}`);
     }
     const pattern = parts
         .map((part) => shaderTranslator_escapeRegExp(part))
@@ -8988,6 +15183,68 @@ function shaderTranslator_isTopLevelAt(source, index) {
     }
     return braceDepth === 0 && parenDepth === 0;
 }
+function maskGlslComments(source) {
+    const masked = source.split("");
+    let lineComment = false;
+    let blockComment = false;
+    for (let index = 0; index < source.length; index++) {
+        const ch = source[index];
+        const next = source[index + 1];
+        if (lineComment) {
+            if (ch === "\n") {
+                lineComment = false;
+            }
+            else {
+                masked[index] = " ";
+            }
+            continue;
+        }
+        if (blockComment) {
+            if (ch === "*" && next === "/") {
+                masked[index] = " ";
+                masked[index + 1] = " ";
+                blockComment = false;
+                index++;
+            }
+            else if (ch !== "\n") {
+                masked[index] = " ";
+            }
+            continue;
+        }
+        if (ch === "/" && next === "/") {
+            masked[index] = " ";
+            masked[index + 1] = " ";
+            lineComment = true;
+            index++;
+        }
+        else if (ch === "/" && next === "*") {
+            masked[index] = " ";
+            masked[index + 1] = " ";
+            blockComment = true;
+            index++;
+        }
+    }
+    return masked.join("");
+}
+function replaceTopLevelGlobalDeclarations(source, replacement) {
+    const masked = maskGlslComments(source);
+    const regex = new RegExp(GLOBAL_DECLARATION_REGEX.source, GLOBAL_DECLARATION_REGEX.flags);
+    let result = "";
+    let cursor = 0;
+    for (let match = regex.exec(masked); match !== null; match = regex.exec(masked)) {
+        if (!shaderTranslator_isTopLevelAt(masked, match.index))
+            continue;
+        result += source.slice(cursor, match.index);
+        result += replacement(source.slice(match.index, regex.lastIndex), match[1], match[2], match[3], match[4], match.index);
+        cursor = regex.lastIndex;
+    }
+    return result + source.slice(cursor);
+}
+function normalizeUnsupportedInvariantPragmas(source) {
+    return source
+        .replace(/^\s*#\s*pragma\b[^\r\n]*$/gmi, "")
+        .replace(/^\s*invariant\s+[A-Za-z_]\w*\s*;\s*$/gmi, "");
+}
 function pruneUnusedShaderResources(metadata, wgsl) {
     const removedUniforms = [];
     const removedSamplers = [];
@@ -8999,7 +15256,9 @@ function pruneUnusedShaderResources(metadata, wgsl) {
         return keep;
     });
     metadata.samplers = metadata.samplers.filter((sampler) => {
-        const keep = referencesIdentifier(wgsl, `${sampler.name}S`) || referencesIdentifier(wgsl, `${sampler.name}T`);
+        const groupUsed = sampler.array_name && metadata.samplers.some((item) => item.array_name === sampler.array_name &&
+            (referencesIdentifier(wgsl, `${item.name}S`) || referencesIdentifier(wgsl, `${item.name}T`)));
+        const keep = groupUsed || referencesIdentifier(wgsl, `${sampler.name}S`) || referencesIdentifier(wgsl, `${sampler.name}T`);
         if (!keep) {
             removedSamplers.push(sampler.name);
         }
@@ -9018,25 +15277,35 @@ function uniqueByName(items) {
     }
     return out;
 }
-function assignLocations(items, boundLocations = new Map()) {
+function shaderTranslator_attributeLocationSpan(item) {
+    const matrix = /^mat([2-4])(?:x[2-4])?$/.exec(item.glsl_type);
+    const elementSpan = matrix ? Number(matrix[1]) : 1;
+    return elementSpan * (item.is_array ? Math.max(1, item.size || 1) : 1);
+}
+function assignLocations(items, boundLocations = new Map(), locationSpan = () => 1) {
     const locations = new Map();
     const usedLocations = new Set();
     for (const item of items) {
-        const boundLocation = boundLocations.get(item.name);
+        const boundLocation = boundLocations.get(item.source_name || item.name) ?? boundLocations.get(item.name);
         if (boundLocation !== undefined && !locations.has(item.name)) {
             locations.set(item.name, boundLocation);
-            usedLocations.add(boundLocation);
+            for (let offset = 0; offset < locationSpan(item); offset++) {
+                usedLocations.add(boundLocation + offset);
+            }
         }
     }
     let nextLocation = 0;
     for (const item of items) {
         if (locations.has(item.name))
             continue;
-        while (usedLocations.has(nextLocation)) {
+        const span = locationSpan(item);
+        while (Array.from({ length: span }, (_, offset) => nextLocation + offset).some((location) => usedLocations.has(location))) {
             nextLocation++;
         }
         locations.set(item.name, nextLocation);
-        usedLocations.add(nextLocation);
+        for (let offset = 0; offset < span; offset++) {
+            usedLocations.add(nextLocation + offset);
+        }
     }
     return locations;
 }
@@ -9063,8 +15332,8 @@ function isFragmentOutput(declaration, stage) {
 function prepareSourceAndDeclarations(source) {
     const preamble = ["#version 310 es"];
     const seenPreamble = new Set(preamble);
-    let body = source.replace(/^\s*#version[^\n]*(?:\n|$)/gm, "");
-    body = body.replace(/^\s*(#extension[^\n]*|#define[^\n]*|precision\s+(?:lowp|mediump|highp)\s+\w+\s*;)\s*$/gm, (line) => {
+    let body = stripGlslVersionDirectives(source);
+    body = body.replace(/^\s*(#extension[^\n]*|precision\s+(?:lowp|mediump|highp)\s+\w+\s*;)\s*$/gm, (line) => {
         const trimmed = line.trim();
         if (!seenPreamble.has(trimmed)) {
             seenPreamble.add(trimmed);
@@ -9078,10 +15347,7 @@ function prepareSourceAndDeclarations(source) {
         seenPreamble.add(defaultFloatPrecision);
     }
     const declarations = [];
-    body = body.replace(GLOBAL_DECLARATION_REGEX, (full, interpolation, qualifier, glslType, rawNames, offset) => {
-        if (!shaderTranslator_isTopLevelAt(body, offset)) {
-            return full;
-        }
+    body = replaceTopLevelGlobalDeclarations(body, (_full, interpolation, qualifier, glslType, rawNames) => {
         for (const parsed of parseDeclarationNames(rawNames)) {
             declarations.push({
                 qualifier,
@@ -9100,23 +15366,97 @@ function prepareSourceAndDeclarations(source) {
 }
 function normalizeLegacyFragmentBuiltins(source) {
     let out = source;
-    const usesFragColor = /\bgl_FragColor\b/.test(out);
+    const usesFragColor = /\bgl_FragColor\b|\bgl_FragData\s*\[\s*0\s*\]/.test(out);
     out = shaderTranslator_wordBoundaryReplace(out, "gl_FragColor", "_hyd_fragColor");
+    out = out.replace(/\bgl_FragData\s*\[\s*0\s*\]/g, "_hyd_fragColor");
     out = shaderTranslator_wordBoundaryReplace(out, "texture2D", "texture");
     out = shaderTranslator_wordBoundaryReplace(out, "textureCube", "texture");
     out = shaderTranslator_wordBoundaryReplace(out, "texture2DProj", "textureProj");
+    out = shaderTranslator_wordBoundaryReplace(out, "texture2DProjLod", "textureProjLod");
     out = shaderTranslator_wordBoundaryReplace(out, "texture2DProjLodEXT", "textureProjLod");
+    out = shaderTranslator_wordBoundaryReplace(out, "texture2DLod", "textureLod");
     out = shaderTranslator_wordBoundaryReplace(out, "texture2DLodEXT", "textureLod");
+    out = shaderTranslator_wordBoundaryReplace(out, "textureCubeLod", "textureLod");
     out = shaderTranslator_wordBoundaryReplace(out, "textureCubeLodEXT", "textureLod");
     return { source: out, usesFragColor };
 }
-function normalizeWebGlBuiltinsForVulkanGlsl(source) {
+function normalizeWebGlBuiltinsForVulkanGlsl(source, webglVersion = 1) {
     let out = source;
     out = shaderTranslator_wordBoundaryReplace(out, "gl_VertexID", "gl_VertexIndex");
     out = shaderTranslator_wordBoundaryReplace(out, "gl_InstanceID", "gl_InstanceIndex");
+    if (webglVersion === 1) {
+        out = normalizeWebGl1BuiltinLimits(out);
+        out = shaderTranslator_wordBoundaryReplace(out, "__VERSION__", "100");
+    }
     out = out.replace(/\b1(?:\.0)?\s*\/\s*0(?:\.0)?\b/g, "3.4028234663852886e38");
     out = out.replace(/-\s*3\.4028234663852886e38/g, "-3.4028234663852886e38");
-    return out;
+    return clampOutOfRangeFloatLiterals(out);
+}
+function clampOutOfRangeFloatLiterals(source) {
+    const masked = maskGlslComments(source);
+    const regex = /(?<![A-Za-z0-9_.])(?:\d+\.\d*|\.\d+|\d+[eE][+\-]?\d+)(?:[eE][+\-]?\d+)?(?![A-Za-z0-9_.])/g;
+    let result = "";
+    let cursor = 0;
+    for (let match = regex.exec(masked); match !== null; match = regex.exec(masked)) {
+        const value = Number(match[0]);
+        if (Number.isFinite(value) && value <= 3.4028234663852886e38)
+            continue;
+        result += source.slice(cursor, match.index);
+        result += "3.4028234663852886e38";
+        cursor = regex.lastIndex;
+    }
+    return cursor === 0 ? source : result + source.slice(cursor);
+}
+function demoteConstDeclarationsForVulkanGlsl(source) {
+    return source.replace(/\bconst\s+((?:(?:lowp|mediump|highp)\s+)?[A-Za-z_]\w*\s+)([A-Za-z_]\w*)\s*=\s*([^;]+);/g, (full, typeAndSpacing, name, initializer) => {
+        const requiresConstant = new RegExp(`\\[\\s*${shaderTranslator_escapeRegExp(name)}\\s*\\]`).test(source) ||
+            new RegExp(`\\bcase\\s+${shaderTranslator_escapeRegExp(name)}\\s*:`).test(source);
+        return requiresConstant ? full : `${typeAndSpacing}${name} = ${initializer};`;
+    });
+}
+function ensureVertexPositionBuiltin(source) {
+    const withoutComments = source
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\/\/.*$/gm, "");
+    if (/\bgl_Position\b/.test(withoutComments))
+        return source;
+    return source.replace(/\bvoid\s+main\s*\(\s*(?:void\s*)?\)\s*\{/, (signature) => `${signature}\n  gl_Position = vec4(0.0);`);
+}
+function normalizeWebGlFragCoord(source, metadata) {
+    if (!metadata.uniforms.some((uniform) => uniform.name === FRAG_COORD_HEIGHT_UNIFORM_NAME)) {
+        return source;
+    }
+    const invariantStatements = [];
+    let body = source.replace(/\binvariant\s+gl_FragCoord\s*;/g, (statement) => {
+        const placeholder = `__HYD_FRAG_COORD_INVARIANT_${invariantStatements.length}__`;
+        invariantStatements.push(statement);
+        return placeholder;
+    });
+    body = shaderTranslator_wordBoundaryReplace(body, "gl_FragCoord", "_hydWebGlFragCoord()");
+    invariantStatements.forEach((statement, index) => {
+        body = shaderTranslator_wordBoundaryReplace(body, `__HYD_FRAG_COORD_INVARIANT_${index}__`, statement);
+    });
+    return `
+vec4 _hydWebGlFragCoord() {
+  return vec4(
+      gl_FragCoord.x,
+      ${FRAG_COORD_HEIGHT_UNIFORM_NAME} - gl_FragCoord.y,
+      gl_FragCoord.z,
+      gl_FragCoord.w);
+}
+
+${body}`;
+}
+function normalizeWebGlPointCoord(source) {
+    if (!/\bgl_PointCoord\b/.test(maskGlslComments(source)))
+        return source;
+    const body = shaderTranslator_wordBoundaryReplace(source, "gl_PointCoord", "_hydWebGlPointCoord()");
+    return `
+vec2 _hydWebGlPointCoord() {
+  return vec2(0.5, 0.5);
+}
+
+${body}`;
 }
 function makeSamplerBindingDeclarations(metadata, layout) {
     const lines = [];
@@ -9135,7 +15475,11 @@ function makeUniformBlockDeclarations(metadata, declarations) {
     }
     const lines = ["layout(std140, set = 0, binding = 0) uniform HydUniformObject {"];
     for (const uniform of metadata.uniforms) {
-        lines.push(`  ${uniform.glsl_type} ${uniform.name}${declarationArraySuffix(declarations, uniform.name)};`);
+        const matrixArrayStorage = matrixArrayStorageDeclaration(uniform);
+        const arraySuffix = uniform.is_array
+            ? `[${Math.max(1, uniform.size || 1)}]`
+            : declarationArraySuffix(declarations, uniform.name);
+        lines.push(`  ${matrixArrayStorage || `${uniform.glsl_type} ${uniform.name}${arraySuffix};`}`);
     }
     lines.push("};");
     return lines;
@@ -9185,15 +15529,19 @@ function addSamplerPrecisionDeclarations(lines, metadata) {
         }
     }
 }
-function rewriteMetadataSourceNames(source, metadata) {
+function rewriteMetadataSourceNames(source, metadata, varyings = []) {
     let out = source;
-    for (const uniform of metadata.uniforms) {
-        if (uniform.source_name && uniform.source_name !== uniform.name) {
-            out = sourceNameReplace(out, uniform.source_name, uniform.name);
+    for (const value of [...metadata.attributes, ...metadata.uniforms, ...varyings]) {
+        if (value.source_name && value.source_name !== value.name) {
+            if (/^[A-Za-z_]\w*$/.test(value.source_name))
+                continue;
+            out = sourceNameReplace(out, value.source_name, value.name);
         }
     }
     for (const sampler of metadata.samplers) {
         if (sampler.source_name && sampler.source_name !== sampler.name) {
+            if (/^[A-Za-z_]\w*$/.test(sampler.source_name))
+                continue;
             out = sourceNameReplace(out, sampler.source_name, sampler.name);
         }
     }
@@ -9554,16 +15902,20 @@ function patchGlslangSampledTextureVariables(spirv, samplers) {
     return new Uint32Array(finalWords);
 }
 function buildGlslangSource(source, stage, metadata, layout, options = {}) {
-    const prepared = prepareSourceAndDeclarations(source);
+    const anonymousStructSource = normalizeAnonymousUniformStructs(source);
+    const structUniformPlan = planValueStructUniforms(anonymousStructSource);
+    const invariantNormalizedSource = normalizeUnsupportedInvariantPragmas(maskStaticallyInactivePreprocessorBranches(anonymousStructSource, options.webglVersion || 1));
+    const lineNormalizedSource = materializeWebGlLineMacros(invariantNormalizedSource);
+    const bridgeSource = options.webglVersion === 2
+        ? lineNormalizedSource
+        : bridgeGlslEs100Identifiers(lineNormalizedSource);
+    const prepared = prepareSourceAndDeclarations(bridgeSource);
     const lines = [prepared.source.trimEnd()];
     const declarations = prepared.declarations;
-    const sourceWithoutPreamble = source
-        .replace(/^\s*#version[^\n]*(?:\n|$)/gm, "")
-        .replace(/^\s*(#extension[^\n]*|#define[^\n]*|precision\s+(?:lowp|mediump|highp)\s+\w+\s*;)\s*$/gm, "");
-    const bodyStart = sourceWithoutPreamble.replace(GLOBAL_DECLARATION_REGEX, (full, _interpolation, _qualifier, _glslType, _rawNames, offset) => {
-        return shaderTranslator_isTopLevelAt(sourceWithoutPreamble, offset) ? "" : full;
-    });
-    let body = bodyStart;
+    const sourceWithoutPreamble = stripGlslVersionDirectives(bridgeSource)
+        .replace(/^\s*(#extension[^\n]*|precision\s+(?:lowp|mediump|highp)\s+\w+\s*;)\s*$/gm, "");
+    const bodyStart = replaceTopLevelGlobalDeclarations(sourceWithoutPreamble, () => "");
+    let body = stripProvablyEmptyTopLevelMacroInvocations(bodyStart);
     addSamplerPrecisionDeclarations(lines, metadata);
     if (stage === "vertex") {
         for (const attribute of metadata.attributes) {
@@ -9571,7 +15923,9 @@ function buildGlslangSource(source, stage, metadata, layout, options = {}) {
             lines.push(`layout(location = ${location === undefined ? 0 : location}) in ${attribute.glsl_type} ${attribute.name};`);
         }
     }
-    const stageVaryings = uniqueByName(scanGlslDeclarations(source, stage).varyings);
+    const stageVaryings = uniqueByName(scanGlslDeclarations(source, stage, {
+        includeUnusedVaryings: stage === "vertex",
+    }).varyings.filter((varying) => layout.varyingLocations.has(varying.name)));
     for (const varying of stageVaryings) {
         const location = layout.varyingLocations.get(varying.name);
         const direction = stage === "vertex" ? "out" : "in";
@@ -9584,11 +15938,31 @@ function buildGlslangSource(source, stage, metadata, layout, options = {}) {
             lines.push(`layout(location = ${fragmentOutputLocation++}) out ${declaration.glslType} ${declaration.name}${declaration.arraySuffix};`);
         }
     }
-    const normalized = stage === "fragment" ? normalizeLegacyFragmentBuiltins(body) : { source: body, usesFragColor: false };
-    normalized.source = normalizeWebGlBuiltinsForVulkanGlsl(normalized.source);
-    normalized.source = rewriteMetadataSourceNames(normalized.source, metadata);
+    body = renameUserDefinedFunctions(body);
+    const normalized = normalizeLegacyFragmentBuiltins(body);
+    normalized.source = lowerSamplerStructFunctionParameters(normalized.source, metadata.samplers);
+    const samplerArrayLowering = lowerDynamicSamplerArrayTextureCalls(normalized.source, metadata.samplers, stage);
+    normalized.source = samplerArrayLowering.source;
+    normalized.source = normalizeWebGlBuiltinsForVulkanGlsl(normalized.source, options.webglVersion);
+    normalized.source = normalizeWebGlDepthRange(normalized.source);
+    if (stage === "vertex") {
+        normalized.source = lowerWebGlPointSizeToPrivateState(normalized.source);
+        normalized.source = ensureVertexPositionBuiltin(normalized.source);
+        normalized.source = wrapVertexMainForWebGpuClipSpace(normalized.source);
+    }
+    else {
+        normalized.source = normalizeWebGlFragCoord(normalized.source, metadata);
+        normalized.source = normalizeWebGlPointCoord(normalized.source);
+    }
+    normalized.source = rewriteMetadataSourceNames(normalized.source, metadata, stageVaryings);
+    normalized.source = rewriteStructUniformAggregateReads(normalized.source, structUniformPlan);
     body = lowerSamplerFunctionParameters(normalized.source);
     body = rewriteSamplerExpressions(body, metadata);
+    body = rewriteMatrixArrayUniformReads(body, metadata.uniforms);
+    if (options.webglVersion !== 2) {
+        body = normalizeEs100SequenceArrayDimensions(body);
+        body = lowerEs100GlobalInitializers(body);
+    }
     if (stage === "fragment" && options.preserveImplicitTextureLod === false) {
         body = rewriteFragmentImplicitTextureLod(body);
     }
@@ -9597,7 +15971,11 @@ function buildGlslangSource(source, stage, metadata, layout, options = {}) {
     }
     lines.push(...makeUniformBlockDeclarations(metadata, declarations));
     lines.push(...makeSamplerBindingDeclarations(metadata, layout));
+    lines.push(...makeMatrixArrayLoaders(metadata.uniforms));
+    lines.push(...samplerArrayLowering.helpers);
     lines.push("");
+    const leadingLineBreaks = (body.match(/^[\t \r\n]*/)?.[0].match(/\n/g) || []).length;
+    lines.push(`#line ${leadingLineBreaks + 1}`);
     lines.push(body.trim());
     return `${lines.filter((line) => line.length > 0).join("\n")}\n`;
 }
@@ -9610,36 +15988,17 @@ function stripResourceDeclarations(wgsl) {
 function uniformReadExpression(uniform) {
     return `_hyd_uniforms_.${uniform.name}`;
 }
-const WGSL_RESERVED_IDENTIFIER_RENAMES = {
-    target: "target_",
-};
-function replaceBareIdentifier(source, from, to) {
-    return source.replace(new RegExp(`\\b${shaderTranslator_escapeRegExp(from)}\\b`, "g"), (match, offset) => {
-        if (offset > 0 && source[offset - 1] === ".") {
-            return match;
-        }
-        return to;
-    });
-}
-function renameReservedWgslIdentifiers(wgsl) {
-    let out = wgsl;
-    for (const [reserved, replacement] of Object.entries(WGSL_RESERVED_IDENTIFIER_RENAMES)) {
-        const declarationRegex = new RegExp(`\\b(?:var(?:<[^>]+>)?|let)\\s+${shaderTranslator_escapeRegExp(reserved)}\\b|[(,]\\s*${shaderTranslator_escapeRegExp(reserved)}\\s*:`, "m");
-        if (declarationRegex.test(out)) {
-            out = replaceBareIdentifier(out, reserved, replacement);
-        }
-    }
-    return out;
-}
 function normalizeTintWgsl(wgsl, metadata) {
+    const uniformVariableNames = wgslUniformVariableNames(wgsl);
+    wgsl = synchronizeTintUniformTypes(wgsl, metadata);
     let out = stripResourceDeclarations(wgsl);
     out = renameReservedWgslIdentifiers(out);
     const uniformPlaceholders = [];
     for (const uniform of metadata.uniforms) {
         const placeholder = `__HYD_UNIFORM_${uniformPlaceholders.length}__`;
         uniformPlaceholders.push([placeholder, uniformReadExpression(uniform)]);
-        out = out.replace(new RegExp(`\\b[A-Za-z_]\\w*\\s*\\.\\s*${shaderTranslator_escapeRegExp(uniform.name)}\\b`, "g"), placeholder);
-        out = shaderTranslator_wordBoundaryReplace(out, uniform.name, placeholder);
+        out = replaceWgslMemberAccess(out, uniformVariableNames, uniform.name, placeholder);
+        out = replaceBareWgslIdentifier(out, uniform.name, placeholder);
     }
     for (const sampler of metadata.samplers) {
         out = out.replace(new RegExp(`textureSample\\s*\\(\\s*${sampler.name}\\s*,`, "g"), `textureSample(${sampler.name}T, ${sampler.name}S,`);
@@ -9649,7 +16008,6 @@ function normalizeTintWgsl(wgsl, metadata) {
     for (const [placeholder, value] of uniformPlaceholders) {
         out = shaderTranslator_wordBoundaryReplace(out, placeholder, value);
     }
-    out = out.replace(/\barr_to_mat\d+x\d+_stride_\d+\s*\(\s*(_hyd_uniforms_\.[A-Za-z_]\w*)\s*\)/g, "$1");
     return normalizeSamplerOriginCoordinates(out.trim() + "\n", metadata);
 }
 const WGSL_TEXTURE_SAMPLE_CALL = /\b(textureSample(?:Level|Bias|Grad)?)\s*\(/g;
@@ -9658,11 +16016,9 @@ function addSamplerOriginHelper(wgsl) {
         return wgsl;
     }
     const helper = `fn _hyd_samplerOriginCoord(texCoord: vec2<f32>, flipY: f32) -> vec2<f32> {\n    return vec2<f32>(texCoord.x, select(texCoord.y, 1.0 - texCoord.y, flipY > 0.5));\n}\n\n`;
-    const fragmentIndex = wgsl.search(/^\s*@fragment\b/m);
-    if (fragmentIndex < 0) {
-        return helper + wgsl;
-    }
-    return wgsl.slice(0, fragmentIndex) + helper + wgsl.slice(fragmentIndex);
+    const directivePrefix = wgsl.match(/^\s*(?:(?:(?:enable|requires)\s+[^;]+;|diagnostic\s*\([^;]+\)\s*;)\s*)+/);
+    const insertion = directivePrefix ? directivePrefix[0].length : 0;
+    return wgsl.slice(0, insertion) + helper + wgsl.slice(insertion);
 }
 function normalizeSamplerOriginCoordinates(wgsl, metadata) {
     const sampler2DNames = metadata.samplers
@@ -9754,13 +16110,13 @@ class ShaderTranslator {
         return translated;
     }
     metadataFor(shader) {
-        return shader.shader_info || makeShaderMetadata(shader.glsl_shader, shader.type);
+        return shader.shader_info || makeShaderMetadata(compiledShaderSource(shader), shader.type);
     }
     makeLayout(vertexShader, fragmentShader, boundAttributeLocations = new Map()) {
         const vertexMetadata = vertexShader ? this.metadataFor(vertexShader) : undefined;
         const fragmentMetadata = fragmentShader ? this.metadataFor(fragmentShader) : undefined;
-        const vertexVaryings = vertexShader ? scanGlslDeclarations(vertexShader.glsl_shader, "vertex").varyings : [];
-        const fragmentVaryings = fragmentShader ? scanGlslDeclarations(fragmentShader.glsl_shader, "fragment").varyings : [];
+        const vertexVaryings = vertexShader ? scanGlslDeclarations(compiledShaderSource(vertexShader), "vertex").varyings : [];
+        const fragmentVaryings = fragmentShader ? scanGlslDeclarations(compiledShaderSource(fragmentShader), "fragment").varyings : [];
         const samplers = uniqueByName([
             ...(vertexMetadata ? vertexMetadata.samplers : []),
             ...(fragmentMetadata ? fragmentMetadata.samplers : []),
@@ -9775,8 +16131,8 @@ class ShaderTranslator {
         samplers.forEach((sampler, index) => {
             samplerBindings.set(sampler.name, samplerOffset + index * 2);
         });
-        const attributeLocations = assignLocations(vertexMetadata ? vertexMetadata.attributes : [], boundAttributeLocations);
-        const varyingLocations = assignLocations(uniqueByName([...vertexVaryings, ...fragmentVaryings]));
+        const attributeLocations = assignLocations(vertexMetadata ? vertexMetadata.attributes : [], boundAttributeLocations, shaderTranslator_attributeLocationSpan);
+        const varyingLocations = assignLocations(uniqueByName([...vertexVaryings, ...fragmentVaryings]), new Map(), shaderTranslator_attributeLocationSpan);
         return {
             attributeLocations,
             varyingLocations,
@@ -9789,35 +16145,51 @@ class ShaderTranslator {
         };
     }
     translateShader(shader, stage, layout) {
-        const key = shader.glsl_shader;
+        const key = compiledShaderSource(shader);
         const preserveImplicitTextureLod = this.options.preserveImplicitTextureLod !== false;
         const shouldOptimizeTintWgsl = this.options.optimizeTintWgsl !== false;
+        const webglVersion = shader.webglVersion || 1;
         const runtimeKey = [
             stage,
             layout.cacheKey,
             `lod=${preserveImplicitTextureLod ? 1 : 0}`,
             `opt=${shouldOptimizeTintWgsl ? 1 : 0}`,
             `legacyTexCoord=${this.options.legacyTextureCoordinateFixups ? 1 : 0}`,
+            `webgl=${webglVersion}`,
             key,
         ].join(":");
         const cachedRuntime = this.runtimeCache.get(runtimeKey);
         if (cachedRuntime) {
             return cachedRuntime;
         }
-        const metadata = makeShaderMetadata(shader.glsl_shader, shader.type);
+        const metadata = makeShaderMetadata(key, shader.type);
         if (!this.runtimeTranslationAvailable) {
             throw new Error(`Runtime shader translator is unavailable (${stage}).`);
         }
         let glslangSource = "";
         const timingsMs = {};
+        const compatibilityFallbacks = [];
         try {
             const buildStart = nowMs();
-            glslangSource = buildGlslangSource(shader.glsl_shader, stage, metadata, layout, {
+            glslangSource = buildGlslangSource(key, stage, metadata, layout, {
                 preserveImplicitTextureLod,
+                webglVersion,
             });
             timingsMs.glslPreprocess = nowMs() - buildStart;
             const compileStart = nowMs();
-            const spirv = patchGlslangSampledTextureVariables(this.glslang.compileGLSL(glslangSource, stage, false), metadata.samplers);
+            let spirvWords;
+            try {
+                spirvWords = this.glslang.compileGLSL(glslangSource, stage, false);
+            }
+            catch (error) {
+                const relaxedConstSource = demoteConstDeclarationsForVulkanGlsl(glslangSource);
+                if (relaxedConstSource === glslangSource)
+                    throw error;
+                spirvWords = this.glslang.compileGLSL(relaxedConstSource, stage, false);
+                glslangSource = relaxedConstSource;
+                compatibilityFallbacks.push("demote-es100-const-initializers");
+            }
+            const spirv = patchGlslangSampledTextureVariables(spirvWords, metadata.samplers);
             timingsMs.glslang = nowMs() - compileStart;
             const tintStart = nowMs();
             const tintWgsl = this.tint.spirvToWgsl(spirv);
@@ -9839,6 +16211,7 @@ class ShaderTranslator {
                 collapsedOutputStructs: 0,
                 removedTemporaries: 0,
                 foldedConstructors: 0,
+                splitDeepExpressions: 0,
                 skippedPasses: [],
             };
             if (shouldOptimizeTintWgsl) {
@@ -9850,14 +16223,14 @@ class ShaderTranslator {
             }
             if (this.options.legacyTextureCoordinateFixups) {
                 const legacyFixupStart = nowMs();
-                metadata.wgsl = normalizeWebGlTextureCoordinates(wgsl, metadata, stage, shader.glsl_shader);
+                metadata.wgsl = normalizeWebGlTextureCoordinates(wgsl, metadata, stage, key);
                 timingsMs.legacyTextureCoordinateFixups = nowMs() - legacyFixupStart;
             }
             else {
                 metadata.wgsl = wgsl;
             }
             const resourcePrune = pruneUnusedShaderResources(metadata, metadata.wgsl);
-            const shaderId = `${stage}:${stableHashString(shader.glsl_shader)}:${layout.cacheKey}`;
+            const shaderId = `${stage}:${stableHashString(key)}:${layout.cacheKey}`;
             const capture = {
                 kind: "shader-stage",
                 stage,
@@ -9865,7 +16238,8 @@ class ShaderTranslator {
                 source: "runtime",
                 optimizer: optimizerStats,
                 timingsMs,
-                glsl: sourceCapture(shader.glsl_shader),
+                compatibilityFallbacks,
+                glsl: sourceCapture(key),
                 normalizedGlsl: sourceCapture(glslangSource),
                 spirv: {
                     hash: stableHashU32(spirv),
@@ -9885,6 +16259,7 @@ class ShaderTranslator {
                 legacyTextureCoordinateFixups: !!this.options.legacyTextureCoordinateFixups,
                 preserveImplicitTextureLod,
                 optimizer: optimizerStats,
+                compatibilityFallbacks,
                 resourcePrune,
                 shaderId,
                 spirv: capture.spirv,
@@ -9899,7 +16274,7 @@ class ShaderTranslator {
         }
         catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            throw new Error(`Runtime shader translation failed for ${stage} shader: ${message}\n--- original GLSL ---\n${shader.glsl_shader}\n--- normalized GLSL ---\n${glslangSource}`);
+            throw new Error(`Runtime shader translation failed for ${stage} shader: ${message}\n--- original GLSL ---\n${key}\n--- normalized GLSL ---\n${glslangSource}`);
         }
     }
 }
@@ -9907,11 +16282,251 @@ class ShaderTranslator {
 ;// ./src/webgl-static.ts
 
 
+
+
 const hydWebGLTypes = ["experimental-webgl", "webgl", "webgl2"];
+const webgl_static_NATIVE_CANVAS_GET_CONTEXT = HTMLCanvasElement.prototype.getContext;
+const nativeEnumerableApiNames = new Map();
+function getNativeEnumerableApiNames(contextType) {
+    const normalizedType = contextType === "webgl2" ? "webgl2" : "webgl";
+    const cached = nativeEnumerableApiNames.get(normalizedType);
+    if (cached)
+        return cached;
+    const names = new Set(["canvas"]);
+    const canvas = document.createElement("canvas");
+    const context = (webgl_static_NATIVE_CANVAS_GET_CONTEXT.call(canvas, normalizedType, { antialias: false }) ||
+        (normalizedType === "webgl"
+            ? webgl_static_NATIVE_CANVAS_GET_CONTEXT.call(canvas, "experimental-webgl", { antialias: false })
+            : null));
+    if (context) {
+        for (const name in context)
+            names.add(name);
+        context.getExtension("WEBGL_lose_context")?.loseContext();
+    }
+    nativeEnumerableApiNames.set(normalizedType, names);
+    return names;
+}
+const requiredObject = (brand) => ({ brand, nullable: false });
+const nullableObject = (brand) => ({ brand, nullable: true });
+const WEBGL_METHOD_ARGUMENTS = {
+    attachShader: [requiredObject("program"), requiredObject("shader")],
+    bindAttribLocation: [requiredObject("program"), "u32", "string"],
+    bindBuffer: ["u32", nullableObject("buffer")],
+    bindFramebuffer: ["u32", nullableObject("framebuffer")],
+    bindRenderbuffer: ["u32", nullableObject("renderbuffer")],
+    bindTexture: ["u32", nullableObject("texture")],
+    blendColor: ["f32", "f32", "f32", "f32"],
+    bufferSubData: ["u32", "i32"],
+    clear: ["u32"],
+    clearColor: ["f32", "f32", "f32", "f32"],
+    clearDepth: ["f32"],
+    clearStencil: ["i32"],
+    compileShader: [requiredObject("shader")],
+    copyTexImage2D: ["u32", "i32", "u32", "i32", "i32", "i32", "i32", "i32"],
+    copyTexSubImage2D: ["u32", "i32", "i32", "i32", "i32", "i32", "i32", "i32"],
+    deleteBuffer: [nullableObject("buffer")],
+    deleteFramebuffer: [nullableObject("framebuffer")],
+    deleteProgram: [nullableObject("program")],
+    deleteRenderbuffer: [nullableObject("renderbuffer")],
+    deleteShader: [nullableObject("shader")],
+    deleteTexture: [nullableObject("texture")],
+    depthMask: ["bool"],
+    depthRange: ["f32", "f32"],
+    detachShader: [requiredObject("program"), requiredObject("shader")],
+    disableVertexAttribArray: ["u32"],
+    drawArrays: ["u32", "i32", "i32"],
+    enableVertexAttribArray: ["u32"],
+    framebufferRenderbuffer: ["u32", "u32", "u32", nullableObject("renderbuffer")],
+    framebufferTexture2D: ["u32", "u32", "u32", nullableObject("texture"), "i32"],
+    getActiveAttrib: [requiredObject("program"), "u32"],
+    getActiveUniform: [requiredObject("program"), "u32"],
+    getAttachedShaders: [requiredObject("program")],
+    getAttribLocation: [requiredObject("program"), "string"],
+    getParameter: ["u32"],
+    getProgramInfoLog: [requiredObject("program")],
+    getProgramParameter: [requiredObject("program"), "u32"],
+    getShaderInfoLog: [requiredObject("shader")],
+    getShaderParameter: [requiredObject("shader"), "u32"],
+    getShaderSource: [requiredObject("shader")],
+    getUniform: [requiredObject("program"), requiredObject("uniform-location")],
+    getUniformLocation: [requiredObject("program"), "string"],
+    isBuffer: [nullableObject("buffer")],
+    isFramebuffer: [nullableObject("framebuffer")],
+    isProgram: [nullableObject("program")],
+    isRenderbuffer: [nullableObject("renderbuffer")],
+    isShader: [nullableObject("shader")],
+    isTexture: [nullableObject("texture")],
+    isVertexArray: [nullableObject("vertex-array")],
+    lineWidth: ["f32"],
+    linkProgram: [requiredObject("program")],
+    polygonOffset: ["f32", "f32"],
+    sampleCoverage: ["f32", "bool"],
+    scissor: ["i32", "i32", "i32", "i32"],
+    shaderSource: [requiredObject("shader"), "string"],
+    stencilFunc: ["u32", "i32", "u32"],
+    stencilMask: ["u32"],
+    uniform1f: [nullableObject("uniform-location"), "f32"],
+    uniform1fv: [nullableObject("uniform-location")],
+    uniform1i: [nullableObject("uniform-location"), "i32"],
+    uniform1iv: [nullableObject("uniform-location")],
+    uniform1ui: [nullableObject("uniform-location"), "u32"],
+    uniform1uiv: [nullableObject("uniform-location")],
+    uniform2f: [nullableObject("uniform-location"), "f32", "f32"],
+    uniform2fv: [nullableObject("uniform-location")],
+    uniform2i: [nullableObject("uniform-location"), "i32", "i32"],
+    uniform2iv: [nullableObject("uniform-location")],
+    uniform2ui: [nullableObject("uniform-location"), "u32", "u32"],
+    uniform2uiv: [nullableObject("uniform-location")],
+    uniform3f: [nullableObject("uniform-location"), "f32", "f32", "f32"],
+    uniform3fv: [nullableObject("uniform-location")],
+    uniform3i: [nullableObject("uniform-location"), "i32", "i32", "i32"],
+    uniform3iv: [nullableObject("uniform-location")],
+    uniform3ui: [nullableObject("uniform-location"), "u32", "u32", "u32"],
+    uniform3uiv: [nullableObject("uniform-location")],
+    uniform4f: [nullableObject("uniform-location"), "f32", "f32", "f32", "f32"],
+    uniform4fv: [nullableObject("uniform-location")],
+    uniform4i: [nullableObject("uniform-location"), "i32", "i32", "i32", "i32"],
+    uniform4iv: [nullableObject("uniform-location")],
+    uniform4ui: [nullableObject("uniform-location"), "u32", "u32", "u32", "u32"],
+    uniform4uiv: [nullableObject("uniform-location")],
+    uniformMatrix2fv: [nullableObject("uniform-location"), "bool"],
+    uniformMatrix3fv: [nullableObject("uniform-location"), "bool"],
+    uniformMatrix4fv: [nullableObject("uniform-location"), "bool"],
+    useProgram: [nullableObject("program")],
+};
+function convertWebIdlArgument(method, index, value, argument) {
+    if (typeof argument === "object") {
+        if (value === null || value === undefined) {
+            if (argument.nullable)
+                return null;
+            throw new TypeError(`${method} argument ${index + 1} is not nullable`);
+        }
+        if (typeof value !== "object" || value[HYD_WEBGL_OBJECT_BRAND] !== argument.brand) {
+            throw new TypeError(`${method} argument ${index + 1} is not a WebGL ${argument.brand}`);
+        }
+        return value;
+    }
+    switch (argument) {
+        case "bool": return Boolean(value);
+        case "f32": return Math.fround(Number(value));
+        case "i32": return Number(value) >> 0;
+        case "u32": return Number(value) >>> 0;
+        case "string": return String(value);
+    }
+}
+function convertWebIdlArguments(method, values) {
+    const signature = WEBGL_METHOD_ARGUMENTS[method];
+    if (!signature)
+        return values;
+    const converted = values.slice();
+    for (let index = 0; index < signature.length; index++) {
+        converted[index] = convertWebIdlArgument(method, index, values[index], signature[index]);
+    }
+    return converted;
+}
+const identityWebIdlArgument = (value) => value;
+function createWebIdlConverter(method, index, argument) {
+    if (typeof argument === "object") {
+        if (argument.nullable) {
+            return (value) => {
+                if (value === null || value === undefined)
+                    return null;
+                if (typeof value !== "object" || value[HYD_WEBGL_OBJECT_BRAND] !== argument.brand) {
+                    throw new TypeError(`${method} argument ${index + 1} is not a WebGL ${argument.brand}`);
+                }
+                return value;
+            };
+        }
+        return (value) => {
+            if (value === null || value === undefined) {
+                throw new TypeError(`${method} argument ${index + 1} is not nullable`);
+            }
+            if (typeof value !== "object" || value[HYD_WEBGL_OBJECT_BRAND] !== argument.brand) {
+                throw new TypeError(`${method} argument ${index + 1} is not a WebGL ${argument.brand}`);
+            }
+            return value;
+        };
+    }
+    switch (argument) {
+        case "bool": return Boolean;
+        case "f32": return (value) => Math.fround(Number(value));
+        case "i32": return (value) => Number(value) >> 0;
+        case "u32": return (value) => Number(value) >>> 0;
+        case "string": return String;
+    }
+}
+function createFacadeMethod(facade, context, property, method) {
+    const signature = WEBGL_METHOD_ARGUMENTS[property];
+    const header = Function.prototype.toString.call(method).split("{", 1)[0];
+    const needsVariableArguments = header.includes("...") || header.includes("=");
+    const arity = Math.max(method.length, signature?.length || 0);
+    const invoke = method.bind(context);
+    if (!needsVariableArguments && arity <= 10) {
+        if (!signature) {
+            switch (arity) {
+                case 0: return function () { if (this !== facade && this !== context)
+                    throw new TypeError("Illegal invocation"); return invoke(); };
+                case 1: return function (a0) { if (this !== facade && this !== context)
+                    throw new TypeError("Illegal invocation"); return invoke(a0); };
+                case 2: return function (a0, a1) { if (this !== facade && this !== context)
+                    throw new TypeError("Illegal invocation"); return invoke(a0, a1); };
+                case 3: return function (a0, a1, a2) { if (this !== facade && this !== context)
+                    throw new TypeError("Illegal invocation"); return invoke(a0, a1, a2); };
+                case 4: return function (a0, a1, a2, a3) { if (this !== facade && this !== context)
+                    throw new TypeError("Illegal invocation"); return invoke(a0, a1, a2, a3); };
+                case 5: return function (a0, a1, a2, a3, a4) { if (this !== facade && this !== context)
+                    throw new TypeError("Illegal invocation"); return invoke(a0, a1, a2, a3, a4); };
+                case 6: return function (a0, a1, a2, a3, a4, a5) { if (this !== facade && this !== context)
+                    throw new TypeError("Illegal invocation"); return invoke(a0, a1, a2, a3, a4, a5); };
+                case 7: return function (a0, a1, a2, a3, a4, a5, a6) { if (this !== facade && this !== context)
+                    throw new TypeError("Illegal invocation"); return invoke(a0, a1, a2, a3, a4, a5, a6); };
+                case 8: return function (a0, a1, a2, a3, a4, a5, a6, a7) { if (this !== facade && this !== context)
+                    throw new TypeError("Illegal invocation"); return invoke(a0, a1, a2, a3, a4, a5, a6, a7); };
+                case 9: return function (a0, a1, a2, a3, a4, a5, a6, a7, a8) { if (this !== facade && this !== context)
+                    throw new TypeError("Illegal invocation"); return invoke(a0, a1, a2, a3, a4, a5, a6, a7, a8); };
+                case 10: return function (a0, a1, a2, a3, a4, a5, a6, a7, a8, a9) { if (this !== facade && this !== context)
+                    throw new TypeError("Illegal invocation"); return invoke(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9); };
+            }
+        }
+        const converters = Array.from({ length: arity }, (_, index) => index < signature.length
+            ? createWebIdlConverter(property, index, signature[index])
+            : identityWebIdlArgument);
+        const [c0, c1, c2, c3, c4, c5, c6, c7, c8, c9] = converters;
+        switch (arity) {
+            case 0: return function () { if (this !== facade && this !== context)
+                throw new TypeError("Illegal invocation"); return invoke(); };
+            case 1: return function (a0) { if (this !== facade && this !== context)
+                throw new TypeError("Illegal invocation"); return invoke(c0(a0)); };
+            case 2: return function (a0, a1) { if (this !== facade && this !== context)
+                throw new TypeError("Illegal invocation"); return invoke(c0(a0), c1(a1)); };
+            case 3: return function (a0, a1, a2) { if (this !== facade && this !== context)
+                throw new TypeError("Illegal invocation"); return invoke(c0(a0), c1(a1), c2(a2)); };
+            case 4: return function (a0, a1, a2, a3) { if (this !== facade && this !== context)
+                throw new TypeError("Illegal invocation"); return invoke(c0(a0), c1(a1), c2(a2), c3(a3)); };
+            case 5: return function (a0, a1, a2, a3, a4) { if (this !== facade && this !== context)
+                throw new TypeError("Illegal invocation"); return invoke(c0(a0), c1(a1), c2(a2), c3(a3), c4(a4)); };
+            case 6: return function (a0, a1, a2, a3, a4, a5) { if (this !== facade && this !== context)
+                throw new TypeError("Illegal invocation"); return invoke(c0(a0), c1(a1), c2(a2), c3(a3), c4(a4), c5(a5)); };
+            case 7: return function (a0, a1, a2, a3, a4, a5, a6) { if (this !== facade && this !== context)
+                throw new TypeError("Illegal invocation"); return invoke(c0(a0), c1(a1), c2(a2), c3(a3), c4(a4), c5(a5), c6(a6)); };
+            case 8: return function (a0, a1, a2, a3, a4, a5, a6, a7) { if (this !== facade && this !== context)
+                throw new TypeError("Illegal invocation"); return invoke(c0(a0), c1(a1), c2(a2), c3(a3), c4(a4), c5(a5), c6(a6), c7(a7)); };
+            case 9: return function (a0, a1, a2, a3, a4, a5, a6, a7, a8) { if (this !== facade && this !== context)
+                throw new TypeError("Illegal invocation"); return invoke(c0(a0), c1(a1), c2(a2), c3(a3), c4(a4), c5(a5), c6(a6), c7(a7), c8(a8)); };
+            case 10: return function (a0, a1, a2, a3, a4, a5, a6, a7, a8, a9) { if (this !== facade && this !== context)
+                throw new TypeError("Illegal invocation"); return invoke(c0(a0), c1(a1), c2(a2), c3(a3), c4(a4), c5(a5), c6(a6), c7(a7), c8(a8), c9(a9)); };
+        }
+    }
+    return function (...args) {
+        if (this !== facade && this !== context)
+            throw new TypeError("Illegal invocation");
+        return Reflect.apply(invoke, undefined, convertWebIdlArguments(property, args));
+    };
+}
 function normalizeContextAttributes(attributes = {}) {
     return {
         alpha: attributes.alpha !== undefined ? attributes.alpha : true,
-        antialias: attributes.antialias !== undefined ? attributes.antialias : true,
+        antialias: false,
         depth: attributes.depth !== undefined ? attributes.depth : true,
         desynchronized: attributes.desynchronized !== undefined ? attributes.desynchronized : false,
         failIfMajorPerformanceCaveat: attributes.failIfMajorPerformanceCaveat !== undefined ? attributes.failIfMajorPerformanceCaveat : false,
@@ -9940,19 +16555,17 @@ function makeReplacementCanvas(element) {
     element.parentNode?.replaceChild(replacement, element);
     return replacement;
 }
-async function hydGetContext(element, _shader_info_url, arg0, arg1, translatorOptions = {}) {
-    let [contextType, contextAttributes] = arg0;
-    contextAttributes = normalizeContextAttributes(contextAttributes || {});
-    let [uniform_size, replay_delay] = arg1;
+async function createHydRuntime(translatorOptions = {}, powerPreference = "high-performance") {
     const defaultTranslatorOptions = (globalThis.__HYD_TRANSLATOR_OPTIONS || {});
-    const shaderTranslator = await ShaderTranslator.create({
-        ...defaultTranslatorOptions,
-        ...translatorOptions,
-    });
-    if (!hydWebGLTypes.includes(contextType)) {
-        throw new Error("Invalid context type");
-    }
-    const hydAdapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+    const [shaderTranslator, hydAdapter] = await Promise.all([
+        ShaderTranslator.create({
+            ...defaultTranslatorOptions,
+            ...translatorOptions,
+        }),
+        navigator.gpu.requestAdapter({ powerPreference }),
+    ]);
+    if (!hydAdapter)
+        throw new Error("Unable to acquire a WebGPU adapter");
     const hydDevice = await hydAdapter.requestDevice({ label: "hydDevice" });
     hydDevice.addEventListener("uncapturederror", (event) => {
         console.error("[HYD] WebGPU uncaptured error:", event.error && event.error.message);
@@ -9960,13 +16573,99 @@ async function hydGetContext(element, _shader_info_url, arg0, arg1, translatorOp
     hydDevice.lost.then((info) => {
         console.error("[HYD] WebGPU device lost:", info.reason, info.message);
     });
-    const hydWebGLContexts = {};
-    for (const type of hydWebGLTypes) {
-        const canvas = document.createElement("canvas");
-        hydWebGLContexts[type] = canvas.getContext(type);
+    return { device: hydDevice, shaderTranslator };
+}
+function createHydContextFacade(context, contextType) {
+    const webgl2 = contextType === "webgl2";
+    const contextPrototype = webgl2
+        ? WebGL2RenderingContext.prototype
+        : WebGLRenderingContext.prototype;
+    const webgl1Names = new Set(Object.getOwnPropertyNames(WebGLRenderingContext.prototype));
+    const publicApiCandidates = [
+        ...getNativeEnumerableApiNames(contextType),
+        ...webgl1Names,
+        ...(webgl2 ? Object.getOwnPropertyNames(WebGL2RenderingContext.prototype) : []),
+        ...Object.keys(hydWebGLConstants),
+        "canvas",
+    ];
+    const publicEnumerableNames = new Set(publicApiCandidates.filter((name) => name === "canvas" || Reflect.has(context, name)));
+    publicEnumerableNames.delete("constructor");
+    const facadePrototype = Object.create(contextPrototype);
+    const facade = Object.create(facadePrototype);
+    const nativeDescriptor = (property) => {
+        for (let prototype = contextPrototype; prototype; prototype = Object.getPrototypeOf(prototype)) {
+            const descriptor = Object.getOwnPropertyDescriptor(prototype, property);
+            if (descriptor)
+                return descriptor;
+        }
+        return undefined;
+    };
+    for (const property of publicEnumerableNames) {
+        let value = Reflect.get(context, property, context);
+        if (value === undefined && property in hydWebGLConstants) {
+            value = hydWebGLConstants[property];
+        }
+        if (typeof value === "function") {
+            const method = value;
+            const facadeMethod = createFacadeMethod(facade, context, property, method);
+            Object.defineProperty(facade, property, {
+                configurable: true,
+                enumerable: true,
+                writable: true,
+                value: facadeMethod,
+            });
+            Object.defineProperty(facadePrototype, property, {
+                configurable: true,
+                enumerable: true,
+                writable: true,
+                value: facadeMethod,
+            });
+            continue;
+        }
+        if (property in hydWebGLConstants) {
+            Object.defineProperty(facade, property, {
+                configurable: true,
+                enumerable: true,
+                writable: false,
+                value,
+            });
+            continue;
+        }
+        const descriptor = nativeDescriptor(property);
+        Object.defineProperty(facade, property, {
+            configurable: true,
+            enumerable: true,
+            get: () => Reflect.get(context, property, context),
+            ...(descriptor?.set ? {
+                set: (nextValue) => {
+                    Reflect.set(context, property, nextValue, context);
+                },
+            } : {}),
+        });
+    }
+    Object.defineProperties(facade, {
+        hydContextType: {
+            configurable: false,
+            enumerable: false,
+            get: () => context.hydContextType,
+        },
+        [Symbol.toStringTag]: {
+            configurable: true,
+            enumerable: false,
+            value: webgl2 ? "WebGL2RenderingContext" : "WebGLRenderingContext",
+        },
+    });
+    return facade;
+}
+function createHydContext(runtime, element, _shader_info_url, arg0, arg1, existingGpuContext) {
+    let [contextType, contextAttributes] = arg0;
+    contextAttributes = normalizeContextAttributes(contextAttributes || {});
+    const [uniform_size, replay_delay] = arg1;
+    if (!hydWebGLTypes.includes(contextType)) {
+        throw new Error("Invalid context type");
     }
     let targetElement = element;
-    let gpuctx = targetElement.getContext("webgpu");
+    let gpuctx = existingGpuContext || targetElement.getContext("webgpu");
     if (!gpuctx) {
         targetElement = makeReplacementCanvas(element);
         gpuctx = targetElement.getContext("webgpu");
@@ -9974,14 +16673,28 @@ async function hydGetContext(element, _shader_info_url, arg0, arg1, translatorOp
     if (!gpuctx) {
         throw new Error("Unable to create WebGPU canvas context");
     }
+    const maxDrawingBufferDimension = runtime.device.limits.maxTextureDimension2D;
+    if (targetElement.width > maxDrawingBufferDimension)
+        targetElement.width = maxDrawingBufferDimension;
+    if (targetElement.height > maxDrawingBufferDimension)
+        targetElement.height = maxDrawingBufferDimension;
     gpuctx.configure({
-        device: hydDevice,
+        device: runtime.device,
         format: 'bgra8unorm',
         alphaMode: contextAttributes.alpha === false ? 'opaque' : 'premultiplied',
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
     });
-    return new HydWebGLStatic(targetElement, gpuctx, contextAttributes, hydDevice, uniform_size, replay_delay, shaderTranslator, contextType);
+    const context = new HydWebGLStatic(targetElement, gpuctx, contextAttributes, runtime.device, uniform_size, replay_delay, runtime.shaderTranslator, contextType);
+    return createHydContextFacade(context, contextType);
 }
-;
+async function hydGetContext(element, shaderInfoUrl, arg0, arg1, translatorOptions = {}) {
+    const contextAttributes = normalizeContextAttributes(arg0[1] || {});
+    const powerPreference = contextAttributes.powerPreference === "default"
+        ? undefined
+        : contextAttributes.powerPreference;
+    const runtime = await createHydRuntime(translatorOptions, powerPreference);
+    return createHydContext(runtime, element, shaderInfoUrl, [arg0[0], contextAttributes], arg1);
+}
 
 
 /******/ 	return __webpack_exports__;

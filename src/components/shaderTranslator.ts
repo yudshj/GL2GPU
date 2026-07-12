@@ -7,6 +7,25 @@ import {
     samplerFlipYUniformName,
     TextureNameAndType,
 } from "./shaderDB";
+import { FRAG_COORD_HEIGHT_UNIFORM_NAME } from "./shaderInternalUniforms";
+import { bridgeGlslEs100Identifiers, renameUserDefinedFunctions } from "./shaderGlslIdentifiers";
+import {
+    lowerEs100GlobalInitializers,
+    lowerWebGlPointSizeToPrivateState,
+    materializeWebGlLineMacros,
+    maskStaticallyInactivePreprocessorBranches,
+    normalizeWebGlDepthRange,
+    normalizeWebGl1BuiltinLimits,
+    normalizeEs100SequenceArrayDimensions,
+    stripGlslVersionDirectives,
+    stripProvablyEmptyTopLevelMacroInvocations,
+    wrapVertexMainForWebGpuClipSpace,
+} from "./shaderGlslCompatibility";
+import {
+    normalizeAnonymousUniformStructs,
+    planValueStructUniforms,
+    rewriteStructUniformAggregateReads,
+} from "./shaderGlslStructs";
 import { makeShaderMetadata, scanGlslDeclarations, ShaderStage } from "./shaderMetadata";
 import {
     ShaderCaptureRecord,
@@ -16,6 +35,22 @@ import {
 } from "./shaderCapture";
 import { normalizeWebGlTextureCoordinates } from "./shaderTexCoord";
 import { optimizeTintWgsl, WgslOptimizerStats } from "./shaderWgslOptimizer";
+import {
+    replaceBareWgslIdentifier,
+    replaceWgslMemberAccess,
+    renameReservedWgslIdentifiers,
+    synchronizeTintUniformTypes,
+    wgslUniformVariableNames,
+} from "./shaderWgslTypes";
+import {
+    makeMatrixArrayLoaders,
+    matrixArrayStorageDeclaration,
+    rewriteMatrixArrayUniformReads,
+} from "./shaderGlslUniforms";
+import {
+    lowerDynamicSamplerArrayTextureCalls,
+    lowerSamplerStructFunctionParameters,
+} from "./shaderGlslSamplers";
 
 interface GlslangModule {
     compileGLSL(glsl: string, shaderType: ShaderStage, genDebug: boolean, spirvVersion?: "1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5"): Uint32Array;
@@ -59,13 +94,19 @@ export interface ShaderTranslatorOptions {
 export interface ShaderLike {
     type: GLenum;
     glsl_shader: string;
+    compiled_glsl_shader?: string;
     shader_info?: InitShaderInfoType;
+    webglVersion?: 1 | 2;
 }
 
 export interface TranslatedProgram {
     vertex?: InitShaderInfoType;
     fragment?: InitShaderInfoType;
     attributeLocations?: Map<string, number>;
+}
+
+function compiledShaderSource(shader: ShaderLike): string {
+    return shader.compiled_glsl_shader || shader.glsl_shader;
 }
 
 interface ProgramTranslationLayout {
@@ -90,6 +131,7 @@ interface PreparedGlslSource {
 
 interface BuildGlslangSourceOptions {
     preserveImplicitTextureLod?: boolean;
+    webglVersion?: 1 | 2;
 }
 
 interface ResourcePruneStats {
@@ -97,7 +139,7 @@ interface ResourcePruneStats {
     removedSamplers: string[];
 }
 
-const GLOBAL_DECLARATION_REGEX = /\b(?:layout\s*\([^)]*\)\s*)?(?:(?:lowp|mediump|highp)\s+)?((?:(?:flat|smooth|noperspective|centroid|sample)\s+)*)(attribute|uniform|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([^;]+)\s*;/g;
+const GLOBAL_DECLARATION_REGEX = /\b(?:layout\s*\([^)]*\)\s*)?(?:invariant\s+)?(?:(?:lowp|mediump|highp)\s+)?((?:(?:flat|smooth|noperspective|centroid|sample)\s+)*)(attribute|uniform|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([^;]+)\s*;/g;
 const SPV_OP_NAME = 5;
 const SPV_OP_TYPE_SAMPLED_IMAGE = 27;
 const SPV_OP_TYPE_POINTER = 32;
@@ -128,7 +170,11 @@ function wordBoundaryReplace(source: string, from: string, to: string): string {
 function sourceNameReplace(source: string, from: string, to: string): string {
     const parts = from.split(".");
     if (parts.length === 1) {
-        return wordBoundaryReplace(source, from, to);
+        if (/^[A-Za-z_]\w*$/.test(from)) return wordBoundaryReplace(source, from, to);
+        return source.replace(
+            new RegExp(`(^|[^A-Za-z0-9_])${escapeRegExp(from)}(?=$|[^A-Za-z0-9_])`, "g"),
+            (_match, prefix) => `${prefix}${to}`,
+        );
     }
     const pattern = parts
         .map((part) => escapeRegExp(part))
@@ -158,6 +204,84 @@ function isTopLevelAt(source: string, index: number): boolean {
     return braceDepth === 0 && parenDepth === 0;
 }
 
+function maskGlslComments(source: string): string {
+    const masked = source.split("");
+    let lineComment = false;
+    let blockComment = false;
+    for (let index = 0; index < source.length; index++) {
+        const ch = source[index];
+        const next = source[index + 1];
+        if (lineComment) {
+            if (ch === "\n") {
+                lineComment = false;
+            } else {
+                masked[index] = " ";
+            }
+            continue;
+        }
+        if (blockComment) {
+            if (ch === "*" && next === "/") {
+                masked[index] = " ";
+                masked[index + 1] = " ";
+                blockComment = false;
+                index++;
+            } else if (ch !== "\n") {
+                masked[index] = " ";
+            }
+            continue;
+        }
+        if (ch === "/" && next === "/") {
+            masked[index] = " ";
+            masked[index + 1] = " ";
+            lineComment = true;
+            index++;
+        } else if (ch === "/" && next === "*") {
+            masked[index] = " ";
+            masked[index + 1] = " ";
+            blockComment = true;
+            index++;
+        }
+    }
+    return masked.join("");
+}
+
+function replaceTopLevelGlobalDeclarations(
+    source: string,
+    replacement: (
+        full: string,
+        interpolation: string,
+        qualifier: ParsedGlslDeclaration["qualifier"],
+        glslType: string,
+        rawNames: string,
+        offset: number,
+    ) => string,
+): string {
+    const masked = maskGlslComments(source);
+    const regex = new RegExp(GLOBAL_DECLARATION_REGEX.source, GLOBAL_DECLARATION_REGEX.flags);
+    let result = "";
+    let cursor = 0;
+    for (let match = regex.exec(masked); match !== null; match = regex.exec(masked)) {
+        if (!isTopLevelAt(masked, match.index)) continue;
+        result += source.slice(cursor, match.index);
+        result += replacement(
+            source.slice(match.index, regex.lastIndex),
+            match[1],
+            match[2] as ParsedGlslDeclaration["qualifier"],
+            match[3],
+            match[4],
+            match.index,
+        );
+        cursor = regex.lastIndex;
+    }
+    return result + source.slice(cursor);
+}
+
+function normalizeUnsupportedInvariantPragmas(source: string): string {
+    return source
+        .replace(/^\s*#\s*pragma\b[^\r\n]*$/gmi, "")
+        .replace(/^\s*invariant\s+[A-Za-z_]\w*\s*;\s*$/gmi, "");
+}
+
 function pruneUnusedShaderResources(metadata: InitShaderInfoType, wgsl: string): ResourcePruneStats {
     const removedUniforms: string[] = [];
     const removedSamplers: string[] = [];
@@ -169,7 +293,10 @@ function pruneUnusedShaderResources(metadata: InitShaderInfoType, wgsl: string):
         return keep;
     });
     metadata.samplers = metadata.samplers.filter((sampler) => {
-        const keep = referencesIdentifier(wgsl, `${sampler.name}S`) || referencesIdentifier(wgsl, `${sampler.name}T`);
+        const groupUsed = sampler.array_name && metadata.samplers.some((item) =>
+            item.array_name === sampler.array_name &&
+            (referencesIdentifier(wgsl, `${item.name}S`) || referencesIdentifier(wgsl, `${item.name}T`)));
+        const keep = groupUsed || referencesIdentifier(wgsl, `${sampler.name}S`) || referencesIdentifier(wgsl, `${sampler.name}T`);
         if (!keep) {
             removedSamplers.push(sampler.name);
         }
@@ -190,24 +317,39 @@ function uniqueByName<T extends NameAndType | TextureNameAndType>(items: T[]): T
     return out;
 }
 
-function assignLocations(items: NameAndType[], boundLocations: Map<string, number> = new Map()): Map<string, number> {
+function attributeLocationSpan(item: NameAndType): number {
+    const matrix = /^mat([2-4])(?:x[2-4])?$/.exec(item.glsl_type);
+    const elementSpan = matrix ? Number(matrix[1]) : 1;
+    return elementSpan * (item.is_array ? Math.max(1, item.size || 1) : 1);
+}
+
+function assignLocations(
+    items: NameAndType[],
+    boundLocations: Map<string, number> = new Map(),
+    locationSpan: (item: NameAndType) => number = () => 1,
+): Map<string, number> {
     const locations = new Map<string, number>();
     const usedLocations = new Set<number>();
     for (const item of items) {
-        const boundLocation = boundLocations.get(item.name);
+        const boundLocation = boundLocations.get(item.source_name || item.name) ?? boundLocations.get(item.name);
         if (boundLocation !== undefined && !locations.has(item.name)) {
             locations.set(item.name, boundLocation);
-            usedLocations.add(boundLocation);
+            for (let offset = 0; offset < locationSpan(item); offset++) {
+                usedLocations.add(boundLocation + offset);
+            }
         }
     }
     let nextLocation = 0;
     for (const item of items) {
         if (locations.has(item.name)) continue;
-        while (usedLocations.has(nextLocation)) {
+        const span = locationSpan(item);
+        while (Array.from({ length: span }, (_, offset) => nextLocation + offset).some((location) => usedLocations.has(location))) {
             nextLocation++;
         }
         locations.set(item.name, nextLocation);
-        usedLocations.add(nextLocation);
+        for (let offset = 0; offset < span; offset++) {
+            usedLocations.add(nextLocation + offset);
+        }
     }
     return locations;
 }
@@ -238,9 +380,9 @@ function isFragmentOutput(declaration: ParsedGlslDeclaration, stage: ShaderStage
 function prepareSourceAndDeclarations(source: string): PreparedGlslSource {
     const preamble: string[] = ["#version 310 es"];
     const seenPreamble = new Set<string>(preamble);
-    let body = source.replace(/^\s*#version[^\n]*(?:\n|$)/gm, "");
+    let body = stripGlslVersionDirectives(source);
 
-    body = body.replace(/^\s*(#extension[^\n]*|#define[^\n]*|precision\s+(?:lowp|mediump|highp)\s+\w+\s*;)\s*$/gm, (line) => {
+    body = body.replace(/^\s*(#extension[^\n]*|precision\s+(?:lowp|mediump|highp)\s+\w+\s*;)\s*$/gm, (line) => {
         const trimmed = line.trim();
         if (!seenPreamble.has(trimmed)) {
             seenPreamble.add(trimmed);
@@ -255,10 +397,7 @@ function prepareSourceAndDeclarations(source: string): PreparedGlslSource {
     }
 
     const declarations: ParsedGlslDeclaration[] = [];
-    body = body.replace(GLOBAL_DECLARATION_REGEX, (full, interpolation, qualifier, glslType, rawNames, offset) => {
-        if (!isTopLevelAt(body, offset)) {
-            return full;
-        }
+    body = replaceTopLevelGlobalDeclarations(body, (_full, interpolation, qualifier, glslType, rawNames) => {
         for (const parsed of parseDeclarationNames(rawNames)) {
             declarations.push({
                 qualifier,
@@ -279,24 +418,106 @@ function prepareSourceAndDeclarations(source: string): PreparedGlslSource {
 
 function normalizeLegacyFragmentBuiltins(source: string): { source: string, usesFragColor: boolean } {
     let out = source;
-    const usesFragColor = /\bgl_FragColor\b/.test(out);
+    const usesFragColor = /\bgl_FragColor\b|\bgl_FragData\s*\[\s*0\s*\]/.test(out);
     out = wordBoundaryReplace(out, "gl_FragColor", "_hyd_fragColor");
+    out = out.replace(/\bgl_FragData\s*\[\s*0\s*\]/g, "_hyd_fragColor");
     out = wordBoundaryReplace(out, "texture2D", "texture");
     out = wordBoundaryReplace(out, "textureCube", "texture");
     out = wordBoundaryReplace(out, "texture2DProj", "textureProj");
+    out = wordBoundaryReplace(out, "texture2DProjLod", "textureProjLod");
     out = wordBoundaryReplace(out, "texture2DProjLodEXT", "textureProjLod");
+    out = wordBoundaryReplace(out, "texture2DLod", "textureLod");
     out = wordBoundaryReplace(out, "texture2DLodEXT", "textureLod");
+    out = wordBoundaryReplace(out, "textureCubeLod", "textureLod");
     out = wordBoundaryReplace(out, "textureCubeLodEXT", "textureLod");
     return { source: out, usesFragColor };
 }
 
-function normalizeWebGlBuiltinsForVulkanGlsl(source: string): string {
+function normalizeWebGlBuiltinsForVulkanGlsl(source: string, webglVersion: 1 | 2 = 1): string {
     let out = source;
     out = wordBoundaryReplace(out, "gl_VertexID", "gl_VertexIndex");
     out = wordBoundaryReplace(out, "gl_InstanceID", "gl_InstanceIndex");
+    if (webglVersion === 1) {
+        out = normalizeWebGl1BuiltinLimits(out);
+        out = wordBoundaryReplace(out, "__VERSION__", "100");
+    }
     out = out.replace(/\b1(?:\.0)?\s*\/\s*0(?:\.0)?\b/g, "3.4028234663852886e38");
     out = out.replace(/-\s*3\.4028234663852886e38/g, "-3.4028234663852886e38");
-    return out;
+    return clampOutOfRangeFloatLiterals(out);
+}
+
+function clampOutOfRangeFloatLiterals(source: string): string {
+    const masked = maskGlslComments(source);
+    const regex = /(?<![A-Za-z0-9_.])(?:\d+\.\d*|\.\d+|\d+[eE][+\-]?\d+)(?:[eE][+\-]?\d+)?(?![A-Za-z0-9_.])/g;
+    let result = "";
+    let cursor = 0;
+    for (let match = regex.exec(masked); match !== null; match = regex.exec(masked)) {
+        const value = Number(match[0]);
+        if (Number.isFinite(value) && value <= 3.4028234663852886e38) continue;
+        result += source.slice(cursor, match.index);
+        result += "3.4028234663852886e38";
+        cursor = regex.lastIndex;
+    }
+    return cursor === 0 ? source : result + source.slice(cursor);
+}
+
+function demoteConstDeclarationsForVulkanGlsl(source: string): string {
+    return source.replace(
+        /\bconst\s+((?:(?:lowp|mediump|highp)\s+)?[A-Za-z_]\w*\s+)([A-Za-z_]\w*)\s*=\s*([^;]+);/g,
+        (full, typeAndSpacing, name, initializer) => {
+            const requiresConstant = new RegExp(`\\[\\s*${escapeRegExp(name)}\\s*\\]`).test(source) ||
+                new RegExp(`\\bcase\\s+${escapeRegExp(name)}\\s*:`).test(source);
+            return requiresConstant ? full : `${typeAndSpacing}${name} = ${initializer};`;
+        },
+    );
+}
+
+function ensureVertexPositionBuiltin(source: string): string {
+    const withoutComments = source
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\/\/.*$/gm, "");
+    if (/\bgl_Position\b/.test(withoutComments)) return source;
+    return source.replace(
+        /\bvoid\s+main\s*\(\s*(?:void\s*)?\)\s*\{/,
+        (signature) => `${signature}\n  gl_Position = vec4(0.0);`,
+    );
+}
+
+function normalizeWebGlFragCoord(source: string, metadata: InitShaderInfoType): string {
+    if (!metadata.uniforms.some((uniform) => uniform.name === FRAG_COORD_HEIGHT_UNIFORM_NAME)) {
+        return source;
+    }
+    const invariantStatements: string[] = [];
+    let body = source.replace(/\binvariant\s+gl_FragCoord\s*;/g, (statement) => {
+        const placeholder = `__HYD_FRAG_COORD_INVARIANT_${invariantStatements.length}__`;
+        invariantStatements.push(statement);
+        return placeholder;
+    });
+    body = wordBoundaryReplace(body, "gl_FragCoord", "_hydWebGlFragCoord()");
+    invariantStatements.forEach((statement, index) => {
+        body = wordBoundaryReplace(body, `__HYD_FRAG_COORD_INVARIANT_${index}__`, statement);
+    });
+    return `
+vec4 _hydWebGlFragCoord() {
+  return vec4(
+      gl_FragCoord.x,
+      ${FRAG_COORD_HEIGHT_UNIFORM_NAME} - gl_FragCoord.y,
+      gl_FragCoord.z,
+      gl_FragCoord.w);
+}
+
+${body}`;
+}
+
+function normalizeWebGlPointCoord(source: string): string {
+    if (!/\bgl_PointCoord\b/.test(maskGlslComments(source))) return source;
+    const body = wordBoundaryReplace(source, "gl_PointCoord", "_hydWebGlPointCoord()");
+    return `
+vec2 _hydWebGlPointCoord() {
+  return vec2(0.5, 0.5);
+}
+
+${body}`;
 }
 
 function makeSamplerBindingDeclarations(metadata: InitShaderInfoType, layout: ProgramTranslationLayout): string[] {
@@ -318,7 +539,11 @@ function makeUniformBlockDeclarations(metadata: InitShaderInfoType, declarations
 
     const lines = ["layout(std140, set = 0, binding = 0) uniform HydUniformObject {"];
     for (const uniform of metadata.uniforms) {
-        lines.push(`  ${uniform.glsl_type} ${uniform.name}${declarationArraySuffix(declarations, uniform.name)};`);
+        const matrixArrayStorage = matrixArrayStorageDeclaration(uniform);
+        const arraySuffix = uniform.is_array
+            ? `[${Math.max(1, uniform.size || 1)}]`
+            : declarationArraySuffix(declarations, uniform.name);
+        lines.push(`  ${matrixArrayStorage || `${uniform.glsl_type} ${uniform.name}${arraySuffix};`}`);
     }
     lines.push("};");
     return lines;
@@ -371,15 +596,21 @@ function addSamplerPrecisionDeclarations(lines: string[], metadata: InitShaderIn
     }
 }
 
-function rewriteMetadataSourceNames(source: string, metadata: InitShaderInfoType): string {
+function rewriteMetadataSourceNames(
+    source: string,
+    metadata: InitShaderInfoType,
+    varyings: NameAndType[] = [],
+): string {
     let out = source;
-    for (const uniform of metadata.uniforms) {
-        if (uniform.source_name && uniform.source_name !== uniform.name) {
-            out = sourceNameReplace(out, uniform.source_name, uniform.name);
+    for (const value of [...metadata.attributes, ...metadata.uniforms, ...varyings]) {
+        if (value.source_name && value.source_name !== value.name) {
+            if (/^[A-Za-z_]\w*$/.test(value.source_name)) continue;
+            out = sourceNameReplace(out, value.source_name, value.name);
         }
     }
     for (const sampler of metadata.samplers) {
         if (sampler.source_name && sampler.source_name !== sampler.name) {
+            if (/^[A-Za-z_]\w*$/.test(sampler.source_name)) continue;
             out = sourceNameReplace(out, sampler.source_name, sampler.name);
         }
     }
@@ -792,19 +1023,22 @@ export function buildGlslangSource(
     layout: ProgramTranslationLayout,
     options: BuildGlslangSourceOptions = {},
 ): string {
-    const prepared = prepareSourceAndDeclarations(source);
+    const anonymousStructSource = normalizeAnonymousUniformStructs(source);
+    const structUniformPlan = planValueStructUniforms(anonymousStructSource);
+    const invariantNormalizedSource = normalizeUnsupportedInvariantPragmas(
+        maskStaticallyInactivePreprocessorBranches(anonymousStructSource, options.webglVersion || 1),
+    );
+    const lineNormalizedSource = materializeWebGlLineMacros(invariantNormalizedSource);
+    const bridgeSource = options.webglVersion === 2
+        ? lineNormalizedSource
+        : bridgeGlslEs100Identifiers(lineNormalizedSource);
+    const prepared = prepareSourceAndDeclarations(bridgeSource);
     const lines: string[] = [prepared.source.trimEnd()];
     const declarations = prepared.declarations;
-    const sourceWithoutPreamble = source
-        .replace(/^\s*#version[^\n]*(?:\n|$)/gm, "")
-        .replace(/^\s*(#extension[^\n]*|#define[^\n]*|precision\s+(?:lowp|mediump|highp)\s+\w+\s*;)\s*$/gm, "");
-    const bodyStart = sourceWithoutPreamble.replace(
-        GLOBAL_DECLARATION_REGEX,
-        (full, _interpolation, _qualifier, _glslType, _rawNames, offset) => {
-            return isTopLevelAt(sourceWithoutPreamble, offset) ? "" : full;
-        },
-    );
-    let body = bodyStart;
+    const sourceWithoutPreamble = stripGlslVersionDirectives(bridgeSource)
+        .replace(/^\s*(#extension[^\n]*|precision\s+(?:lowp|mediump|highp)\s+\w+\s*;)\s*$/gm, "");
+    const bodyStart = replaceTopLevelGlobalDeclarations(sourceWithoutPreamble, () => "");
+    let body = stripProvablyEmptyTopLevelMacroInvocations(bodyStart);
     addSamplerPrecisionDeclarations(lines, metadata);
 
     if (stage === "vertex") {
@@ -815,7 +1049,11 @@ export function buildGlslangSource(
     }
 
     const stageVaryings = uniqueByName(
-        scanGlslDeclarations(source, stage).varyings,
+        scanGlslDeclarations(source, stage, {
+            // A fragment-static-use varying must have a matching WebGPU vertex
+            // output even when the WebGL vertex shader only declares it.
+            includeUnusedVaryings: stage === "vertex",
+        }).varyings.filter((varying) => layout.varyingLocations.has(varying.name)),
     );
     for (const varying of stageVaryings) {
         const location = layout.varyingLocations.get(varying.name);
@@ -831,11 +1069,30 @@ export function buildGlslangSource(
         }
     }
 
-    const normalized = stage === "fragment" ? normalizeLegacyFragmentBuiltins(body) : { source: body, usesFragColor: false };
-    normalized.source = normalizeWebGlBuiltinsForVulkanGlsl(normalized.source);
-    normalized.source = rewriteMetadataSourceNames(normalized.source, metadata);
+    body = renameUserDefinedFunctions(body);
+    const normalized = normalizeLegacyFragmentBuiltins(body);
+    normalized.source = lowerSamplerStructFunctionParameters(normalized.source, metadata.samplers);
+    const samplerArrayLowering = lowerDynamicSamplerArrayTextureCalls(normalized.source, metadata.samplers, stage);
+    normalized.source = samplerArrayLowering.source;
+    normalized.source = normalizeWebGlBuiltinsForVulkanGlsl(normalized.source, options.webglVersion);
+    normalized.source = normalizeWebGlDepthRange(normalized.source);
+    if (stage === "vertex") {
+        normalized.source = lowerWebGlPointSizeToPrivateState(normalized.source);
+        normalized.source = ensureVertexPositionBuiltin(normalized.source);
+        normalized.source = wrapVertexMainForWebGpuClipSpace(normalized.source);
+    } else {
+        normalized.source = normalizeWebGlFragCoord(normalized.source, metadata);
+        normalized.source = normalizeWebGlPointCoord(normalized.source);
+    }
+    normalized.source = rewriteMetadataSourceNames(normalized.source, metadata, stageVaryings);
+    normalized.source = rewriteStructUniformAggregateReads(normalized.source, structUniformPlan);
     body = lowerSamplerFunctionParameters(normalized.source);
     body = rewriteSamplerExpressions(body, metadata);
+    body = rewriteMatrixArrayUniformReads(body, metadata.uniforms);
+    if (options.webglVersion !== 2) {
+        body = normalizeEs100SequenceArrayDimensions(body);
+        body = lowerEs100GlobalInitializers(body);
+    }
     if (stage === "fragment" && options.preserveImplicitTextureLod === false) {
         body = rewriteFragmentImplicitTextureLod(body);
     }
@@ -845,7 +1102,11 @@ export function buildGlslangSource(
 
     lines.push(...makeUniformBlockDeclarations(metadata, declarations));
     lines.push(...makeSamplerBindingDeclarations(metadata, layout));
+    lines.push(...makeMatrixArrayLoaders(metadata.uniforms));
+    lines.push(...samplerArrayLowering.helpers);
     lines.push("");
+    const leadingLineBreaks = (body.match(/^[\t \r\n]*/)?.[0].match(/\n/g) || []).length;
+    lines.push(`#line ${leadingLineBreaks + 1}`);
     lines.push(body.trim());
     return `${lines.filter((line) => line.length > 0).join("\n")}\n`;
 }
@@ -861,31 +1122,9 @@ function uniformReadExpression(uniform: NameAndType): string {
     return `_hyd_uniforms_.${uniform.name}`;
 }
 
-const WGSL_RESERVED_IDENTIFIER_RENAMES: Record<string, string> = {
-    target: "target_",
-};
-
-function replaceBareIdentifier(source: string, from: string, to: string): string {
-    return source.replace(new RegExp(`\\b${escapeRegExp(from)}\\b`, "g"), (match, offset: number) => {
-        if (offset > 0 && source[offset - 1] === ".") {
-            return match;
-        }
-        return to;
-    });
-}
-
-function renameReservedWgslIdentifiers(wgsl: string): string {
-    let out = wgsl;
-    for (const [reserved, replacement] of Object.entries(WGSL_RESERVED_IDENTIFIER_RENAMES)) {
-        const declarationRegex = new RegExp(`\\b(?:var(?:<[^>]+>)?|let)\\s+${escapeRegExp(reserved)}\\b|[(,]\\s*${escapeRegExp(reserved)}\\s*:`, "m");
-        if (declarationRegex.test(out)) {
-            out = replaceBareIdentifier(out, reserved, replacement);
-        }
-    }
-    return out;
-}
-
 function normalizeTintWgsl(wgsl: string, metadata: InitShaderInfoType): string {
+    const uniformVariableNames = wgslUniformVariableNames(wgsl);
+    wgsl = synchronizeTintUniformTypes(wgsl, metadata);
     let out = stripResourceDeclarations(wgsl);
     out = renameReservedWgslIdentifiers(out);
 
@@ -893,8 +1132,8 @@ function normalizeTintWgsl(wgsl: string, metadata: InitShaderInfoType): string {
     for (const uniform of metadata.uniforms) {
         const placeholder = `__HYD_UNIFORM_${uniformPlaceholders.length}__`;
         uniformPlaceholders.push([placeholder, uniformReadExpression(uniform)]);
-        out = out.replace(new RegExp(`\\b[A-Za-z_]\\w*\\s*\\.\\s*${escapeRegExp(uniform.name)}\\b`, "g"), placeholder);
-        out = wordBoundaryReplace(out, uniform.name, placeholder);
+        out = replaceWgslMemberAccess(out, uniformVariableNames, uniform.name, placeholder);
+        out = replaceBareWgslIdentifier(out, uniform.name, placeholder);
     }
 
     for (const sampler of metadata.samplers) {
@@ -906,7 +1145,6 @@ function normalizeTintWgsl(wgsl: string, metadata: InitShaderInfoType): string {
     for (const [placeholder, value] of uniformPlaceholders) {
         out = wordBoundaryReplace(out, placeholder, value);
     }
-    out = out.replace(/\barr_to_mat\d+x\d+_stride_\d+\s*\(\s*(_hyd_uniforms_\.[A-Za-z_]\w*)\s*\)/g, "$1");
 
     return normalizeSamplerOriginCoordinates(out.trim() + "\n", metadata);
 }
@@ -918,11 +1156,11 @@ function addSamplerOriginHelper(wgsl: string): string {
         return wgsl;
     }
     const helper = `fn _hyd_samplerOriginCoord(texCoord: vec2<f32>, flipY: f32) -> vec2<f32> {\n    return vec2<f32>(texCoord.x, select(texCoord.y, 1.0 - texCoord.y, flipY > 0.5));\n}\n\n`;
-    const fragmentIndex = wgsl.search(/^\s*@fragment\b/m);
-    if (fragmentIndex < 0) {
-        return helper + wgsl;
-    }
-    return wgsl.slice(0, fragmentIndex) + helper + wgsl.slice(fragmentIndex);
+    const directivePrefix = wgsl.match(
+        /^\s*(?:(?:(?:enable|requires)\s+[^;]+;|diagnostic\s*\([^;]+\)\s*;)\s*)+/,
+    );
+    const insertion = directivePrefix ? directivePrefix[0].length : 0;
+    return wgsl.slice(0, insertion) + helper + wgsl.slice(insertion);
 }
 
 function normalizeSamplerOriginCoordinates(wgsl: string, metadata: InitShaderInfoType): string {
@@ -1028,14 +1266,14 @@ export class ShaderTranslator {
     }
 
     private metadataFor(shader: ShaderLike): InitShaderInfoType {
-        return shader.shader_info || makeShaderMetadata(shader.glsl_shader, shader.type);
+        return shader.shader_info || makeShaderMetadata(compiledShaderSource(shader), shader.type);
     }
 
     private makeLayout(vertexShader?: ShaderLike, fragmentShader?: ShaderLike, boundAttributeLocations: Map<string, number> = new Map()): ProgramTranslationLayout {
         const vertexMetadata = vertexShader ? this.metadataFor(vertexShader) : undefined;
         const fragmentMetadata = fragmentShader ? this.metadataFor(fragmentShader) : undefined;
-        const vertexVaryings = vertexShader ? scanGlslDeclarations(vertexShader.glsl_shader, "vertex").varyings : [];
-        const fragmentVaryings = fragmentShader ? scanGlslDeclarations(fragmentShader.glsl_shader, "fragment").varyings : [];
+        const vertexVaryings = vertexShader ? scanGlslDeclarations(compiledShaderSource(vertexShader), "vertex").varyings : [];
+        const fragmentVaryings = fragmentShader ? scanGlslDeclarations(compiledShaderSource(fragmentShader), "fragment").varyings : [];
         const samplers = uniqueByName([
             ...(vertexMetadata ? vertexMetadata.samplers : []),
             ...(fragmentMetadata ? fragmentMetadata.samplers : []),
@@ -1051,8 +1289,16 @@ export class ShaderTranslator {
             samplerBindings.set(sampler.name, samplerOffset + index * 2);
         });
 
-        const attributeLocations = assignLocations(vertexMetadata ? vertexMetadata.attributes : [], boundAttributeLocations);
-        const varyingLocations = assignLocations(uniqueByName([...vertexVaryings, ...fragmentVaryings]));
+        const attributeLocations = assignLocations(
+            vertexMetadata ? vertexMetadata.attributes : [],
+            boundAttributeLocations,
+            attributeLocationSpan,
+        );
+        const varyingLocations = assignLocations(
+            uniqueByName([...vertexVaryings, ...fragmentVaryings]),
+            new Map(),
+            attributeLocationSpan,
+        );
 
         return {
             attributeLocations,
@@ -1067,15 +1313,17 @@ export class ShaderTranslator {
     }
 
     private translateShader(shader: ShaderLike, stage: ShaderStage, layout: ProgramTranslationLayout): InitShaderInfoType {
-        const key = shader.glsl_shader;
+        const key = compiledShaderSource(shader);
         const preserveImplicitTextureLod = this.options.preserveImplicitTextureLod !== false;
         const shouldOptimizeTintWgsl = this.options.optimizeTintWgsl !== false;
+        const webglVersion = shader.webglVersion || 1;
         const runtimeKey = [
             stage,
             layout.cacheKey,
             `lod=${preserveImplicitTextureLod ? 1 : 0}`,
             `opt=${shouldOptimizeTintWgsl ? 1 : 0}`,
             `legacyTexCoord=${this.options.legacyTextureCoordinateFixups ? 1 : 0}`,
+            `webgl=${webglVersion}`,
             key,
         ].join(":");
         const cachedRuntime = this.runtimeCache.get(runtimeKey);
@@ -1083,25 +1331,34 @@ export class ShaderTranslator {
             return cachedRuntime;
         }
 
-        const metadata = makeShaderMetadata(shader.glsl_shader, shader.type);
+        const metadata = makeShaderMetadata(key, shader.type);
         if (!this.runtimeTranslationAvailable) {
             throw new Error(`Runtime shader translator is unavailable (${stage}).`);
         }
 
         let glslangSource = "";
         const timingsMs: Record<string, number> = {};
+        const compatibilityFallbacks: string[] = [];
         try {
             const buildStart = nowMs();
-            glslangSource = buildGlslangSource(shader.glsl_shader, stage, metadata, layout, {
+            glslangSource = buildGlslangSource(key, stage, metadata, layout, {
                 preserveImplicitTextureLod,
+                webglVersion,
             });
             timingsMs.glslPreprocess = nowMs() - buildStart;
 
             const compileStart = nowMs();
-            const spirv = patchGlslangSampledTextureVariables(
-                this.glslang.compileGLSL(glslangSource, stage, false),
-                metadata.samplers,
-            );
+            let spirvWords: Uint32Array;
+            try {
+                spirvWords = this.glslang.compileGLSL(glslangSource, stage, false);
+            } catch (error) {
+                const relaxedConstSource = demoteConstDeclarationsForVulkanGlsl(glslangSource);
+                if (relaxedConstSource === glslangSource) throw error;
+                spirvWords = this.glslang.compileGLSL(relaxedConstSource, stage, false);
+                glslangSource = relaxedConstSource;
+                compatibilityFallbacks.push("demote-es100-const-initializers");
+            }
+            const spirv = patchGlslangSampledTextureVariables(spirvWords, metadata.samplers);
             timingsMs.glslang = nowMs() - compileStart;
 
             const tintStart = nowMs();
@@ -1126,6 +1383,7 @@ export class ShaderTranslator {
                 collapsedOutputStructs: 0,
                 removedTemporaries: 0,
                 foldedConstructors: 0,
+                splitDeepExpressions: 0,
                 skippedPasses: [],
             };
             if (shouldOptimizeTintWgsl) {
@@ -1137,13 +1395,13 @@ export class ShaderTranslator {
             }
             if (this.options.legacyTextureCoordinateFixups) {
                 const legacyFixupStart = nowMs();
-                metadata.wgsl = normalizeWebGlTextureCoordinates(wgsl, metadata, stage, shader.glsl_shader);
+                metadata.wgsl = normalizeWebGlTextureCoordinates(wgsl, metadata, stage, key);
                 timingsMs.legacyTextureCoordinateFixups = nowMs() - legacyFixupStart;
             } else {
                 metadata.wgsl = wgsl;
             }
             const resourcePrune = pruneUnusedShaderResources(metadata, metadata.wgsl);
-            const shaderId = `${stage}:${stableHashString(shader.glsl_shader)}:${layout.cacheKey}`;
+            const shaderId = `${stage}:${stableHashString(key)}:${layout.cacheKey}`;
             const capture: ShaderCaptureRecord = {
                 kind: "shader-stage",
                 stage,
@@ -1151,7 +1409,8 @@ export class ShaderTranslator {
                 source: "runtime",
                 optimizer: optimizerStats,
                 timingsMs,
-                glsl: sourceCapture(shader.glsl_shader),
+                compatibilityFallbacks,
+                glsl: sourceCapture(key),
                 normalizedGlsl: sourceCapture(glslangSource),
                 spirv: {
                     hash: stableHashU32(spirv),
@@ -1171,6 +1430,7 @@ export class ShaderTranslator {
                 legacyTextureCoordinateFixups: !!this.options.legacyTextureCoordinateFixups,
                 preserveImplicitTextureLod,
                 optimizer: optimizerStats,
+                compatibilityFallbacks,
                 resourcePrune,
                 shaderId,
                 spirv: capture.spirv,
@@ -1184,7 +1444,7 @@ export class ShaderTranslator {
             return metadata;
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            throw new Error(`Runtime shader translation failed for ${stage} shader: ${message}\n--- original GLSL ---\n${shader.glsl_shader}\n--- normalized GLSL ---\n${glslangSource}`);
+            throw new Error(`Runtime shader translation failed for ${stage} shader: ${message}\n--- original GLSL ---\n${key}\n--- normalized GLSL ---\n${glslangSource}`);
         }
     }
 }

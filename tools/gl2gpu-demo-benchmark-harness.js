@@ -6,8 +6,8 @@ const path = require("path");
 
 const repoRoot = path.resolve(__dirname, "..");
 const demoRoot = path.resolve(process.env.GL2GPU_DEMO_ROOT || "/Users/hanyd/Code/gl2gpu-demo");
-const releaseRoot = path.join(repoRoot, "dist", "release");
-const outputRoot = path.join(repoRoot, "output", "gl2gpu-demo-benchmark");
+const releaseRoot = path.resolve(process.env.GL2GPU_RELEASE_ROOT || path.join(repoRoot, "dist", "release"));
+const defaultOutputRoot = path.join(repoRoot, "output", "gl2gpu-demo-benchmark");
 
 const benchmarks = [
   {
@@ -47,7 +47,9 @@ for (let i = 2; i < process.argv.length; i++) {
   }
 }
 
+const outputRoot = path.resolve(argv.get("output") || process.env.GL2GPU_BENCHMARK_OUTPUT || defaultOutputRoot);
 const selectedModes = parseList(argv.get("modes") || "tint,manual");
+const tintVariantRoots = parseVariantRoots(argv.get("tint-variants") || "");
 const selectedBenchmarks = selectBenchmarks(argv.get("samples") || "aquarium,motionmark,sprites");
 const trials = Number(argv.get("trials") || 3);
 const runOrder = argv.get("order") || "mode-major";
@@ -58,6 +60,7 @@ const rmseThreshold = Number(argv.get("rmse-threshold") || 0.02);
 const fpsThreshold = Number(argv.get("threshold") || 0.90);
 const captureScreenshots = argv.get("screenshots") !== "false";
 const captureShaders = argv.get("capture-shaders") === "true";
+const captureCpuProfile = argv.get("cpu-profile") === "true";
 const staticSamplerOriginVariants = argv.has("static-sampler-origin-variants")
   ? argv.get("static-sampler-origin-variants") !== "false"
   : null;
@@ -70,6 +73,30 @@ function parseList(value) {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function parseVariantRoots(value) {
+  const variants = new Map();
+  for (const item of parseList(value)) {
+    const separator = item.indexOf("=");
+    if (separator <= 0 || separator === item.length - 1) {
+      throw new Error(`Invalid Tint variant '${item}', expected name=/absolute/bundle/root`);
+    }
+    const name = item.slice(0, separator).trim();
+    if (["tint", "manual", "webgl"].includes(name)) {
+      throw new Error(`Reserved benchmark mode '${name}' cannot be a Tint variant`);
+    }
+    variants.set(name, path.resolve(item.slice(separator + 1).trim()));
+  }
+  return variants;
+}
+
+function isTintMode(mode) {
+  return mode === "tint" || tintVariantRoots.has(mode);
+}
+
+function tintRootForMode(mode) {
+  return mode === "tint" ? releaseRoot : tintVariantRoots.get(mode);
 }
 
 function selectBenchmarks(value) {
@@ -222,11 +249,11 @@ async function startServer(mode) {
       let buffer = null;
       let type = contentType(pathname);
 
-      if (pathname === "/js/gl2gpu.js" && mode === "tint") {
-        buffer = fs.readFileSync(path.join(releaseRoot, "gl2gpu.js"));
-      } else if ((pathname === "/js/glslang.wasm" || pathname === "/js/tint_wasm.wasm") && mode === "tint") {
-        buffer = fs.readFileSync(path.join(releaseRoot, path.basename(pathname)));
-      } else if (pathname === "/js/shaders_info.json" && mode === "tint") {
+      if (pathname === "/js/gl2gpu.js" && isTintMode(mode)) {
+        buffer = fs.readFileSync(path.join(tintRootForMode(mode), "gl2gpu.js"));
+      } else if ((pathname === "/js/glslang.wasm" || pathname === "/js/tint_wasm.wasm") && isTintMode(mode)) {
+        buffer = fs.readFileSync(path.join(tintRootForMode(mode), path.basename(pathname)));
+      } else if (pathname === "/js/shaders_info.json" && isTintMode(mode)) {
         state.shaderDbRequests++;
         state.missing.push(pathname);
         sendBuffer(response, 404, Buffer.from("shader DB disabled for Tint mode"), "text/plain; charset=utf-8");
@@ -291,14 +318,53 @@ function benchmarkInitScript(options) {
   };
   window.__GL2GPU_DEMO_BENCH = state;
   window.alert = (message) => state.alerts.push(String(message));
+  document.addEventListener("DOMContentLoaded", () => {
+    if (window.canvas == null) {
+      const primaryCanvas = document.getElementById("canvas");
+      if (primaryCanvas instanceof HTMLCanvasElement) window.canvas = primaryCanvas;
+    }
+  }, { once: true });
   window.addEventListener("unhandledrejection", (event) => {
     console.error("[unhandledrejection]", event.reason && (event.reason.stack || event.reason.message || event.reason));
   });
 
+  let randomState = 0x9e3779b9;
+  Math.random = () => {
+    randomState ^= randomState << 13;
+    randomState ^= randomState >>> 17;
+    randomState ^= randomState << 5;
+    return (randomState >>> 0) / 4294967296;
+  };
+
+  const NativeDate = Date;
+  let logicalDateMs = 1700000000000;
+  function DeterministicDate(...args) {
+    if (new.target) {
+      return args.length > 0 ? new NativeDate(...args) : new NativeDate(logicalDateMs);
+    }
+    return args.length > 0 ? NativeDate(...args) : new NativeDate(logicalDateMs).toString();
+  }
+  Object.setPrototypeOf(DeterministicDate, NativeDate);
+  DeterministicDate.prototype = NativeDate.prototype;
+  DeterministicDate.now = () => logicalDateMs;
+  DeterministicDate.parse = NativeDate.parse;
+  DeterministicDate.UTC = NativeDate.UTC;
+  window.Date = DeterministicDate;
+
   const nativeRAF = window.requestAnimationFrame.bind(window);
+  const nativeCancelRAF = window.cancelAnimationFrame.bind(window);
+  const pendingApplicationRafs = new Set();
+  let lastLogicalFrameTimestamp = -1;
   let lastTimestamp = -1;
   let lastMeasureTime = 0;
-  window.requestAnimationFrame = (callback) => nativeRAF((timestamp) => {
+  window.requestAnimationFrame = (callback) => {
+    let requestId = 0;
+    requestId = nativeRAF((timestamp) => {
+    pendingApplicationRafs.delete(requestId);
+    if (timestamp !== lastLogicalFrameTimestamp) {
+      lastLogicalFrameTimestamp = timestamp;
+      logicalDateMs += 1000 / 60;
+    }
     state.rafCallbacks++;
     let result;
     try {
@@ -312,6 +378,22 @@ function benchmarkInitScript(options) {
               state.frameTimes.push(now - lastMeasureTime);
               if (state.frameTimes.length >= state.maxFrames) {
                 state.done = true;
+                for (const pendingId of pendingApplicationRafs) nativeCancelRAF(pendingId);
+                pendingApplicationRafs.clear();
+                window.requestAnimationFrame = nativeRAF;
+                window.__GL2GPU_DEMO_CAPTURE_FRAME = () => {
+                  const savedRAF = window.requestAnimationFrame;
+                  const savedCancelRAF = window.cancelAnimationFrame;
+                  window.requestAnimationFrame = () => 0;
+                  window.cancelAnimationFrame = () => {};
+                  try {
+                    callback(timestamp);
+                    return true;
+                  } finally {
+                    window.requestAnimationFrame = savedRAF;
+                    window.cancelAnimationFrame = savedCancelRAF;
+                  }
+                };
               }
             }
           }
@@ -322,7 +404,10 @@ function benchmarkInitScript(options) {
       }
     }
     return result;
-  });
+    });
+    pendingApplicationRafs.add(requestId);
+    return requestId;
+  };
 })();`;
 }
 
@@ -372,20 +457,35 @@ function summarizeFrameTimes(frameTimes) {
 }
 
 async function captureCanvasImage(page) {
-  return page.evaluate(() => {
+  const canvasInfo = await page.evaluate(() => {
     const canvases = Array.from(document.querySelectorAll("canvas"))
-      .filter((canvas) => canvas.width > 0 && canvas.height > 0)
-      .sort((a, b) => (b.width * b.height) - (a.width * a.height));
-    const canvas = canvases[0];
-    if (!canvas) return { error: "no canvas" };
-    const width = canvas.width;
-    const height = canvas.height;
+      .map((canvas, index) => ({ canvas, index }))
+      .filter(({ canvas }) => canvas.width > 0 && canvas.height > 0)
+      .sort((a, b) => (b.canvas.width * b.canvas.height) - (a.canvas.width * a.canvas.height));
+    if (canvases.length === 0) return null;
+    const target = canvases[0].canvas;
+    for (const element of document.body.querySelectorAll("*")) {
+      if (element === target || element.contains(target)) continue;
+      element.style.visibility = "hidden";
+    }
+    return { index: canvases[0].index };
+  }).catch(() => null);
+  if (!canvasInfo) return { error: "no canvas" };
+  const png = await page.locator("canvas").nth(canvasInfo.index).screenshot({ type: "png" })
+    .catch((error) => null);
+  if (!png) return { error: "canvas compositor screenshot failed" };
+  return page.evaluate(async (base64Png) => {
+    const image = new Image();
+    image.src = `data:image/png;base64,${base64Png}`;
+    await image.decode();
+    const width = image.naturalWidth;
+    const height = image.naturalHeight;
     const offscreen = document.createElement("canvas");
     offscreen.width = width;
     offscreen.height = height;
     const context = offscreen.getContext("2d", { willReadFrequently: true });
     if (!context) return { error: "2d context unavailable" };
-    context.drawImage(canvas, 0, 0, width, height);
+    context.drawImage(image, 0, 0, width, height);
     const pixels = context.getImageData(0, 0, width, height).data;
     let binary = "";
     const chunkSize = 0x8000;
@@ -393,7 +493,7 @@ async function captureCanvasImage(page) {
       binary += String.fromCharCode.apply(null, pixels.subarray(i, i + chunkSize));
     }
     return { width, height, data: btoa(binary) };
-  }).catch((error) => ({ error: error.message || String(error) }));
+  }, png.toString("base64")).catch((error) => ({ error: error.message || String(error) }));
 }
 
 function decodeImageData(image) {
@@ -434,6 +534,9 @@ async function runTrial(browser, benchmark, mode, trial) {
     deviceScaleFactor: 1,
   });
   const page = await context.newPage();
+  let cdpSession = null;
+  let cpuProfileStarted = false;
+  let cpuProfileFile = null;
   const messages = [];
   const pageErrors = [];
   const requestFailures = [];
@@ -473,16 +576,21 @@ async function runTrial(browser, benchmark, mode, trial) {
     await dialog.dismiss().catch(() => {});
   });
 
-  if (captureShaders && mode === "tint") {
+  if (captureShaders && isTintMode(mode)) {
     await installShaderCapture(page, shaderCaptures);
   }
+  if (captureCpuProfile) {
+    cdpSession = await context.newCDPSession(page);
+    await cdpSession.send("Profiler.enable");
+    await cdpSession.send("Profiler.setSamplingInterval", { interval: 100 });
+  }
   await page.addInitScript(benchmarkInitScript({ maxFrames, warmupFrames }));
-  if (mode === "tint" && staticSamplerOriginVariants !== null) {
+  if (isTintMode(mode) && staticSamplerOriginVariants !== null) {
     await page.addInitScript((enabled) => {
       window.__HYD_STATIC_SAMPLER_ORIGIN_VARIANTS = enabled;
     }, staticSamplerOriginVariants);
   }
-  if (mode === "tint" && optimizeTintWgsl !== null) {
+  if (isTintMode(mode) && optimizeTintWgsl !== null) {
     await page.addInitScript((enabled) => {
       window.__HYD_TRANSLATOR_OPTIONS = {
         ...(window.__HYD_TRANSLATOR_OPTIONS || {}),
@@ -495,7 +603,24 @@ async function runTrial(browser, benchmark, mode, trial) {
   let timeout = false;
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
-    await page.waitForFunction(() => window.__GL2GPU_DEMO_BENCH && window.__GL2GPU_DEMO_BENCH.done, null, { timeout: timeoutMs });
+    if (cdpSession) {
+      await page.waitForFunction(
+        () => window.__GL2GPU_DEMO_BENCH &&
+          window.__GL2GPU_DEMO_BENCH.seenFrames >= window.__GL2GPU_DEMO_BENCH.warmupFrames,
+        null,
+        { polling: 25, timeout: timeoutMs },
+      );
+      await cdpSession.send("Profiler.start");
+      cpuProfileStarted = true;
+    }
+    await page.waitForFunction(
+      () => window.__GL2GPU_DEMO_BENCH && window.__GL2GPU_DEMO_BENCH.done,
+      null,
+      { polling: 50, timeout: timeoutMs },
+    );
+    if (captureScreenshots) {
+      await page.evaluate(() => window.__GL2GPU_DEMO_CAPTURE_FRAME?.());
+    }
     await page.waitForTimeout(250);
   } catch (error) {
     timeout = true;
@@ -504,6 +629,21 @@ async function runTrial(browser, benchmark, mode, trial) {
 
   const benchData = await page.evaluate(() => window.__GL2GPU_DEMO_BENCH || null)
     .catch((error) => ({ error: error.message || String(error), frameTimes: [] }));
+  if (cdpSession) {
+    try {
+      if (cpuProfileStarted) {
+        const { profile } = await cdpSession.send("Profiler.stop");
+        const dir = path.join(outputRoot, "cpu-profiles");
+        fs.mkdirSync(dir, { recursive: true });
+        cpuProfileFile = path.join(dir, `${sanitizeName(mode)}-${sanitizeName(benchmark.name)}-trial-${trial}.cpuprofile`);
+        fs.writeFileSync(cpuProfileFile, JSON.stringify(profile));
+      }
+      await cdpSession.send("Profiler.disable");
+    } catch (error) {
+      pageErrors.push(`cpu-profile: ${error.message || error}`);
+    }
+    await cdpSession.detach().catch(() => {});
+  }
   const image = captureScreenshots ? await captureCanvasImage(page) : null;
   const screenshot = captureScreenshots
     ? path.join(outputRoot, `${mode}-${benchmark.name}-trial-${trial}.png`)
@@ -521,12 +661,12 @@ async function runTrial(browser, benchmark, mode, trial) {
 
   const frameSummary = summarizeFrameTimes((benchData && benchData.frameTimes) || []);
   const hardFailures = [
-    ...(mode === "tint" && state.shaderDbRequests > 0 ? [`shaderDbRequests=${state.shaderDbRequests}`] : []),
+    ...(isTintMode(mode) && state.shaderDbRequests > 0 ? [`shaderDbRequests=${state.shaderDbRequests}`] : []),
     ...(frameSummary.count === 0 ? ["0 frameTimes captured"] : []),
-    ...pageErrors.filter((text) => !/Cannot read properties of undefined \(reading 'width'\)/.test(text)),
+    ...pageErrors,
     ...messages.map((message) => message.text).filter((text) => {
       if (hardFailurePatterns.some((pattern) => pattern.test(text))) return true;
-      return mode === "tint" && tintOnlyHardFailurePatterns.some((pattern) => pattern.test(text));
+      return isTintMode(mode) && tintOnlyHardFailurePatterns.some((pattern) => pattern.test(text));
     }),
   ];
 
@@ -552,6 +692,7 @@ async function runTrial(browser, benchmark, mode, trial) {
     image,
     shaderCaptureFile,
     shaderCaptureCount: shaderCaptures.length,
+    cpuProfileFile,
   };
 }
 
@@ -571,6 +712,8 @@ function createSummary(results) {
       objects: benchmarkObjects(benchmark),
       modes: {},
       tintVsManualFpsRatio: null,
+      tintVsManualRatioOfMedianFps: null,
+      tintVsManualPairedFpsRatios: [],
       tintVsManualRmse: null,
       tintVsManualPsnr: null,
       pass: true,
@@ -591,7 +734,7 @@ function createSummary(results) {
         hardFailureCount: hardFailures.length,
         timeouts,
       };
-      if (mode === "tint" && shaderDbRequests !== 0) {
+      if (isTintMode(mode) && shaderDbRequests !== 0) {
         row.pass = false;
         row.reasons.push("Tint requested shader DB");
       }
@@ -604,7 +747,18 @@ function createSummary(results) {
     const tintFps = row.modes.tint && row.modes.tint.medianFps;
     const manualFps = row.modes.manual && row.modes.manual.medianFps;
     if (Number.isFinite(tintFps) && Number.isFinite(manualFps) && manualFps > 0) {
-      row.tintVsManualFpsRatio = tintFps / manualFps;
+      row.tintVsManualRatioOfMedianFps = tintFps / manualFps;
+      row.tintVsManualPairedFpsRatios = Array.from({ length: trials }, (_, index) => {
+        const trial = index + 1;
+        const tint = perBenchmark.find((result) => result.mode === "tint" && result.trial === trial);
+        const manual = perBenchmark.find((result) => result.mode === "manual" && result.trial === trial);
+        const pairedTintFps = tint?.frameSummary?.fps;
+        const pairedManualFps = manual?.frameSummary?.fps;
+        return Number.isFinite(pairedTintFps) && Number.isFinite(pairedManualFps) && pairedManualFps > 0
+          ? pairedTintFps / pairedManualFps
+          : null;
+      }).filter((ratio) => Number.isFinite(ratio));
+      row.tintVsManualFpsRatio = median(row.tintVsManualPairedFpsRatios) ?? row.tintVsManualRatioOfMedianFps;
       if (row.tintVsManualFpsRatio < fpsThreshold) {
         row.pass = false;
         row.reasons.push(`Tint FPS ratio ${row.tintVsManualFpsRatio.toFixed(3)} < ${fpsThreshold}`);
@@ -690,6 +844,12 @@ function printSummary(summary) {
     const rmse = Number.isFinite(row.tintVsManualRmse) ? row.tintVsManualRmse.toFixed(5) : "n/a";
     const psnr = row.tintVsManualPsnr === Infinity ? "Infinity" : Number.isFinite(row.tintVsManualPsnr) ? row.tintVsManualPsnr.toFixed(3) : "n/a";
     console.log(`${row.pass ? "PASS" : "FAIL"} ${row.benchmark}: tint=${tintFps}fps manual=${manualFps}fps webgl=${webglFps}fps ratio=${ratio} rmse=${rmse} psnr=${psnr}`);
+    const variants = selectedModes
+      .filter((mode) => tintVariantRoots.has(mode))
+      .map((mode) => `${mode}=${Number.isFinite(row.modes[mode]?.medianFps) ? row.modes[mode].medianFps.toFixed(3) : "n/a"}fps`);
+    if (variants.length > 0) {
+      console.log(`  ${variants.join(" ")}`);
+    }
     for (const reason of row.reasons) {
       console.log(`  - ${reason}`);
     }
@@ -703,6 +863,11 @@ async function main() {
   assertReadable(path.join(releaseRoot, "gl2gpu.js"));
   assertReadable(path.join(releaseRoot, "glslang.wasm"));
   assertReadable(path.join(releaseRoot, "tint_wasm.wasm"));
+  for (const root of tintVariantRoots.values()) {
+    assertReadable(path.join(root, "gl2gpu.js"));
+    assertReadable(path.join(root, "glslang.wasm"));
+    assertReadable(path.join(root, "tint_wasm.wasm"));
+  }
 
   fs.rmSync(outputRoot, { recursive: true, force: true });
   fs.mkdirSync(outputRoot, { recursive: true });
@@ -729,6 +894,7 @@ async function main() {
   const report = {
     generatedAt: new Date().toISOString(),
     demoRoot,
+    outputRoot,
     modes: selectedModes,
     benchmarks: selectedBenchmarks.map((benchmark) => ({
       name: benchmark.name,
@@ -741,7 +907,9 @@ async function main() {
     maxFrames,
     warmupFrames,
     browser: browserInfo,
+    tintVariants: Object.fromEntries(tintVariantRoots),
     captureShaders,
+    captureCpuProfile,
     staticSamplerOriginVariants,
     optimizeTintWgsl,
     fpsThreshold,

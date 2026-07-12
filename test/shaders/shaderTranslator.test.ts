@@ -1,10 +1,149 @@
 import { deepEqual } from "node:assert/strict";
 
-import { scanGlslDeclarations } from "../../src/components/shaderMetadata";
+import { makeShaderMetadata, scanGlslDeclarations } from "../../src/components/shaderMetadata";
 import { normalizeWebGlTextureCoordinates } from "../../src/components/shaderTexCoord";
-import { optimizeTintWgsl } from "../../src/components/shaderWgslOptimizer";
+import { optimizeTintWgsl, splitDeepAssociativeExpressions } from "../../src/components/shaderWgslOptimizer";
 import { computeShaderShapeStats } from "../../src/components/shaderCapture";
+import {
+    composeShaderModuleWgsl,
+    renameReservedWgslIdentifiers,
+    replaceBareWgslIdentifier,
+    replaceWgslMemberAccess,
+    synchronizeTintUniformTypes,
+    wgslUniformVariableNames,
+} from "../../src/components/shaderWgslTypes";
+import {
+    makeMatrixArrayLoaders,
+    matrixArrayStorageDeclaration,
+    rewriteMatrixArrayUniformReads,
+} from "../../src/components/shaderGlslUniforms";
+import {
+    lowerDynamicSamplerArrayTextureCalls,
+    lowerSamplerStructFunctionParameters,
+} from "../../src/components/shaderGlslSamplers";
 import type { InitShaderInfoType } from "../../src/components/shaderDB";
+import {
+    DEPTH_RANGE_DIFF_UNIFORM_NAME,
+    DEPTH_RANGE_FAR_UNIFORM_NAME,
+    DEPTH_RANGE_NEAR_UNIFORM_NAME,
+    FRAG_COORD_HEIGHT_UNIFORM_NAME,
+} from "../../src/components/shaderInternalUniforms";
+import {
+    lowerEs100GlobalInitializers,
+    lowerWebGlPointSizeToPrivateState,
+    materializeWebGlLineMacros,
+    maskStaticallyInactivePreprocessorBranches,
+    normalizeWebGlDepthRange,
+    normalizeWebGl1BuiltinLimits,
+    normalizeEs100SequenceArrayDimensions,
+    stripGlslVersionDirectives,
+    stripProvablyEmptyTopLevelMacroInvocations,
+    wrapVertexMainForWebGpuClipSpace,
+} from "../../src/components/shaderGlslCompatibility";
+import {
+    bridgeGlslEs100Identifiers,
+    bridgeGlslDunderIdentifiers,
+    bridgeGlslIdentifier,
+    renameUserDefinedFunctions,
+} from "../../src/components/shaderGlslIdentifiers";
+import {
+    normalizeAnonymousUniformStructs,
+    planValueStructUniforms,
+    rewriteStructUniformAggregateReads,
+} from "../../src/components/shaderGlslStructs";
+
+const strippedVersion = stripGlslVersionDirectives(
+    "#version 100\n/* #version text\n   #version is still a comment */\nvoid main() {}\n",
+);
+if (strippedVersion.split("\n")[0].trim() !== "" ||
+    !strippedVersion.includes("#version is still a comment */")) {
+    throw new Error(`unexpected version directive stripping:\n${strippedVersion}`);
+}
+
+const versionConditionalSource = `
+#if __VERSION__ == 300
+out vec4 webgl2Color;
+#else
+#define outputColor gl_FragColor
+#endif
+void main() { outputColor = vec4(1.0); }
+`;
+const webgl1Conditional = maskStaticallyInactivePreprocessorBranches(versionConditionalSource, 1);
+if (/^out vec4 webgl2Color;/m.test(webgl1Conditional) ||
+    !webgl1Conditional.includes("#define outputColor gl_FragColor")) {
+    throw new Error(`unexpected WebGL 1 preprocessor masking:\n${webgl1Conditional}`);
+}
+const webgl2Conditional = maskStaticallyInactivePreprocessorBranches(versionConditionalSource, 2);
+if (!/^out vec4 webgl2Color;/m.test(webgl2Conditional) ||
+    /^#define outputColor gl_FragColor/m.test(webgl2Conditional)) {
+    throw new Error(`unexpected WebGL 2 preprocessor masking:\n${webgl2Conditional}`);
+}
+
+const lineMacroSource = `#define BBB __LINE__, /*
+ */ __LINE__
+#define AAA(a, b) BBB, a, b
+#define LOGICAL_LINE 40
+#line LOGICAL_LINE
+vec4 value = vec4(AAA(__LINE__,
+                      __LINE__));
+`;
+const materializedLineMacros = materializeWebGlLineMacros(lineMacroSource);
+if (!materializedLineMacros.includes("#define BBB __LINE__, /*\n */ __LINE__") ||
+    !materializedLineMacros.includes("vec4 value = vec4(AAA(40,\n                      41));")) {
+    throw new Error(`unexpected __LINE__ materialization:\n${materializedLineMacros}`);
+}
+const delegatedLineExpression = materializeWebGlLineMacros(
+    "#line (20 + 1)\nfloat value = float(__LINE__);\n",
+);
+if (!delegatedLineExpression.includes("float value = float(__LINE__);")) {
+    throw new Error(`unproven #line expression was not delegated:\n${delegatedLineExpression}`);
+}
+
+const declaredOnlyVertexVarying = "varying float value; void main() { gl_Position = vec4(0.0); }";
+deepEqual(scanGlslDeclarations(declaredOnlyVertexVarying, "vertex").varyings, []);
+deepEqual(
+    scanGlslDeclarations(declaredOnlyVertexVarying, "vertex", { includeUnusedVaryings: true })
+        .varyings.map((varying) => varying.name),
+    ["value"],
+);
+
+const renamedFunctions = renameUserDefinedFunctions(`
+bool function(bool par[3]);
+bool is_all(const in bool array[3], const in bool value);
+void set_all(out bool array[3], const in bool value);
+void main() {
+  bool par[3];
+  // Initialize the entire array to true.
+  set_all(par, true);
+  bool ret = function(par) && is_all(par, true);
+  /* A comment ending with another period. */
+  set_all(par, ret);
+  value.set_all();
+}
+void set_all(out bool array[3], const in bool value) {
+  array[0] = value;
+}
+`);
+if ((renamedFunctions.match(/_hyd_user_set_all\s*\(/g) || []).length !== 4 ||
+    !renamedFunctions.includes("_hyd_user_function(par)") ||
+    !renamedFunctions.includes("_hyd_user_is_all(par, true)") ||
+    !renamedFunctions.includes("value.set_all()") ||
+    !renamedFunctions.includes("// Initialize the entire array to true.")) {
+    throw new Error(`unexpected user function renaming:\n${renamedFunctions}`);
+}
+
+const loweredPointSize = lowerWebGlPointSizeToPrivateState(`
+// gl_PointSize in a comment must not trigger a replacement.
+void main() {
+  gl_PointSize = pointScale * 2.0;
+  pointScale = gl_PointSize;
+}
+`);
+if (!/float _hydWebGlPointSize;/.test(loweredPointSize) ||
+    (loweredPointSize.match(/_hydWebGlPointSize/g) || []).length !== 3 ||
+    !loweredPointSize.includes("// gl_PointSize in a comment")) {
+    throw new Error(`unexpected PointSize lowering:\n${loweredPointSize}`);
+}
 
 const vertex = `
 attribute vec3 aPos;
@@ -29,6 +168,38 @@ void main() {
 }
 `;
 
+const fragCoordSource = `
+precision mediump float;
+void main() {
+  gl_FragColor = vec4(gl_FragCoord.xy, gl_FragCoord.zw);
+}
+`;
+const fragCoordMetadata = makeShaderMetadata(
+    fragCoordSource,
+    0x8B30,
+);
+deepEqual(
+    fragCoordMetadata.uniforms.filter((uniform) => uniform.internal).map((uniform) => uniform.name),
+    [FRAG_COORD_HEIGHT_UNIFORM_NAME],
+);
+
+const depthRangeSource = `
+void main() {
+  gl_Position = vec4(gl_DepthRange.near, gl_DepthRange.far, gl_DepthRange.diff, 1.0);
+}
+`;
+deepEqual(
+    makeShaderMetadata(depthRangeSource, 0x8B31).uniforms
+        .filter((uniform) => uniform.internal)
+        .map((uniform) => uniform.name),
+    [DEPTH_RANGE_NEAR_UNIFORM_NAME, DEPTH_RANGE_FAR_UNIFORM_NAME, DEPTH_RANGE_DIFF_UNIFORM_NAME],
+);
+const normalizedDepthRange = normalizeWebGlDepthRange(depthRangeSource);
+if (normalizedDepthRange.includes("gl_DepthRange") ||
+    !normalizedDepthRange.includes(DEPTH_RANGE_DIFF_UNIFORM_NAME)) {
+    throw new Error(`unexpected depth-range normalization:\n${normalizedDepthRange}`);
+}
+
 const vertexDecls = scanGlslDeclarations(vertex, "vertex");
 deepEqual(vertexDecls.attributes.map((item) => item.name), ["aPos", "aUv"]);
 deepEqual(vertexDecls.attributes.map((item) => item.wgsl_type), ["vec3<f32>", "vec2<f32>"]);
@@ -44,6 +215,324 @@ const sameLineDeclarations = scanGlslDeclarations(
 );
 deepEqual(sameLineDeclarations.attributes.map((item) => item.name), ["aVertex", "aColor"]);
 deepEqual(sameLineDeclarations.varyings.map((item) => item.name), ["vColor"]);
+
+const varyingArrayDeclarations = scanGlslDeclarations(
+    "varying vec2 colors[3]; void main() { gl_FragColor = vec4(colors[0], 0.0, 1.0); }",
+    "fragment",
+);
+deepEqual(varyingArrayDeclarations.varyings.map((item) => ({
+    name: item.name,
+    size: item.size,
+    isArray: item.is_array,
+})), [{ name: "colors", size: 3, isArray: true }]);
+
+const uniformArrayDeclarations = scanGlslDeclarations(
+    "uniform float weights[4]; void main() { gl_Position = vec4(weights[0], weights[1], weights[2], weights[3]); }",
+    "vertex",
+);
+deepEqual(uniformArrayDeclarations.uniforms.map((item) => ({
+    name: item.name,
+    size: item.size,
+    wgslType: item.wgsl_type,
+})), [{ name: "weights", size: 4, wgslType: "array<f32, 4>" }]);
+const constSizedUniformArray = scanGlslDeclarations(
+    "const int base = 1; const int count = (base + 1) * 2; uniform float weights[count]; void main() { gl_Position = vec4(weights[3]); }",
+    "vertex",
+);
+deepEqual(constSizedUniformArray.uniforms.map((item) => ({ name: item.name, size: item.size })), [
+    { name: "weights", size: 4 },
+]);
+const singleElementArrayDeclarations = scanGlslDeclarations(
+    "uniform vec4 color[1]; void main() { gl_Position = color[0]; }",
+    "vertex",
+);
+deepEqual(singleElementArrayDeclarations.uniforms.map((item) => ({
+    name: item.name,
+    size: item.size,
+    isArray: item.is_array,
+    wgslType: item.wgsl_type,
+})), [{ name: "color", size: 1, isArray: true, wgslType: "array<vec4<f32>, 1>" }]);
+
+const samplerArrayDeclarations = scanGlslDeclarations(
+    "#define SAMPLER_COUNT 2\nuniform sampler2D textures[SAMPLER_COUNT]; void main() { gl_FragColor = texture2D(textures[1], vec2(0.0)); }",
+    "fragment",
+);
+deepEqual(samplerArrayDeclarations.samplers.map((item) => ({
+    name: item.name,
+    sourceName: item.source_name,
+    size: item.size,
+    arrayName: item.array_name,
+    arrayIndex: item.array_index,
+})), [
+    { name: "textures_0", sourceName: "textures[0]", size: 2, arrayName: "textures", arrayIndex: 0 },
+    { name: "textures_1", sourceName: "textures[1]", size: 2, arrayName: "textures", arrayIndex: 1 },
+]);
+const dynamicSamplerLowering = lowerDynamicSamplerArrayTextureCalls(
+    "color += texture(textures[i - 1], uv);",
+    samplerArrayDeclarations.samplers,
+);
+deepEqual(dynamicSamplerLowering.source, "color += _hyd_texture_sampler_array_textures_2(int(i - 1), uv);");
+if (dynamicSamplerLowering.helpers.length !== 1 ||
+    !dynamicSamplerLowering.helpers[0].includes("if (index == 0) return texture(sampler2D(textures_0T, textures_0S), coord);") ||
+    !dynamicSamplerLowering.helpers[0].includes("return texture(sampler2D(textures_1T, textures_1S), coord);")) {
+    throw new Error("expected dynamic sampler arrays to lower to resource dispatch");
+}
+const vertexDynamicSamplerLowering = lowerDynamicSamplerArrayTextureCalls(
+    "color += texture(textures[i], uv);",
+    samplerArrayDeclarations.samplers,
+    "vertex",
+);
+if (!vertexDynamicSamplerLowering.helpers[0].includes(
+    "return textureLod(sampler2D(textures_1T, textures_1S), coord, 0.0);",
+)) {
+    throw new Error("expected vertex-stage dynamic sampler dispatch to use explicit LOD zero");
+}
+
+const samplerStructSource = `
+struct Samplers {
+  sampler2D values[2];
+};
+uniform Samplers uni;
+vec4 readSampler(Samplers arg) {
+  return texture2D(arg.values[0], vec2(0.0));
+}
+void main() {
+  gl_FragColor = readSampler(uni);
+}
+`;
+const samplerStructDeclarations = scanGlslDeclarations(samplerStructSource, "fragment");
+deepEqual(
+    samplerStructDeclarations.samplers.map((sampler) => [sampler.name, sampler.source_name]),
+    [["uni_values_0", "uni.values[0]"], ["uni_values_1", "uni.values[1]"]],
+);
+const samplerStructLowered = lowerSamplerStructFunctionParameters(
+    samplerStructSource,
+    samplerStructDeclarations.samplers,
+);
+if (!samplerStructLowered.includes("vec4 readSampler(sampler2D arg_values_0, sampler2D arg_values_1)") ||
+    !samplerStructLowered.includes("texture2D(arg_values_0, vec2(0.0))") ||
+    !samplerStructLowered.includes("readSampler(uni_values_0, uni_values_1)") ||
+    samplerStructLowered.includes("struct Samplers")) {
+    throw new Error(`expected sampler-only struct parameters to flatten:\n${samplerStructLowered}`);
+}
+
+const tintUniformMetadata: InitShaderInfoType = {
+    attributes: [],
+    uniforms: [
+        { name: "weights", glsl_type: "float", wgsl_type: "array<f32, 2>", size: 2 },
+        { name: "offsets", glsl_type: "vec4", wgsl_type: "array<vec4f, 2>", size: 2 },
+    ],
+    samplers: [],
+    glsl: "",
+    wgsl: "",
+    debug_info: "",
+};
+const synchronizedTintUniformWgsl = synchronizeTintUniformTypes(`
+struct strided_arr {
+  @size(16) el : f32,
+}
+alias Arr = array<strided_arr, 2u>;
+struct HydUniformObject {
+  /* @offset(0) */ weights : Arr,
+  @align(16) offsets : array<vec4f, 2u>,
+}
+@group(0) @binding(0) var<uniform> x_26 : HydUniformObject;
+`, tintUniformMetadata);
+if (!/^array<_hyd_uniform_layout_[a-z0-9]+, 2u>$/.test(tintUniformMetadata.uniforms[0].wgsl_type)) {
+    throw new Error(`expected a canonical strided array type, got ${tintUniformMetadata.uniforms[0].wgsl_type}`);
+}
+deepEqual(tintUniformMetadata.uniforms[1].wgsl_type, "array<vec4f, 2u>");
+const tintUniformDeclarations = tintUniformMetadata.uniforms[0].wgsl_declarations || [];
+if (tintUniformDeclarations.length !== 1 || !tintUniformDeclarations[0].includes("@size(16) el: f32")) {
+    throw new Error("expected the canonical uniform type declaration to preserve Tint's element stride");
+}
+if (/\b(?:strided_arr|Arr)\b/.test(synchronizedTintUniformWgsl)) {
+    throw new Error("expected Tint-local uniform type aliases to be replaced by canonical types");
+}
+const bareXRewritten = replaceBareWgslIdentifier(
+    "let selected = x; let expanded = vec4f(value.x, value . x, 0.0f, 0.0f);",
+    "x",
+    "_hyd_uniforms_.x",
+);
+deepEqual(
+    bareXRewritten,
+    "let selected = _hyd_uniforms_.x; let expanded = vec4f(value.x, value . x, 0.0f, 0.0f);",
+);
+deepEqual(
+    replaceBareWgslIdentifier(
+        "@builtin(position) gl_Position: vec4f, @location(0) value: f32; let selected = position;",
+        "position",
+        "_hyd_uniforms_.position",
+    ),
+    "@builtin(position) gl_Position: vec4f, @location(0) value: f32; let selected = _hyd_uniforms_.position;",
+);
+
+deepEqual(bridgeGlslIdentifier("uint"), "hydgl2gpu_id_uint");
+deepEqual(bridgeGlslIdentifier("position"), "position");
+const bridgedDunder = bridgeGlslDunderIdentifiers("attribute vec4 foo__bar; void main() { gl_Position = foo__bar; }");
+if (/\bfoo__bar\b/.test(bridgedDunder) || !/hydgl2gpu_dunder_foo_bar_[a-z0-9]+/.test(bridgedDunder)) {
+    throw new Error(`double-underscore identifier was not alpha-renamed: ${bridgedDunder}`);
+}
+deepEqual(bridgeGlslDunderIdentifiers("#if __VERSION__ == 100\n#endif"), "#if __VERSION__ == 100\n#endif");
+for (const name of ["__foo", "foo__", "__foo__"]) {
+    const bridged = bridgeGlslIdentifier(name);
+    if (bridged === name || bridged.includes("__")) {
+        throw new Error(`unsafe double-underscore bridge for ${name}: ${bridged}`);
+    }
+}
+deepEqual(
+    bridgeGlslEs100Identifiers(`
+struct texture { vec4 sin; };
+attribute vec4 uint;
+void main() {
+  texture value;
+  value.sin = sin(uint.x);
+  gl_Position = vec4(value.sin);
+}
+`),
+    `
+struct hydgl2gpu_id_texture { vec4 hydgl2gpu_id_sin; };
+attribute vec4 hydgl2gpu_id_uint;
+void main() {
+  hydgl2gpu_id_texture value;
+  value.hydgl2gpu_id_sin = sin(hydgl2gpu_id_uint.x);
+  gl_Position = vec4(value.hydgl2gpu_id_sin);
+}
+`,
+);
+const bridgedMetadata = scanGlslDeclarations(
+    "attribute vec4 uint; varying vec4 texture; void main() { texture = uint; gl_Position = uint; }",
+    "vertex",
+);
+deepEqual(bridgedMetadata.attributes.map((item) => [item.name, item.source_name]), [["hydgl2gpu_id_uint", "uint"]]);
+deepEqual(bridgedMetadata.varyings.map((item) => [item.name, item.source_name]), [["hydgl2gpu_id_texture", "texture"]]);
+deepEqual(bridgeGlslIdentifier("coherent"), "hydgl2gpu_id_coherent");
+deepEqual(
+    bridgeGlslEs100Identifiers(
+        "attribute vec4 coherent; void main() { gl_Position = coherent; }",
+    ),
+    "attribute vec4 hydgl2gpu_id_coherent; void main() { gl_Position = hydgl2gpu_id_coherent; }",
+);
+deepEqual(
+    scanGlslDeclarations("uniform vec4 coherent; void main() { gl_FragColor = coherent; }", "fragment")
+        .uniforms.map((item) => [item.name, item.source_name]),
+    [["hydgl2gpu_id_coherent", "coherent"]],
+);
+
+deepEqual(
+    normalizeEs100SequenceArrayDimensions("void main() { float values[(2, 3)]; }") ,
+    "void main() { float values[3]; }",
+);
+deepEqual(
+    lowerEs100GlobalInitializers(`
+const float keep = 1.0;
+float first = keep;
+float second = sin(first), third;
+void main() {
+  gl_Position = vec4(second + third);
+}
+`),
+    `
+const float keep = 1.0;
+float first;
+float second, third;
+void main() {
+  first = keep;
+  second = sin(first);
+  gl_Position = vec4(second + third);
+}
+`,
+);
+const loweredPostMainGlobals = lowerEs100GlobalInitializers(`
+#ifdef GL_ES
+#endif
+float before = 1.0;
+void main() { gl_Position = vec4(before + after); }
+float after = 2.0;
+`);
+if (loweredPostMainGlobals.includes("GL_ES =") ||
+    loweredPostMainGlobals.indexOf("float after;") > loweredPostMainGlobals.indexOf("void main") ||
+    !/void main\(\) \{\s*before = 1\.0;\s*after = 2\.0;/.test(loweredPostMainGlobals)) {
+    throw new Error(`unexpected post-main global lowering:\n${loweredPostMainGlobals}`);
+}
+
+const structArraySource = `
+struct ColorPair { vec4 color1[2]; vec4 color2[2]; };
+uniform ColorPair u_colors[2];
+void main() {
+  gl_FragColor = u_colors[0].color1[0] + u_colors[1].color2[1];
+}
+`;
+const structArrayPlan = planValueStructUniforms(structArraySource);
+deepEqual(
+    structArrayPlan.leaves.map((leaf) => [leaf.sourceName, leaf.size, leaf.isArray]),
+    [
+        ["u_colors[0].color1", 2, true],
+        ["u_colors[1].color2", 2, true],
+    ],
+);
+const structArrayMetadata = scanGlslDeclarations(structArraySource, "fragment");
+deepEqual(
+    structArrayMetadata.uniforms.map((uniform) => [uniform.source_name, uniform.size, uniform.is_array]),
+    [
+        ["u_colors[0].color1", 2, true],
+        ["u_colors[1].color2", 2, true],
+    ],
+);
+
+const aggregateStructSource = `
+struct S { float zero; int one; };
+uniform S us;
+S value = us;
+void main() { gl_FragColor = vec4(float(value.one)); }
+`;
+const aggregatePlan = planValueStructUniforms(aggregateStructSource);
+deepEqual(aggregatePlan.leaves.map((leaf) => leaf.sourceName), ["us.zero", "us.one"]);
+const reconstructedAggregate = rewriteStructUniformAggregateReads("S value = us;", aggregatePlan);
+if (!/^S value = S\(hydgl2gpu_uniform_us_zero_[a-z0-9]+, hydgl2gpu_uniform_us_one_[a-z0-9]+\);$/.test(reconstructedAggregate)) {
+    throw new Error(`unexpected struct aggregate reconstruction: ${reconstructedAggregate}`);
+}
+const anonymousStructSource = normalizeAnonymousUniformStructs("uniform struct { float f; vec4 v; } u_struct;");
+if (!/struct hydgl2gpu_anon_uniform_0/.test(anonymousStructSource) || !/uniform hydgl2gpu_anon_uniform_0 u_struct;/.test(anonymousStructSource)) {
+    throw new Error(`anonymous uniform struct was not normalized: ${anonymousStructSource}`);
+}
+const uniformObjectSource = `
+@group(0) @binding(0) var<uniform> x_13 : HydUniformObject;
+let selected = x_13.x;
+let expanded = vec4f(value.x, value . x, 0.0f, 0.0f);
+`;
+deepEqual(wgslUniformVariableNames(uniformObjectSource), ["x_13"]);
+deepEqual(
+    replaceWgslMemberAccess(uniformObjectSource, ["x_13"], "x", "_hyd_uniforms_.x"),
+    `
+@group(0) @binding(0) var<uniform> x_13 : HydUniformObject;
+let selected = _hyd_uniforms_.x;
+let expanded = vec4f(value.x, value . x, 0.0f, 0.0f);
+`,
+);
+deepEqual(
+    composeShaderModuleWgsl(
+        "@group(0) @binding(0) var tex: texture_2d<f32>;\n",
+        "diagnostic(off, derivative_uniformity);\n\n@fragment fn main() {}\n",
+    ),
+    "diagnostic(off, derivative_uniformity);\n\n@group(0) @binding(0) var tex: texture_2d<f32>;\n@fragment fn main() {}\n",
+);
+
+const matrixArrayUniform = { name: "bones", glsl_type: "mat3x2", wgsl_type: "", size: 3, is_array: true };
+deepEqual(matrixArrayStorageDeclaration(matrixArrayUniform), "vec2 bones[9];");
+deepEqual(makeMatrixArrayLoaders([matrixArrayUniform]), [
+    "mat3x2 _hyd_load_matrix_array_bones(int index) {\n" +
+    "  return mat3x2(bones[(index * 3) + 0], bones[(index * 3) + 1], bones[(index * 3) + 2]);\n" +
+    "}",
+]);
+deepEqual(
+    rewriteMatrixArrayUniformReads("return bones[i + indices[j]][1] + float(bones.length());", [matrixArrayUniform]),
+    "return _hyd_load_matrix_array_bones(int(i + indices[j]))[1] + float(3);",
+);
+const noOpWholeMatrixArray = rewriteMatrixArrayUniformReads("void f() { bones; }", [matrixArrayUniform]);
+if (/\bbones\s*;/.test(noOpWholeMatrixArray)) {
+    throw new Error(`expected a side-effect-free whole-array statement to be removed: ${noOpWholeMatrixArray}`);
+}
 
 const fragmentDecls = scanGlslDeclarations(fragment, "fragment");
 deepEqual(fragmentDecls.uniforms.map((item) => item.name), ["exposure"]);
@@ -292,6 +781,46 @@ if (optimizedWrapper.stats.loweredPrivateVars !== 3) {
 }
 if (optimizedWrapper.stats.removedTemporaries < 1 || optimizedWrapper.stats.foldedConstructors < 1) {
     throw new Error("expected peephole optimizer to remove a temp and fold a constructor");
+}
+
+const indexedPrivateOutputWgsl = `
+var<private> values : array<f32, 2u>;
+
+fn main_1() {
+  values[0i] = 1.0f;
+  values[1i] = 2.0f;
+}
+
+struct main_out {
+  @location(0) value_0 : f32,
+  @location(1) value_1 : f32,
+}
+
+@vertex
+fn main() -> main_out {
+  main_1();
+  return main_out(values[0i], values[1i]);
+}
+`;
+const indexedPrivateOutputOptimized = optimizeTintWgsl(indexedPrivateOutputWgsl);
+if (indexedPrivateOutputOptimized.wgsl.includes("var<private> values") ||
+    !indexedPrivateOutputOptimized.wgsl.includes("_hyd_output.value_0 = 1.0f;") ||
+    !indexedPrivateOutputOptimized.wgsl.includes("_hyd_output.value_1 = 2.0f;")) {
+    throw new Error(`expected fixed-index private outputs to lower safely:\n${indexedPrivateOutputOptimized.wgsl}`);
+}
+
+const inferredVectorConstructorWgsl = optimizeTintWgsl(`
+fn helper(value: vec3f) -> vec4f {
+  let expanded = vec4f(value, 1.0f);
+  let copied = vec4f(expanded.x, expanded.y, expanded.z, expanded.w);
+  return copied;
+}
+`);
+if (inferredVectorConstructorWgsl.wgsl.includes("vec4f(expanded.x")) {
+    throw new Error("expected inferred vec4f declarations to participate in constructor folding");
+}
+if (inferredVectorConstructorWgsl.stats.foldedConstructors < 1) {
+    throw new Error("expected inferred vector constructor folding to be counted");
 }
 
 const spriteOutputStoreWgsl = `
@@ -625,6 +1154,62 @@ const repeatedAliasOptimized = optimizeTintWgsl(repeatedAliasWgsl);
 if (repeatedAliasOptimized.wgsl.includes("let x_93 : f32 = value;") ||
     !repeatedAliasOptimized.wgsl.includes("return value + value;")) {
     throw new Error("expected a repeated alias of an immutable parameter to fold safely");
+}
+
+const reservedWgslNames = renameReservedWgslIdentifiers(`
+struct Output {
+  pass: f32,
+}
+fn test(pass: f32) -> Output {
+  let target = pass;
+  return Output(target);
+}
+`);
+if (/\b(?:pass|target)\b/.test(reservedWgslNames) ||
+    !reservedWgslNames.includes("pass_: f32") ||
+    !reservedWgslNames.includes("let target_ = pass_")) {
+    throw new Error("expected Dawn WGSL reserved identifiers to be renamed consistently");
+}
+
+const deepTerms = Array.from({ length: 96 }, (_, index) => `value${index}`);
+const deepLeftAssociated = deepTerms.slice(1).reduce((left, right) => `(${left} + ${right})`, deepTerms[0]);
+const splitDeepExpression = splitDeepAssociativeExpressions(`fn test() {\n  let sum : f32 = ${deepLeftAssociated};\n}`);
+if (splitDeepExpression.split < 1 || !splitDeepExpression.wgsl.includes("let _hyd_add_chain_0 =")) {
+    throw new Error("expected a deep left-associative expression to be split into ordered chunks");
+}
+const flattenedDeepTerms = splitDeepExpression.wgsl.match(/value\d+/g) || [];
+deepEqual(flattenedDeepTerms, deepTerms);
+
+const trickyEmptyMacro = `#define m(a)
+#define a m((a)
+a)
+
+void main() {
+  float a = 1.0;
+}
+`;
+const strippedEmptyMacro = stripProvablyEmptyTopLevelMacroInvocations(trickyEmptyMacro);
+if (/^a\)$/m.test(strippedEmptyMacro) || !strippedEmptyMacro.includes("float a = 1.0;")) {
+    throw new Error("expected only the provably empty top-level macro invocation to be stripped");
+}
+
+const normalizedBuiltins = normalizeWebGl1BuiltinLimits(
+    "int values[gl_MaxVertexAttribs]; bool ok = gl_MaxVaryingVectors == 32;",
+);
+if (normalizedBuiltins !== "int values[16]; bool ok = 32 == 32;") {
+    throw new Error(`unexpected WebGL 1 GLSL builtin limits: ${normalizedBuiltins}`);
+}
+
+const clipSpaceWrapped = wrapVertexMainForWebGpuClipSpace(`
+void main() {
+  if (enabled) return;
+  gl_Position = position;
+}
+`);
+if (!clipSpaceWrapped.includes("void _hyd_webgl_vertex_main()") ||
+    !clipSpaceWrapped.includes("_hyd_webgl_vertex_main();") ||
+    !clipSpaceWrapped.includes("gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;")) {
+    throw new Error("expected WebGL clip-space depth remapping to wrap the vertex entrypoint");
 }
 
 const conditionalAssignmentWgsl = `
