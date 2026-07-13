@@ -1,6 +1,17 @@
 import { HydHashable } from "./base/hydHashable";
 import { HydTexture, HydTextureImageState, isWebGlColorRenderableInternalFormat } from "./hydTexture";
 
+export function webGlReadPixelsCopyLayout(
+    sourceHeight: number,
+    y: number,
+    height: number,
+): { sourceY: number, reverseRows: boolean } {
+    return {
+        sourceY: sourceHeight - y - height,
+        reverseRows: true,
+    };
+}
+
 export function webGlInternalFormatColorBits(internalFormat: GLenum): [number, number, number, number] {
     switch (internalFormat) {
         case WebGL2RenderingContext.R8:

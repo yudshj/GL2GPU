@@ -4178,6 +4178,12 @@ fn fragmentMain(@location(0) uv: vec2f) -> @location(0) vec4f {
 
 ;// ./src/components/hydFramebuffer.ts
 
+function webGlReadPixelsCopyLayout(sourceHeight, y, height) {
+    return {
+        sourceY: sourceHeight - y - height,
+        reverseRows: true,
+    };
+}
 function webGlInternalFormatColorBits(internalFormat) {
     switch (internalFormat) {
         case WebGL2RenderingContext.R8:
@@ -21465,9 +21471,8 @@ fn fragmentMain(@builtin(position) position : vec4f${sampleParameter}) {
         if (attachment.format !== "rgba8unorm" && attachment.format !== "rgba8unorm-srgb") {
             return false;
         }
-        const framebufferOriented = this.samplerNeedsOriginFlip(attachment.attachment);
         const sourceHeight = attachment.height;
-        const sourceY = framebufferOriented ? y : sourceHeight - y - height;
+        const { sourceY, reverseRows } = webGlReadPixelsCopyLayout(sourceHeight, y, height);
         const rowBytes = width * 4;
         const bytesPerRow = this.alignReadbackBytesPerRow(rowBytes);
         const stagingBuffer = this.hydDevice.createBuffer({
@@ -21481,11 +21486,7 @@ fn fragmentMain(@builtin(position) position : vec4f${sampleParameter}) {
         encoder.copyTextureToBuffer({
             texture: attachment.attachment.texture,
             mipLevel: attachment.level || 0,
-            origin: {
-                x,
-                y: sourceY,
-                z: attachment.layer || 0,
-            },
+            origin: { x, y: sourceY, z: attachment.layer || 0 },
         }, {
             buffer: stagingBuffer,
             bytesPerRow,
@@ -21515,7 +21516,7 @@ fn fragmentMain(@builtin(position) position : vec4f${sampleParameter}) {
             .then(() => {
             mapped = true;
             const source = new Uint8Array(stagingBuffer.getMappedRange());
-            this.writePixelPackRgba8Rows(source, bytesPerRow, width, height, !framebufferOriented, attachment.colorBits[3] === 0, destinationBuffer, destinationOffset, destinationFirstRow, destinationColumnOffset, layout);
+            this.writePixelPackRgba8Rows(source, bytesPerRow, width, height, reverseRows, attachment.colorBits[3] === 0, destinationBuffer, destinationOffset, destinationFirstRow, destinationColumnOffset, layout);
         })
             .catch((error) => {
             console.error("[HYD] asynchronous pixel-pack readback failed:", error);

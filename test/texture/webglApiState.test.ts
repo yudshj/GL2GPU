@@ -73,7 +73,10 @@ import { deepEqual, equal, notEqual } from "node:assert/strict";
     ALPHA: 8,
 };
 
-const { FramebufferAttributes } = require("../../src/components/hydFramebuffer") as typeof import("../../src/components/hydFramebuffer");
+const {
+    FramebufferAttributes,
+    webGlReadPixelsCopyLayout,
+} = require("../../src/components/hydFramebuffer") as typeof import("../../src/components/hydFramebuffer");
 const {
     HydTexture,
     resolveWebGlTextureMipRange,
@@ -96,6 +99,18 @@ deepEqual(resolveWebGpuSamplerLodClamps(-1000, -999), {
 deepEqual(resolveWebGpuSamplerLodClamps(100, 1000), {
     lodMinClamp: 100,
     lodMaxClamp: 1000,
+});
+deepEqual(webGlReadPixelsCopyLayout(2048, 0, 2048), {
+    sourceY: 0,
+    reverseRows: true,
+});
+deepEqual(webGlReadPixelsCopyLayout(2048, 0, 802), {
+    sourceY: 1246,
+    reverseRows: true,
+});
+deepEqual(webGlReadPixelsCopyLayout(2048, 100, 200), {
+    sourceY: 1748,
+    reverseRows: true,
 });
 const { HydFramebuffer } = require("../../src/components/hydFramebuffer") as typeof import("../../src/components/hydFramebuffer");
 const { HydGlobalStateHashed } = require("../../src/components/hydGlobalState") as typeof import("../../src/components/hydGlobalState");

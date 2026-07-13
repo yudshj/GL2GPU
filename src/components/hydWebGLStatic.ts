@@ -48,7 +48,12 @@ import {
 import { HydTransformFeedbackExecutor, TransformFeedbackDraw } from "./hydTransformFeedbackExecutor";
 import { HydOcclusionQuerySegment, HydQuery } from "./hydQuery";
 import { HydSync } from "./hydSync";
-import { FramebufferAttributes, HydFramebuffer, webGlInternalFormatColorBits } from "./hydFramebuffer";
+import {
+    FramebufferAttributes,
+    HydFramebuffer,
+    webGlInternalFormatColorBits,
+    webGlReadPixelsCopyLayout,
+} from "./hydFramebuffer";
 import TypedArray = NodeJS.TypedArray;
 import { hydWebGLConstants } from "./hydWebGLConstants";
 import { ShaderTranslator } from "./shaderTranslator";
@@ -10625,9 +10630,8 @@ fn fragmentMain(@builtin(position) position : vec4f${sampleParameter}) {
             return false;
         }
 
-        const framebufferOriented = this.samplerNeedsOriginFlip(attachment.attachment);
         const sourceHeight = attachment.height;
-        const sourceY = framebufferOriented ? y : sourceHeight - y - height;
+        const { sourceY, reverseRows } = webGlReadPixelsCopyLayout(sourceHeight, y, height);
         const rowBytes = width * 4;
         const bytesPerRow = this.alignReadbackBytesPerRow(rowBytes);
         const stagingBuffer = this.hydDevice.createBuffer({
@@ -10642,11 +10646,7 @@ fn fragmentMain(@builtin(position) position : vec4f${sampleParameter}) {
             {
                 texture: attachment.attachment.texture,
                 mipLevel: attachment.level || 0,
-                origin: {
-                    x,
-                    y: sourceY,
-                    z: attachment.layer || 0,
-                },
+                origin: { x, y: sourceY, z: attachment.layer || 0 },
             },
             {
                 buffer: stagingBuffer,
@@ -10705,7 +10705,7 @@ fn fragmentMain(@builtin(position) position : vec4f${sampleParameter}) {
                     bytesPerRow,
                     width,
                     height,
-                    !framebufferOriented,
+                    reverseRows,
                     attachment.colorBits[3] === 0,
                     destinationBuffer,
                     destinationOffset,

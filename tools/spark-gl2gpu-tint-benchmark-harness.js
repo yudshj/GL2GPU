@@ -372,6 +372,8 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
         drawElementsInstanced: 0,
         activeTexture: 0,
         bindTexture: 0,
+        bindFramebuffer: 0,
+        framebufferTextureLayer: 0,
         texImage2D: 0,
         texSubImage2D: 0,
         texImage3D: 0,
@@ -383,6 +385,9 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
       if (config.debugState) {
         bench.gl2gpuDebug = {
           draws: [],
+          renderDraws: [],
+          framebufferLayers: [],
+          framebufferBinds: [],
           readbacks: [],
           uploads: [],
           textureBinds: [],
@@ -608,7 +613,9 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
           args: Array.from(args || []).map(summarizeArg),
           topology: gs.topology,
           viewport: common.viewport ? Array.from(common.viewport) : Array.from(context.getParameter(context.VIEWPORT) || []),
-          scissor: gs.miscState && gs.miscState.scissorBox ? Array.from(gs.miscState.scissorBox) : null,
+          scissor: gs.miscState && gs.miscState.scissorBox
+            ? Array.from(gs.miscState.scissorBox)
+            : Array.from(context.getParameter(context.SCISSOR_BOX) || []),
           scissorTest: gs.miscState ? !!gs.miscState.scissorTest : context.isEnabled(context.SCISSOR_TEST),
           blendEnabled: gs.blendState ? !!gs.blendState.enabled : context.isEnabled(context.BLEND),
           blendState: gs.blendState ? {
@@ -659,7 +666,7 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
         };
       }
 
-      for (const name of ["drawArrays", "drawElements", "drawArraysInstanced", "drawElementsInstanced", "activeTexture", "bindTexture", "texImage2D", "texSubImage2D", "texImage3D", "texSubImage3D", "readPixels", "clear", "enable", "disable", "depthFunc", "depthMask", "blendFunc", "blendFuncSeparate", "blendEquation", "blendEquationSeparate"]) {
+      for (const name of ["drawArrays", "drawElements", "drawArraysInstanced", "drawElementsInstanced", "activeTexture", "bindTexture", "texImage2D", "texSubImage2D", "texImage3D", "texSubImage3D", "bindFramebuffer", "framebufferTextureLayer", "readPixels", "clear", "enable", "disable", "depthFunc", "depthMask", "blendFunc", "blendFuncSeparate", "blendEquation", "blendEquationSeparate"]) {
         if (typeof context[name] !== "function") continue;
         const original = context[name].bind(context);
         context[name] = function(...args) {
@@ -673,6 +680,22 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
             snapshot.webglError = context.getError();
             snapshot.webglErrorName = enumName(snapshot.webglError);
             bench.gl2gpuDebug.draws.push(snapshot);
+          }
+          if (bench.gl2gpuDebug && /^draw/.test(name) && bench.gl2gpuDebug.renderDraws.length < 40) {
+            const snapshot = stateSnapshot("after-render-draw", name, args);
+            snapshot.webglError = context.getError();
+            snapshot.webglErrorName = enumName(snapshot.webglError);
+            bench.gl2gpuDebug.renderDraws.push(snapshot);
+          }
+          if (bench.gl2gpuDebug && name === "framebufferTextureLayer" &&
+              bench.gl2gpuDebug.framebufferLayers.length < 80) {
+            bench.gl2gpuDebug.framebufferLayers.push(stateSnapshot(
+              "after-framebufferTextureLayer", name, args));
+          }
+          if (bench.gl2gpuDebug && name === "bindFramebuffer" &&
+              bench.gl2gpuDebug.framebufferBinds.length < 80) {
+            bench.gl2gpuDebug.framebufferBinds.push(stateSnapshot(
+              "after-bindFramebuffer", name, args));
           }
           if (bench.gl2gpuDebug && name === "readPixels" && bench.gl2gpuDebug.readbacks.length < 20) {
             const entry = stateSnapshot("after-readPixels-call", name, args);
