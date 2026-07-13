@@ -1572,7 +1572,9 @@ async function main() {
   const preflightResults = [];
   try {
     for (const scene of selectedScenes()) {
-      const transform = skipPreflight ? "direct" : await chooseTransform(browser, serverInfo.baseURL, serverInfo.state, scene, transformCache, preflightResults);
+      const transform = skipPreflight
+        ? (cameraTransformCandidates[0] || "direct")
+        : await chooseTransform(browser, serverInfo.baseURL, serverInfo.state, scene, transformCache, preflightResults);
       const preflightByMode = new Map();
       if (skipPreflight) {
         for (const mode of selectedModes) preflightByMode.set(mode, { valid: true });

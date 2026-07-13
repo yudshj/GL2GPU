@@ -507,6 +507,11 @@ export class HydWebGLStatic {
     private gpuScissorDirty: boolean = true;
     private lastDrawPbv: any = null;
     private pendingReadbacks: Promise<void>[] = [];
+    private readonly pendingPixelPackReadbacks: WeakMap<HydBuffer, Set<{
+        settled: boolean;
+        fallbackUsed: boolean;
+        completeSynchronously: () => void;
+    }>> = new WeakMap();
     private framebufferWriteGeneration: number = 0;
     private normalizedReadPixelsCache: {
         stateToken: object;
@@ -5844,6 +5849,15 @@ fn fragmentMain() -> @location(0) vec4<${scalar}> {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
+        const pendingPixelPackReadbacks = this.pendingPixelPackReadbacks.get(buffer);
+        if (pendingPixelPackReadbacks) {
+            for (const pending of pendingPixelPackReadbacks) {
+                if (!pending.settled && !pending.fallbackUsed) {
+                    pending.fallbackUsed = true;
+                    pending.completeSynchronously();
+                }
+            }
+        }
         const dst = new Uint8Array(dstData.buffer, dstData.byteOffset, dstData.byteLength);
         const bytesPerElement = (dstData as any).BYTES_PER_ELEMENT || 1;
         const destinationOffset = toWebGlInt64(dstOffset);
@@ -10605,6 +10619,157 @@ fn fragmentMain(@builtin(position) position : vec4f${sampleParameter}) {
         }
     }
 
+    private enqueuePixelPackRgba8Readback(
+        attachment: FramebufferAttributes,
+        x: GLint,
+        y: GLint,
+        width: GLsizei,
+        height: GLsizei,
+        destinationBuffer: HydBuffer,
+        destinationOffset: number,
+        destinationFirstRow: number,
+        destinationColumnOffset: number,
+        layout: ReturnType<typeof packedPixelLayout>,
+    ): boolean {
+        if (attachment.format !== "rgba8unorm" && attachment.format !== "rgba8unorm-srgb") {
+            return false;
+        }
+
+        const framebufferOriented = this.samplerNeedsOriginFlip(attachment.attachment);
+        const sourceHeight = attachment.height;
+        const sourceY = framebufferOriented ? y : sourceHeight - y - height;
+        const rowBytes = width * 4;
+        const bytesPerRow = this.alignReadbackBytesPerRow(rowBytes);
+        const stagingBuffer = this.hydDevice.createBuffer({
+            label: "webgl-pixel-pack-readback",
+            size: bytesPerRow * height,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        });
+        const encoder = this.hydDevice.createCommandEncoder({
+            label: "webgl-pixel-pack-copy",
+        });
+        encoder.copyTextureToBuffer(
+            {
+                texture: attachment.attachment.texture,
+                mipLevel: attachment.level || 0,
+                origin: {
+                    x,
+                    y: sourceY,
+                    z: attachment.layer || 0,
+                },
+            },
+            {
+                buffer: stagingBuffer,
+                bytesPerRow,
+                rowsPerImage: height,
+            },
+            { width, height, depthOrArrayLayers: 1 },
+        );
+        this.hydDevice.queue.submit([encoder.finish()]);
+
+        let pendingForBuffer = this.pendingPixelPackReadbacks.get(destinationBuffer);
+        if (!pendingForBuffer) {
+            pendingForBuffer = new Set();
+            this.pendingPixelPackReadbacks.set(destinationBuffer, pendingForBuffer);
+        }
+        const pendingState = {
+            settled: false,
+            fallbackUsed: false,
+            completeSynchronously: () => {
+                const source = new Uint8Array(rowBytes * height);
+                if (!this.readColorAttachmentSynchronously(
+                    attachment,
+                    x,
+                    y,
+                    width,
+                    height,
+                    source,
+                    0,
+                )) {
+                    this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                    return;
+                }
+                this.writePixelPackRgba8Rows(
+                    source,
+                    rowBytes,
+                    width,
+                    height,
+                    false,
+                    attachment.colorBits[3] === 0,
+                    destinationBuffer,
+                    destinationOffset,
+                    destinationFirstRow,
+                    destinationColumnOffset,
+                    layout,
+                );
+            },
+        };
+        pendingForBuffer.add(pendingState);
+        let mapped = false;
+        const readback = stagingBuffer.mapAsync(GPUMapMode.READ)
+            .then(() => {
+                mapped = true;
+                const source = new Uint8Array(stagingBuffer.getMappedRange());
+                this.writePixelPackRgba8Rows(
+                    source,
+                    bytesPerRow,
+                    width,
+                    height,
+                    !framebufferOriented,
+                    attachment.colorBits[3] === 0,
+                    destinationBuffer,
+                    destinationOffset,
+                    destinationFirstRow,
+                    destinationColumnOffset,
+                    layout,
+                );
+            })
+            .catch((error) => {
+                console.error("[HYD] asynchronous pixel-pack readback failed:", error);
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            })
+            .finally(() => {
+                pendingState.settled = true;
+                pendingForBuffer.delete(pendingState);
+                if (mapped) stagingBuffer.unmap();
+                stagingBuffer.destroy();
+            });
+        this.pendingReadbacks.push(readback);
+        return true;
+    }
+
+    private writePixelPackRgba8Rows(
+        source: Uint8Array,
+        sourceBytesPerRow: number,
+        width: GLsizei,
+        height: GLsizei,
+        reverseRows: boolean,
+        opaqueAlpha: boolean,
+        destinationBuffer: HydBuffer,
+        destinationOffset: number,
+        destinationFirstRow: number,
+        destinationColumnOffset: number,
+        layout: ReturnType<typeof packedPixelLayout>,
+    ) {
+        const rowBytes = width * 4;
+        for (let row = 0; row < height; row++) {
+            const destinationRow = reverseRows ? height - row - 1 : row;
+            const sourceRowOffset = row * sourceBytesPerRow;
+            const targetRowOffset = destinationOffset + layout.dataOffset +
+                (destinationFirstRow + destinationRow) * layout.rowStride + destinationColumnOffset;
+            destinationBuffer.shadowData.set(
+                source.subarray(sourceRowOffset, sourceRowOffset + rowBytes),
+                targetRowOffset,
+            );
+            if (opaqueAlpha) {
+                for (let column = 0; column < width; column++) {
+                    destinationBuffer.shadowData[targetRowOffset + column * 4 + 3] = 255;
+                }
+            }
+        }
+        destinationBuffer.commitShadowData(destinationOffset, layout.requiredBytes);
+    }
+
     private readPackedUnormColorAttachmentSynchronously(
         attachment: FramebufferAttributes,
         x: GLint,
@@ -11041,6 +11206,21 @@ fn fragmentMain(@builtin(position) position : vec4f${sampleParameter}) {
         }
 
         this._der_flush();
+        if (destinationBuffer && normalizedRead && attachment && this.enqueuePixelPackRgba8Readback(
+            attachment,
+            sourceX0,
+            sourceY0,
+            clippedWidth,
+            clippedHeight,
+            destinationBuffer,
+            destinationOffset,
+            sourceY0 - y,
+            (sourceX0 - x) * bytesPerPixel,
+            layout,
+        )) {
+            this.hydGlobalState.recordTransition("readPixels", x, y, width, height, format, type);
+            return;
+        }
         const tightPixels = new Uint8Array(clippedWidth * clippedHeight * bytesPerPixel);
         const cacheKey = normalizedRead && !destinationBuffer
             ? `${readFramebuffer.hash}:${sourceX0}:${sourceY0}:${clippedWidth}:${clippedHeight}`
