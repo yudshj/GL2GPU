@@ -19,6 +19,7 @@ import {
     foldGlslIntegerBuiltinCaseLabels,
     lowerWebGlPointSizeToPrivateState,
     materializeWebGlLineMacros,
+    maskGlslPreprocessorDirectives,
     maskStaticallyInactivePreprocessorBranches,
     normalizeGlslInterfaceTypeArrays,
     normalizeWebGlDerivativeOrientation,
@@ -42,6 +43,7 @@ import {
 } from "./shaderGlslStructs";
 import { makeShaderMetadata, scanGlslDeclarations, ShaderStage } from "./shaderMetadata";
 import {
+    emitShaderCapture,
     ShaderCaptureRecord,
     sourceCapture,
     stableHashString,
@@ -86,6 +88,14 @@ import {
 
 interface GlslangModule {
     compileGLSL(glsl: string, shaderType: ShaderStage, genDebug: boolean, spirvVersion?: "1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5"): Uint32Array;
+    clearDiagnostics?(): void;
+    getDiagnostics?(): string[];
+}
+
+function glslangFailure(error: unknown, diagnostics: string[]): Error {
+    const message = error instanceof Error ? error.message : String(error);
+    const details = diagnostics.map((line) => line.trim()).filter(Boolean);
+    return new Error(details.length > 0 ? `${message}\n${details.join("\n")}` : message);
 }
 
 const DEFAULT_WASM_BASE_URL = (() => {
@@ -278,7 +288,7 @@ function replaceTopLevelGlobalDeclarations(
         offset: number,
     ) => string,
 ): string {
-    const masked = maskGlslComments(source);
+    const masked = maskGlslPreprocessorDirectives(maskGlslComments(source));
     const regex = new RegExp(GLOBAL_DECLARATION_REGEX.source, GLOBAL_DECLARATION_REGEX.flags);
     let result = "";
     let cursor = 0;
@@ -1872,12 +1882,21 @@ export class ShaderTranslator {
 
             const compileStart = nowMs();
             let spirvWords: Uint32Array;
+            this.glslang.clearDiagnostics?.();
             try {
                 spirvWords = this.glslang.compileGLSL(glslangSource, stage, false);
             } catch (error) {
+                const firstDiagnostics = this.glslang.getDiagnostics?.() || [];
                 const relaxedConstSource = demoteConstDeclarationsForVulkanGlsl(glslangSource);
-                if (relaxedConstSource === glslangSource) throw error;
-                spirvWords = this.glslang.compileGLSL(relaxedConstSource, stage, false);
+                if (relaxedConstSource === glslangSource) {
+                    throw glslangFailure(error, firstDiagnostics);
+                }
+                this.glslang.clearDiagnostics?.();
+                try {
+                    spirvWords = this.glslang.compileGLSL(relaxedConstSource, stage, false);
+                } catch (fallbackError) {
+                    throw glslangFailure(fallbackError, this.glslang.getDiagnostics?.() || firstDiagnostics);
+                }
                 glslangSource = relaxedConstSource;
                 compatibilityFallbacks.push("demote-es100-const-initializers");
             }
@@ -1994,6 +2013,19 @@ export class ShaderTranslator {
             return metadata;
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
+            if (this.options.captureShaders) {
+                emitShaderCapture({
+                    kind: "shader-failure",
+                    stage,
+                    shaderId: `${stage}:${stableHashString(key)}:${layout.cacheKey}`,
+                    source: "runtime",
+                    timingsMs,
+                    compatibilityFallbacks,
+                    glsl: sourceCapture(key),
+                    normalizedGlsl: sourceCapture(glslangSource),
+                    diagnostics: [message],
+                });
+            }
             throw new Error(`Runtime shader translation failed for ${stage} shader: ${message}\n--- original GLSL ---\n${key}\n--- normalized GLSL ---\n${glslangSource}`);
         }
     }

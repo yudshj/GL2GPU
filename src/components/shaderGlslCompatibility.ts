@@ -10,6 +10,21 @@ function maskComments(source: string): string {
         .replace(/\/\/.*$/gm, (comment) => " ".repeat(comment.length));
 }
 
+/**
+ * Masks preprocessor directives without changing source offsets or line
+ * endings. Continuation lines are directives too, so declaration scanners do
+ * not interpret macro replacement tokens as ordinary GLSL declarations.
+ */
+export function maskGlslPreprocessorDirectives(source: string): string {
+    let continued = false;
+    return source.split(/(?<=\n)/).map((line) => {
+        const content = line.replace(/\r?\n$/, "");
+        const directive = continued || /^[\t ]*#/.test(content);
+        continued = directive && /\\[\t ]*$/.test(content);
+        return directive ? line.replace(/[^\r\n]/g, " ") : line;
+    }).join("");
+}
+
 function replaceMaskedToken(source: string, masked: string, token: RegExp, replacement: string): string {
     let out = "";
     let cursor = 0;

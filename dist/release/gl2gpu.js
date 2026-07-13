@@ -114,8 +114,13 @@ if (typeof exports === 'object' && "object" === 'object')
 /* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = ((() => {
     const initialize = (opts = {}) => {
         return new Promise(resolve => {
+            const diagnostics = [];
             Module({
                 wasmBinary: opts.wasmBinary,
+                printErr(message) {
+                    diagnostics.push(String(message));
+                    console.warn(message);
+                },
                 locateFile() {
                     if (opts.locateFile) {
                         return opts.locateFile('glslang.wasm');
@@ -127,6 +132,12 @@ if (typeof exports === 'object' && "object" === 'object')
                     resolve({
                         compileGLSLZeroCopy: this.compileGLSLZeroCopy,
                         compileGLSL: this.compileGLSL,
+                        clearDiagnostics() {
+                            diagnostics.length = 0;
+                        },
+                        getDiagnostics() {
+                            return diagnostics.slice();
+                        },
                     });
                 },
             });
@@ -7574,7 +7585,9 @@ class HydProgram {
         this.samplerOriginVariants.clear();
         this.samplerOriginVariantKey = "";
         if (this.vertexShader) {
-            console.debug('[HYD] linkProgram vertex:\n\n', vs);
+            if (typeof window !== "undefined" && window.__HYD_DEBUG_SHADERS) {
+                console.debug('[HYD] linkProgram vertex:\n\n', vs);
+            }
             if (this.vertexShader.shader_info.shader_capture) {
                 emitShaderCapture({
                     ...this.vertexShader.shader_info.shader_capture,
@@ -7587,7 +7600,9 @@ class HydProgram {
             this._hash += this.vertexModule.label + '|';
         }
         if (this.fragmentShader) {
-            console.debug('[HYD] linkProgram fragment:\n\n', fs);
+            if (typeof window !== "undefined" && window.__HYD_DEBUG_SHADERS) {
+                console.debug('[HYD] linkProgram fragment:\n\n', fs);
+            }
             if (this.fragmentShader.shader_info.shader_capture) {
                 emitShaderCapture({
                     ...this.fragmentShader.shader_info.shader_capture,
@@ -8576,6 +8591,15 @@ function shaderGlslCompatibility_maskComments(source) {
     return source
         .replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\r\n]/g, " "))
         .replace(/\/\/.*$/gm, (comment) => " ".repeat(comment.length));
+}
+function maskGlslPreprocessorDirectives(source) {
+    let continued = false;
+    return source.split(/(?<=\n)/).map((line) => {
+        const content = line.replace(/\r?\n$/, "");
+        const directive = continued || /^[\t ]*#/.test(content);
+        continued = directive && /\\[\t ]*$/.test(content);
+        return directive ? line.replace(/[^\r\n]/g, " ") : line;
+    }).join("");
 }
 function replaceMaskedToken(source, masked, token, replacement) {
     let out = "";
@@ -26741,6 +26765,11 @@ function lowerRowMajorUniformBlocks(source) {
 
 
 
+function glslangFailure(error, diagnostics) {
+    const message = error instanceof Error ? error.message : String(error);
+    const details = diagnostics.map((line) => line.trim()).filter(Boolean);
+    return new Error(details.length > 0 ? `${message}\n${details.join("\n")}` : message);
+}
 const DEFAULT_WASM_BASE_URL = (() => {
     if (typeof document !== "undefined") {
         const currentScript = document.currentScript;
@@ -26858,7 +26887,7 @@ function maskGlslComments(source) {
     return masked.join("");
 }
 function replaceTopLevelGlobalDeclarations(source, replacement) {
-    const masked = maskGlslComments(source);
+    const masked = maskGlslPreprocessorDirectives(maskGlslComments(source));
     const regex = new RegExp(GLOBAL_DECLARATION_REGEX.source, GLOBAL_DECLARATION_REGEX.flags);
     let result = "";
     let cursor = 0;
@@ -28260,14 +28289,23 @@ class ShaderTranslator {
             timingsMs.glslPreprocess = nowMs() - buildStart;
             const compileStart = nowMs();
             let spirvWords;
+            this.glslang.clearDiagnostics?.();
             try {
                 spirvWords = this.glslang.compileGLSL(glslangSource, stage, false);
             }
             catch (error) {
+                const firstDiagnostics = this.glslang.getDiagnostics?.() || [];
                 const relaxedConstSource = demoteConstDeclarationsForVulkanGlsl(glslangSource);
-                if (relaxedConstSource === glslangSource)
-                    throw error;
-                spirvWords = this.glslang.compileGLSL(relaxedConstSource, stage, false);
+                if (relaxedConstSource === glslangSource) {
+                    throw glslangFailure(error, firstDiagnostics);
+                }
+                this.glslang.clearDiagnostics?.();
+                try {
+                    spirvWords = this.glslang.compileGLSL(relaxedConstSource, stage, false);
+                }
+                catch (fallbackError) {
+                    throw glslangFailure(fallbackError, this.glslang.getDiagnostics?.() || firstDiagnostics);
+                }
                 glslangSource = relaxedConstSource;
                 compatibilityFallbacks.push("demote-es100-const-initializers");
             }
@@ -28383,6 +28421,19 @@ class ShaderTranslator {
         }
         catch (error) {
             const message = error instanceof Error ? error.message : String(error);
+            if (this.options.captureShaders) {
+                emitShaderCapture({
+                    kind: "shader-failure",
+                    stage,
+                    shaderId: `${stage}:${stableHashString(key)}:${layout.cacheKey}`,
+                    source: "runtime",
+                    timingsMs,
+                    compatibilityFallbacks,
+                    glsl: sourceCapture(key),
+                    normalizedGlsl: sourceCapture(glslangSource),
+                    diagnostics: [message],
+                });
+            }
             throw new Error(`Runtime shader translation failed for ${stage} shader: ${message}\n--- original GLSL ---\n${key}\n--- normalized GLSL ---\n${glslangSource}`);
         }
     }

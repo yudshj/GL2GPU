@@ -770,7 +770,9 @@ export class HydProgram implements HydHashable {
         this.samplerOriginVariants.clear();
         this.samplerOriginVariantKey = "";
         if (this.vertexShader) {
-            console.debug('[HYD] linkProgram vertex:\n\n', vs);
+            if (typeof window !== "undefined" && (window as any).__HYD_DEBUG_SHADERS) {
+                console.debug('[HYD] linkProgram vertex:\n\n', vs);
+            }
             if (this.vertexShader.shader_info.shader_capture) {
                 emitShaderCapture({
                     ...this.vertexShader.shader_info.shader_capture,
@@ -783,7 +785,9 @@ export class HydProgram implements HydHashable {
             this._hash += this.vertexModule.label + '|';
         }
         if (this.fragmentShader) {
-            console.debug('[HYD] linkProgram fragment:\n\n', fs);
+            if (typeof window !== "undefined" && (window as any).__HYD_DEBUG_SHADERS) {
+                console.debug('[HYD] linkProgram fragment:\n\n', fs);
+            }
             if (this.fragmentShader.shader_info.shader_capture) {
                 emitShaderCapture({
                     ...this.fragmentShader.shader_info.shader_capture,

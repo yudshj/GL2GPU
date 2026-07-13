@@ -48,6 +48,7 @@ import {
     foldGlslIntegerBuiltinCaseLabels,
     lowerWebGlPointSizeToPrivateState,
     materializeWebGlLineMacros,
+    maskGlslPreprocessorDirectives,
     maskStaticallyInactivePreprocessorBranches,
     normalizeGlslInterfaceTypeArrays,
     normalizeWebGlDerivativeOrientation,
@@ -90,6 +91,22 @@ import {
     samplerCoordinateScaleOverrideNames,
     webGlArrayLayerExpression,
 } from "../../src/components/shaderSamplerState";
+
+const macroInterfaceSource = `#version 300 es
+#define attribute in
+#define varying out
+#define DECLARE_POSITION \\
+  attribute vec3 position;
+precision highp float;
+attribute vec3 position;
+void main() { gl_Position = vec4(position, 1.0); }
+`;
+const maskedMacroInterface = maskGlslPreprocessorDirectives(macroInterfaceSource);
+if (/\b(?:attribute|varying)\b/.test(maskedMacroInterface.split("precision highp float;")[0]) ||
+    !maskedMacroInterface.includes("precision highp float;") ||
+    !maskedMacroInterface.includes("attribute vec3 position;")) {
+    throw new Error(`failed to mask GLSL preprocessor directives:\n${maskedMacroInterface}`);
+}
 
 const strippedVersion = stripGlslVersionDirectives(
     "#version 100\n/* #version text\n   #version is still a comment */\nvoid main() {}\n",

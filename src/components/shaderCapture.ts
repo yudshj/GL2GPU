@@ -41,7 +41,7 @@ export interface ShaderSourceCapture {
 }
 
 export interface ShaderCaptureRecord {
-    kind: "shader-stage" | "shader-final";
+    kind: "shader-stage" | "shader-final" | "shader-failure";
     stage: ShaderStage;
     shaderId: string;
     programId?: string;

@@ -298,6 +298,9 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
       measuredFrames: 0,
       loadStartMs: performance.now(),
       loadEndMs: null,
+      settleStartMs: null,
+      settleEndMs: null,
+      settleStableFrames: 0,
       firstFrameMs: null,
       doneMs: null,
       errors: [],
@@ -311,6 +314,13 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
       finalDataUrl: null,
     };
     window.__SPARK_BENCH = bench;
+    const textureDebugIds = new WeakMap();
+    let nextTextureDebugId = 1;
+    function textureDebugId(texture) {
+      if (!texture || (typeof texture !== "object" && typeof texture !== "function")) return null;
+      if (!textureDebugIds.has(texture)) textureDebugIds.set(texture, nextTextureDebugId++);
+      return textureDebugIds.get(texture);
+    }
 
     window.addEventListener("error", (event) => {
       bench.errors.push(String(event.error && (event.error.stack || event.error.message) || event.message || event));
@@ -330,6 +340,8 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
         drawElements: 0,
         drawArraysInstanced: 0,
         drawElementsInstanced: 0,
+        activeTexture: 0,
+        bindTexture: 0,
         texImage2D: 0,
         texSubImage2D: 0,
         texImage3D: 0,
@@ -343,6 +355,7 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
           draws: [],
           readbacks: [],
           uploads: [],
+          textureBinds: [],
           syncs: [],
           uniforms: [],
         };
@@ -516,6 +529,7 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
         if (!bench.gl2gpuDebug) return null;
         const gs = context.hydGlobalState || {};
         const common = gs.commonState || {};
+        const apiProgram = context.getParameter(context.CURRENT_PROGRAM);
         return {
           timeMs: performance.now(),
           frame: bench.seenFrames,
@@ -523,7 +537,7 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
           call: name,
           args: Array.from(args || []).map(summarizeArg),
           topology: gs.topology,
-          viewport: common.viewport ? Array.from(common.viewport) : null,
+          viewport: common.viewport ? Array.from(common.viewport) : Array.from(context.getParameter(context.VIEWPORT) || []),
           scissor: gs.miscState && gs.miscState.scissorBox ? Array.from(gs.miscState.scissorBox) : null,
           scissorTest: gs.miscState ? !!gs.miscState.scissorTest : null,
           blendEnabled: gs.blendState ? !!gs.blendState.enabled : null,
@@ -543,13 +557,32 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
           colorWriteMask: gs.miscState && gs.miscState.colorWriteMask ? Array.from(gs.miscState.colorWriteMask) : null,
           drawFramebuffer: attachmentSummary(common.drawFramebufferBinding),
           readFramebuffer: attachmentSummary(common.readFramebufferBinding),
-          program: programSummary(common.currentProgram),
+          program: programSummary(common.currentProgram || apiProgram),
+          fragCoordHeightValue: apiProgram && Number.isFinite(apiProgram.fragCoordHeightValue)
+            ? apiProgram.fragCoordHeightValue
+            : null,
           textureUnits: textureUnitSummary(gs, common.currentProgram && common.currentProgram.hydSamplers),
           pixelPackBytes: sampleBytes(common.pixelPackBufferBinding && common.pixelPackBufferBinding.shadowData),
         };
       }
 
-      for (const name of ["drawArrays", "drawElements", "drawArraysInstanced", "drawElementsInstanced", "texImage2D", "texSubImage2D", "texImage3D", "texSubImage3D", "readPixels", "clear", "enable", "disable", "depthFunc", "depthMask", "blendFunc", "blendFuncSeparate", "blendEquation", "blendEquationSeparate"]) {
+      function uploadBindingSummary(target) {
+        const bindingEnums = {
+          [context.TEXTURE_2D]: context.TEXTURE_BINDING_2D,
+          [context.TEXTURE_3D]: context.TEXTURE_BINDING_3D,
+          [context.TEXTURE_2D_ARRAY]: context.TEXTURE_BINDING_2D_ARRAY,
+          [context.TEXTURE_CUBE_MAP]: context.TEXTURE_BINDING_CUBE_MAP,
+        };
+        const bindingEnum = bindingEnums[target];
+        const texture = bindingEnum === undefined ? null : context.getParameter(bindingEnum);
+        return {
+          activeTexture: context.getParameter(context.ACTIVE_TEXTURE),
+          textureId: textureDebugId(texture),
+          hasTexture: !!texture,
+        };
+      }
+
+      for (const name of ["drawArrays", "drawElements", "drawArraysInstanced", "drawElementsInstanced", "activeTexture", "bindTexture", "texImage2D", "texSubImage2D", "texImage3D", "texSubImage3D", "readPixels", "clear", "enable", "disable", "depthFunc", "depthMask", "blendFunc", "blendFuncSeparate", "blendEquation", "blendEquationSeparate"]) {
         if (typeof context[name] !== "function") continue;
         const original = context[name].bind(context);
         context[name] = function(...args) {
@@ -558,6 +591,9 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
             bench.gl2gpuDebug.draws.push(stateSnapshot("before", name, args));
           }
           const result = original(...args);
+          if (bench.gl2gpuDebug && /^draw/.test(name) && bench.gl2gpuDebug.draws.length < 120) {
+            bench.gl2gpuDebug.draws.push(stateSnapshot("after", name, args));
+          }
           if (bench.gl2gpuDebug && name === "readPixels" && bench.gl2gpuDebug.readbacks.length < 20) {
             const entry = stateSnapshot("after-readPixels-call", name, args);
             bench.gl2gpuDebug.readbacks.push(entry);
@@ -566,7 +602,18 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
             }, 250);
           }
           if (bench.gl2gpuDebug && /^texSubImage/.test(name) && bench.gl2gpuDebug.uploads.length < 40) {
-            bench.gl2gpuDebug.uploads.push(stateSnapshot("after-upload", name, args.slice(0, 10)));
+            const entry = stateSnapshot("after-upload", name, args);
+            entry.uploadBinding = uploadBindingSummary(args[0]);
+            bench.gl2gpuDebug.uploads.push(entry);
+          }
+          if (bench.gl2gpuDebug && (name === "activeTexture" || name === "bindTexture") && bench.gl2gpuDebug.textureBinds.length < 240) {
+            bench.gl2gpuDebug.textureBinds.push({
+              timeMs: performance.now(),
+              call: name,
+              activeTexture: context.getParameter(context.ACTIVE_TEXTURE),
+              target: name === "bindTexture" ? args[0] : null,
+              textureId: name === "bindTexture" ? textureDebugId(args[1]) : null,
+            });
           }
           return result;
         };
@@ -751,6 +798,7 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
       const camera = new THREE.PerspectiveCamera(60, config.width / config.height, 0.01, 1000);
       applyCamera(camera, config.camera, config.transform);
       const renderer = await createRenderer(canvas);
+      const gl = renderer.getContext();
       renderer.setPixelRatio(1);
       renderer.setSize(config.width, config.height, false);
       const spark = new SparkRenderer({ renderer });
@@ -772,14 +820,105 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
       bench.status = "loading";
       mesh.initialized.then(() => {
         bench.loadEndMs = performance.now();
+        bench.settleStartMs = bench.loadEndMs;
         bench.numSplats = mesh.numSplats;
-        bench.status = "running";
+        bench.status = "settling";
       }).catch((error) => {
         bench.errors.push(String(error && (error.stack || error.message) || error));
         bench.status = "error";
       });
 
       let lastRafTimestamp = null;
+      function probeIntegerTexture(textureUnit, target) {
+        const previousActiveTexture = gl.getParameter(gl.ACTIVE_TEXTURE);
+        const previousReadFramebuffer = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
+        const previousDrawFramebuffer = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING);
+        const previousProgram = gl.getParameter(gl.CURRENT_PROGRAM);
+        const previousViewport = gl.getParameter(gl.VIEWPORT);
+        const bindingName = target === gl.TEXTURE_2D_ARRAY ? gl.TEXTURE_BINDING_2D_ARRAY : gl.TEXTURE_BINDING_2D;
+        gl.activeTexture(gl.TEXTURE0 + textureUnit);
+        const sourceTexture = gl.getParameter(bindingName);
+        const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+        gl.shaderSource(vertexShader, [
+          "#version 300 es",
+          "void main() {",
+          "  vec2 positions[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));",
+          "  gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);",
+          "}",
+        ].join("\\n"));
+        gl.compileShader(vertexShader);
+        const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+        const samplerType = target === gl.TEXTURE_2D_ARRAY ? "usampler2DArray" : "usampler2D";
+        const coordinate = target === gl.TEXTURE_2D_ARRAY ? "ivec3(0, 0, 0)" : "ivec2(0, 0)";
+        gl.shaderSource(fragmentShader, [
+          "#version 300 es",
+          "precision highp float;",
+          "precision highp " + samplerType + ";",
+          "uniform " + samplerType + " sourceTexture;",
+          "layout(location = 0) out vec4 outColor;",
+          "void main() {",
+          "  uvec4 value = texelFetch(sourceTexture, " + coordinate + ", 0);",
+          "  outColor = vec4(value & uvec4(255u)) / 255.0;",
+          "}",
+        ].join("\\n"));
+        gl.compileShader(fragmentShader);
+        const program = gl.createProgram();
+        gl.attachShader(program, vertexShader);
+        gl.attachShader(program, fragmentShader);
+        gl.linkProgram(program);
+        const shaderLogs = [gl.getShaderInfoLog(vertexShader), gl.getShaderInfoLog(fragmentShader), gl.getProgramInfoLog(program)].filter(Boolean);
+        gl.useProgram(program);
+        gl.uniform1i(gl.getUniformLocation(program, "sourceTexture"), textureUnit);
+        gl.activeTexture(gl.TEXTURE7);
+        const outputTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, outputTexture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        const framebuffer = gl.createFramebuffer();
+        const pixels = new Uint8Array(4);
+        let status = null;
+        let error = null;
+        try {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, outputTexture, 0);
+          gl.readBuffer(gl.COLOR_ATTACHMENT0);
+          status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+          if (status === gl.FRAMEBUFFER_COMPLETE) {
+            gl.viewport(0, 0, 1, 1);
+            gl.disable(gl.BLEND);
+            gl.disable(gl.DEPTH_TEST);
+            gl.disable(gl.CULL_FACE);
+            gl.disable(gl.SCISSOR_TEST);
+            gl.drawArrays(gl.TRIANGLES, 0, 3);
+            gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+          }
+        } catch (probeError) {
+          error = String(probeError && (probeError.stack || probeError.message) || probeError);
+        } finally {
+          gl.bindFramebuffer(gl.READ_FRAMEBUFFER, previousReadFramebuffer);
+          gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, previousDrawFramebuffer);
+          gl.useProgram(previousProgram);
+          gl.viewport(previousViewport[0], previousViewport[1], previousViewport[2], previousViewport[3]);
+          gl.activeTexture(previousActiveTexture);
+          gl.deleteFramebuffer(framebuffer);
+          gl.deleteTexture(outputTexture);
+          gl.deleteProgram(program);
+          gl.deleteShader(vertexShader);
+          gl.deleteShader(fragmentShader);
+        }
+        return {
+          textureUnit,
+          target,
+          hasTexture: !!sourceTexture,
+          textureId: textureDebugId(sourceTexture),
+          status,
+          pixels: Array.from(pixels),
+          shaderLogs,
+          error,
+        };
+      }
+
       function animate(timestamp) {
         const shouldRender = bench.status !== "done" && bench.status !== "error";
         if (!shouldRender) return;
@@ -799,6 +938,18 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
         const renderEnd = performance.now();
         if (bench.firstFrameMs === null) bench.firstFrameMs = renderEnd;
         bench.activeSplats = spark.activeSplats;
+        bench.sorting = spark.sorting;
+        bench.sortDirty = spark.sortDirty;
+        if (bench.status === "settling") {
+          const settled = spark.activeSplats > 0 && !spark.sorting && !spark.sortDirty;
+          bench.settleStableFrames = settled ? bench.settleStableFrames + 1 : 0;
+          if (bench.settleStableFrames >= 5) {
+            bench.settleEndMs = performance.now();
+            bench.status = "running";
+            bench.seenFrames = 0;
+            lastRafTimestamp = null;
+          }
+        }
         if (bench.status === "running") {
           if (lastRafTimestamp !== null) {
             if (bench.seenFrames >= bench.warmupFrames && bench.frameTimes.length < bench.maxFrames) {
@@ -806,6 +957,14 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
               bench.renderDurations.push(renderEnd - renderStart);
               bench.measuredFrames = bench.frameTimes.length;
               if (bench.frameTimes.length >= bench.maxFrames) {
+                if (config.debugState) {
+                  bench.textureProbes = [
+                    probeIntegerTexture(0, gl.TEXTURE_2D),
+                    probeIntegerTexture(0, gl.TEXTURE_2D_ARRAY),
+                    probeIntegerTexture(1, gl.TEXTURE_2D_ARRAY),
+                    probeIntegerTexture(2, gl.TEXTURE_2D_ARRAY),
+                  ];
+                }
                 try {
                   bench.finalDataUrl = canvas.toDataURL("image/png");
                 } catch (error) {
@@ -1180,7 +1339,7 @@ async function runTrial(browser, baseURL, serverState, scene, mode, transform, t
     /not implemented/i,
     /unsupported/i,
     /unhandledrejection/i,
-    /GL2GPU/i,
+    /\[HYD\].*(?:failed|failure|error)/i,
   ];
 
   page.on("console", (message) => {
@@ -1239,21 +1398,17 @@ async function runTrial(browser, baseURL, serverState, scene, mode, transform, t
   })
     .catch((error) => ({ status: "error", errors: [error.message || String(error)], frameTimes: [] }));
   const screenshot = path.join(outputRoot, `${sanitizeName(scene.name)}-${sanitizeName(mode)}-${sanitizeName(label)}.png`);
-  const dataUrl = finalDataUrl || await page.evaluate(() => {
-    const canvas = document.querySelector("canvas");
-    return canvas ? canvas.toDataURL("image/png") : null;
+  let compositorScreenshot = false;
+  await page.locator("canvas").first().screenshot({ path: screenshot, timeout: 30000 }).then(() => {
+    compositorScreenshot = true;
   }).catch((error) => {
-    screenshotErrors.push(`canvas toDataURL: ${error.message || error}`);
-    return null;
+    screenshotErrors.push(`canvas screenshot: ${error.message || error}`);
   });
-  if (dataUrl && dataUrl.startsWith("data:image/png;base64,")) {
-    fs.writeFileSync(screenshot, Buffer.from(dataUrl.split(",")[1], "base64"));
-  } else {
-    await page.locator("canvas").first().screenshot({ path: screenshot, timeout: 30000 }).catch(async (error) => {
-      screenshotErrors.push(`canvas screenshot: ${error.message || error}`);
-      await page.screenshot({ path: screenshot, fullPage: false }).catch((fallbackError) => {
-        screenshotErrors.push(`page screenshot: ${fallbackError.message || fallbackError}`);
-      });
+  if (!compositorScreenshot && finalDataUrl && finalDataUrl.startsWith("data:image/png;base64,")) {
+    fs.writeFileSync(screenshot, Buffer.from(finalDataUrl.split(",")[1], "base64"));
+  } else if (!compositorScreenshot) {
+    await page.screenshot({ path: screenshot, fullPage: false }).catch((fallbackError) => {
+      screenshotErrors.push(`page screenshot: ${fallbackError.message || fallbackError}`);
     });
   }
   const shaderCaptureFile = writeShaderCaptures(scene, mode, label, shaderCaptures);
@@ -1296,6 +1451,9 @@ async function runTrial(browser, baseURL, serverState, scene, mode, transform, t
     frameSummary,
     renderSummary,
     loadTimeMs: bench && bench.loadEndMs !== null ? bench.loadEndMs - bench.loadStartMs : null,
+    settleTimeMs: bench && bench.settleStartMs !== null && bench.settleEndMs !== null
+      ? bench.settleEndMs - bench.settleStartMs
+      : null,
     firstFrameMs: bench && bench.firstFrameMs !== null ? bench.firstFrameMs - bench.loadStartMs : null,
     doneTimeMs: bench && bench.doneMs !== null ? bench.doneMs - bench.loadStartMs : null,
     numSplats: bench ? bench.numSplats : null,
@@ -1515,8 +1673,9 @@ async function launchBrowser() {
   const chromeForTesting = "/Users/hanyd/Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing";
   const systemChrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
   const attempts = [
+    ...(process.env.CHROME_PATH ? [{ executablePath: process.env.CHROME_PATH, headless: false }] : []),
     { executablePath: chromeForTesting, headless: false },
-    { executablePath: process.env.CHROME_PATH || systemChrome, headless: false },
+    { executablePath: systemChrome, headless: false },
   ].filter((candidate, index, all) => fs.existsSync(candidate.executablePath) &&
     all.findIndex((other) => other.executablePath === candidate.executablePath) === index);
   let lastError = null;

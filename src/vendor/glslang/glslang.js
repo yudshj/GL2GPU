@@ -53,8 +53,13 @@ if (typeof exports === 'object' && typeof module === 'object')
 export default (() => {
     const initialize = (opts = {}) => {
         return new Promise(resolve => {
+            const diagnostics = [];
             Module({
                 wasmBinary: opts.wasmBinary,
+                printErr(message) {
+                    diagnostics.push(String(message));
+                    console.warn(message);
+                },
                 locateFile() {
                     if (opts.locateFile) {
                         return opts.locateFile('glslang.wasm');
@@ -66,6 +71,12 @@ export default (() => {
                     resolve({
                         compileGLSLZeroCopy: this.compileGLSLZeroCopy,
                         compileGLSL: this.compileGLSL,
+                        clearDiagnostics() {
+                            diagnostics.length = 0;
+                        },
+                        getDiagnostics() {
+                            return diagnostics.slice();
+                        },
                     });
                 },
             });
