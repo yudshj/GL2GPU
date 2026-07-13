@@ -1,6 +1,10 @@
 import { deepEqual } from "node:assert/strict";
 
-import { makeShaderMetadata, scanGlslDeclarations } from "../../src/components/shaderMetadata";
+import {
+    makeShaderMetadata,
+    scanGlslDeclarations,
+    scanGlslFragmentOutputScalarTypes,
+} from "../../src/components/shaderMetadata";
 import { normalizeWebGlTextureCoordinates } from "../../src/components/shaderTexCoord";
 import {
     normalizeWebGlFragmentOutputWidths,
@@ -573,6 +577,25 @@ deepEqual(
     explicitFragmentOutputLocations.map((output) => [output.name, output.location]),
     [["firstOutput", 1], ["thirdOutput", 3]],
 );
+
+const bridgedFragmentOutputTypes = scanGlslFragmentOutputScalarTypes(`#version 300 es
+layout(location = 0) out uvec4 target;
+layout(location = 1) out ivec4 sample;
+layout(location = 2) out vec4 colors[2];
+void main() {
+  target = uvec4(0u);
+  sample = ivec4(0);
+  colors[0] = vec4(0.0);
+  colors[1] = vec4(1.0);
+}
+`);
+deepEqual(Array.from(bridgedFragmentOutputTypes), [
+    ["target", "uint"],
+    ["sample", "sint"],
+    ["colors", "float"],
+    ["colors[0]", "float"],
+    ["colors[1]", "float"],
+]);
 
 const uniformInterfaceBlockSource = `#version 300 es
 precision highp float;

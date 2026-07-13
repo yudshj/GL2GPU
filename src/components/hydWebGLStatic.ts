@@ -54,7 +54,7 @@ import { hydWebGLConstants } from "./hydWebGLConstants";
 import { ShaderTranslator } from "./shaderTranslator";
 import { bridgeGlslDunderIdentifier, bridgeGlslDunderIdentifiers } from "./shaderGlslIdentifiers";
 import { hasMisplacedGlslEs3VersionDirective } from "./shaderGlslCompatibility";
-import { scanGlslDeclarations } from "./shaderMetadata";
+import { scanGlslFragmentOutputScalarTypes } from "./shaderMetadata";
 
 const NATIVE_CANVAS_GET_CONTEXT = HTMLCanvasElement.prototype.getContext;
 const GL_SRGB_EXT = 0x8C40;
@@ -6468,25 +6468,15 @@ fn fragmentMain() -> @location(0) vec4<${scalar}> {
         if (/\bgl_FragColor\b|\bgl_FragData\s*\[\s*0\s*\]/.test(source)) {
             outputs.set("gl_FragColor", 0);
         }
-        const scannedOutputs = scanGlslDeclarations(fragmentShader.glsl_shader, "fragment").outputs;
-        for (const output of scannedOutputs) {
-            const scalar = output.glsl_type.startsWith("u")
-                ? "uint"
-                : output.glsl_type.startsWith("i")
-                    ? "sint"
-                    : "float";
-            const names = output.is_array
-                ? Array.from({ length: Math.max(1, output.size) }, (_, index) => `${output.name}[${index}]`)
-                : [output.name];
-            for (const name of names) {
-                const offset = output.is_array ? Number(/\[(\d+)\]$/.exec(name)?.[1] || 0) : 0;
-                const baseLocation = outputs.get(output.name);
-                const location = outputs.get(name) ??
-                    (baseLocation === undefined ? undefined : baseLocation + offset);
-                if (location !== undefined) {
-                    outputTypes.set(location, scalar);
-                }
-            }
+        const scannedOutputTypes = scanGlslFragmentOutputScalarTypes(fragmentShader.glsl_shader);
+        for (const [name, scalar] of scannedOutputTypes) {
+            const arrayElement = /^(.*)\[(\d+)\]$/.exec(name);
+            const baseName = arrayElement?.[1] || name;
+            const offset = arrayElement ? Number(arrayElement[2]) : 0;
+            const baseLocation = outputs.get(baseName);
+            const location = outputs.get(name) ??
+                (baseLocation === undefined ? undefined : baseLocation + offset);
+            if (location !== undefined) outputTypes.set(location, scalar);
         }
         if (outputs.has("gl_FragColor")) outputTypes.set(0, "float");
         program.fragmentOutputLocations = outputs;

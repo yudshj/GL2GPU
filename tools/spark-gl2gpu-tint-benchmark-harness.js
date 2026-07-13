@@ -18,17 +18,22 @@ const sceneDefinitions = [
   {
     name: "van_gogh_room",
     file: path.join(sceneRoot, "van_gogh_room", "van_gogh_room.ply"),
-    camera: path.join(sceneRoot, "van_gogh_room", "cameras.json"),
+    camera: path.join(sceneRoot, "van_gogh_room", "cameras_test.json"),
   },
   {
     name: "bicycle_30000_cleaned",
     file: path.join(sceneRoot, "bicycle", "bicycle_30000.cleaned.ply"),
-    camera: path.join(sceneRoot, "bicycle", "cameras.json"),
+    camera: path.join(sceneRoot, "bicycle", "cameras_test.json"),
+  },
+  {
+    name: "garden_30000",
+    file: path.join(sceneRoot, "garden", "garden_30000.ply"),
+    camera: path.join(sceneRoot, "garden", "cameras_test.json"),
   },
   {
     name: "bicycle_30000",
     file: path.join(sceneRoot, "bicycle", "bicycle_30000.ply"),
-    camera: path.join(sceneRoot, "bicycle", "cameras.json"),
+    camera: path.join(sceneRoot, "bicycle", "cameras_test.json"),
   },
 ];
 
@@ -46,7 +51,7 @@ for (let i = 2; i < process.argv.length; i++) {
   }
 }
 
-const selectedSceneNames = parseList(argv.get("scenes") || "all");
+const selectedSceneNames = parseList(argv.get("scenes") || "van_gogh_room,bicycle_30000_cleaned,garden_30000");
 const selectedModes = parseList(argv.get("modes") || "webgl,gl2gpu-tint");
 const trials = Number(argv.get("trials") || 3);
 const maxTrials = Number(argv.get("max-trials") || 5);
@@ -64,7 +69,7 @@ const optimizeTintWgsl = argv.get("optimize-tint-wgsl") !== "false";
 const preflightOnly = argv.get("preflight-only") === "true";
 const skipPreflight = argv.get("skip-preflight") === "true";
 const allowInstallDeps = argv.get("install-deps") !== "false";
-const cameraTransformCandidates = parseList(argv.get("camera-transforms") || "opencv-column,opencv-column-mesh-x,opencv,opencv-mesh-x,websplatter,websplatter-mesh-x,direct,inverse");
+const cameraTransformCandidates = parseList(argv.get("camera-transforms") || "opencv-column");
 const cameraFileOverride = argv.get("camera-file") ? path.resolve(argv.get("camera-file")) : null;
 
 function parseList(value) {
@@ -322,6 +327,31 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
       return textureDebugIds.get(texture);
     }
 
+    function digestUint32Array(value, count) {
+      if (!value || typeof value.length !== "number") return null;
+      const length = Math.min(value.length, Math.max(0, Number(count) || value.length));
+      let fnv1a = 0x811c9dc5;
+      let sum = 0;
+      let xor = 0;
+      for (let index = 0; index < length; index++) {
+        const item = Number(value[index]) >>> 0;
+        fnv1a = Math.imul(fnv1a ^ item, 0x01000193) >>> 0;
+        sum = (sum + item) >>> 0;
+        xor = (xor ^ item) >>> 0;
+      }
+      const slice = (start, end) => Array.from(value.subarray
+        ? value.subarray(start, end)
+        : Array.prototype.slice.call(value, start, end));
+      return {
+        length,
+        fnv1a: fnv1a.toString(16).padStart(8, "0"),
+        sum,
+        xor,
+        head: slice(0, Math.min(16, length)),
+        tail: slice(Math.max(0, length - 16), length),
+      };
+    }
+
     window.addEventListener("error", (event) => {
       bench.errors.push(String(event.error && (event.error.stack || event.error.message) || event.message || event));
       bench.status = "error";
@@ -492,6 +522,19 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
         return {
           hash: program.hash,
           alignedUniformSize: program.alignedUniformSize,
+          fragCoordHeightUniform: program.fragCoordHeightUniform ? {
+            name: program.fragCoordHeightUniform.name,
+            offset: program.fragCoordHeightUniform.offset,
+          } : null,
+          fragCoordHeightValue: Number.isFinite(program.fragCoordHeightValue)
+            ? program.fragCoordHeightValue
+            : null,
+          fragmentOutputLocations: program.fragmentOutputLocations
+            ? Array.from(program.fragmentOutputLocations.entries())
+            : [],
+          fragmentOutputTypes: program.fragmentOutputTypes
+            ? Array.from(program.fragmentOutputTypes.entries())
+            : [],
           uniforms,
           samplers: (program.hydSamplers || []).map((sampler) => ({
             name: sampler.name,
@@ -525,11 +568,38 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
         return units;
       }
 
+      function vertexAttribSummary(index) {
+        try {
+          return {
+            enabled: context.getVertexAttrib(index, context.VERTEX_ATTRIB_ARRAY_ENABLED),
+            size: context.getVertexAttrib(index, context.VERTEX_ATTRIB_ARRAY_SIZE),
+            type: context.getVertexAttrib(index, context.VERTEX_ATTRIB_ARRAY_TYPE),
+            normalized: context.getVertexAttrib(index, context.VERTEX_ATTRIB_ARRAY_NORMALIZED),
+            stride: context.getVertexAttrib(index, context.VERTEX_ATTRIB_ARRAY_STRIDE),
+            divisor: context.getVertexAttrib(index, context.VERTEX_ATTRIB_ARRAY_DIVISOR),
+            integer: context.getVertexAttrib(index, context.VERTEX_ATTRIB_ARRAY_INTEGER),
+            offset: context.getVertexAttribOffset(index, context.VERTEX_ATTRIB_ARRAY_POINTER),
+            buffer: summarizeArg(context.getVertexAttrib(index, context.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING)),
+            current: summarizeArg(context.getVertexAttrib(index, context.CURRENT_VERTEX_ATTRIB)),
+          };
+        } catch (error) {
+          return { error: String(error && (error.message || error)) };
+        }
+      }
+
       function stateSnapshot(reason, name, args) {
         if (!bench.gl2gpuDebug) return null;
         const gs = context.hydGlobalState || {};
         const common = gs.commonState || {};
         const apiProgram = context.getParameter(context.CURRENT_PROGRAM);
+        const apiDrawFramebuffer = context.getParameter(context.DRAW_FRAMEBUFFER_BINDING);
+        const apiReadFramebuffer = context.getParameter(context.READ_FRAMEBUFFER_BINDING);
+        let drawFramebufferStatus = null;
+        let readFramebufferStatus = null;
+        try {
+          drawFramebufferStatus = context.checkFramebufferStatus(context.DRAW_FRAMEBUFFER);
+          readFramebufferStatus = context.checkFramebufferStatus(context.READ_FRAMEBUFFER);
+        } catch (_) {}
         return {
           timeMs: performance.now(),
           frame: bench.seenFrames,
@@ -539,8 +609,8 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
           topology: gs.topology,
           viewport: common.viewport ? Array.from(common.viewport) : Array.from(context.getParameter(context.VIEWPORT) || []),
           scissor: gs.miscState && gs.miscState.scissorBox ? Array.from(gs.miscState.scissorBox) : null,
-          scissorTest: gs.miscState ? !!gs.miscState.scissorTest : null,
-          blendEnabled: gs.blendState ? !!gs.blendState.enabled : null,
+          scissorTest: gs.miscState ? !!gs.miscState.scissorTest : context.isEnabled(context.SCISSOR_TEST),
+          blendEnabled: gs.blendState ? !!gs.blendState.enabled : context.isEnabled(context.BLEND),
           blendState: gs.blendState ? {
             srcRGB: gs.blendState.srcRGB,
             dstRGB: gs.blendState.dstRGB,
@@ -549,14 +619,21 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
             equationRGB: gs.blendState.equationRGB,
             equationAlpha: gs.blendState.equationAlpha,
           } : null,
-          depthEnabled: gs.depthState ? !!gs.depthState.enabled : null,
-          depthWrite: gs.depthState ? !!gs.depthState.writeMask : null,
-          depthFunc: gs.depthState ? gs.depthState.func : null,
+          depthEnabled: gs.depthState ? !!gs.depthState.enabled : context.isEnabled(context.DEPTH_TEST),
+          depthWrite: gs.depthState ? !!gs.depthState.writeMask : context.getParameter(context.DEPTH_WRITEMASK),
+          depthFunc: gs.depthState ? gs.depthState.func : context.getParameter(context.DEPTH_FUNC),
           clearTarget: gs.clearState ? gs.clearState.target : null,
           clearDepth: gs.clearState ? gs.clearState.depth : null,
-          colorWriteMask: gs.miscState && gs.miscState.colorWriteMask ? Array.from(gs.miscState.colorWriteMask) : null,
-          drawFramebuffer: attachmentSummary(common.drawFramebufferBinding),
-          readFramebuffer: attachmentSummary(common.readFramebufferBinding),
+          colorWriteMask: gs.miscState && gs.miscState.colorWriteMask
+            ? Array.from(gs.miscState.colorWriteMask)
+            : Array.from(context.getParameter(context.COLOR_WRITEMASK) || []),
+          vertexAttrib0: vertexAttribSummary(0),
+          drawFramebuffer: attachmentSummary(common.drawFramebufferBinding || apiDrawFramebuffer),
+          readFramebuffer: attachmentSummary(common.readFramebufferBinding || apiReadFramebuffer),
+          drawFramebufferStatus,
+          drawFramebufferStatusName: enumName(drawFramebufferStatus),
+          readFramebufferStatus,
+          readFramebufferStatusName: enumName(readFramebufferStatus),
           program: programSummary(common.currentProgram || apiProgram),
           fragCoordHeightValue: apiProgram && Number.isFinite(apiProgram.fragCoordHeightValue)
             ? apiProgram.fragCoordHeightValue
@@ -592,7 +669,10 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
           }
           const result = original(...args);
           if (bench.gl2gpuDebug && /^draw/.test(name) && bench.gl2gpuDebug.draws.length < 120) {
-            bench.gl2gpuDebug.draws.push(stateSnapshot("after", name, args));
+            const snapshot = stateSnapshot("after", name, args);
+            snapshot.webglError = context.getError();
+            snapshot.webglErrorName = enumName(snapshot.webglError);
+            bench.gl2gpuDebug.draws.push(snapshot);
           }
           if (bench.gl2gpuDebug && name === "readPixels" && bench.gl2gpuDebug.readbacks.length < 20) {
             const entry = stateSnapshot("after-readPixels-call", name, args);
@@ -919,6 +999,16 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
         };
       }
 
+      window.__SPARK_RUN_DEBUG_PROBES = function() {
+        if (!config.debugState || bench.textureProbes) return;
+        bench.textureProbes = [
+          probeIntegerTexture(0, gl.TEXTURE_2D),
+          probeIntegerTexture(0, gl.TEXTURE_2D_ARRAY),
+          probeIntegerTexture(1, gl.TEXTURE_2D_ARRAY),
+          probeIntegerTexture(2, gl.TEXTURE_2D_ARRAY),
+        ];
+      };
+
       function animate(timestamp) {
         const shouldRender = bench.status !== "done" && bench.status !== "error";
         if (!shouldRender) return;
@@ -944,6 +1034,11 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
           const settled = spark.activeSplats > 0 && !spark.sorting && !spark.sortDirty;
           bench.settleStableFrames = settled ? bench.settleStableFrames + 1 : 0;
           if (bench.settleStableFrames >= 5) {
+            bench.sortReadbackDigest = digestUint32Array(spark.readback32, spark.activeSplats);
+            bench.orderingDigest = digestUint32Array(
+              spark.orderingTexture && spark.orderingTexture.image && spark.orderingTexture.image.data,
+              spark.activeSplats,
+            );
             bench.settleEndMs = performance.now();
             bench.status = "running";
             bench.seenFrames = 0;
@@ -957,14 +1052,6 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
               bench.renderDurations.push(renderEnd - renderStart);
               bench.measuredFrames = bench.frameTimes.length;
               if (bench.frameTimes.length >= bench.maxFrames) {
-                if (config.debugState) {
-                  bench.textureProbes = [
-                    probeIntegerTexture(0, gl.TEXTURE_2D),
-                    probeIntegerTexture(0, gl.TEXTURE_2D_ARRAY),
-                    probeIntegerTexture(1, gl.TEXTURE_2D_ARRAY),
-                    probeIntegerTexture(2, gl.TEXTURE_2D_ARRAY),
-                  ];
-                }
                 try {
                   bench.finalDataUrl = canvas.toDataURL("image/png");
                 } catch (error) {
@@ -1389,6 +1476,17 @@ async function runTrial(browser, baseURL, serverState, scene, mode, transform, t
     pageErrors.push(error.message || String(error));
   }
 
+  const screenshot = path.join(outputRoot, `${sanitizeName(scene.name)}-${sanitizeName(mode)}-${sanitizeName(label)}.png`);
+  let compositorScreenshot = false;
+  await page.locator("canvas").first().screenshot({ path: screenshot, timeout: 30000 }).then(() => {
+    compositorScreenshot = true;
+  }).catch((error) => {
+    screenshotErrors.push(`canvas screenshot: ${error.message || error}`);
+  });
+  if (debugState) {
+    await page.evaluate(() => window.__SPARK_RUN_DEBUG_PROBES && window.__SPARK_RUN_DEBUG_PROBES())
+      .catch((error) => screenshotErrors.push(`debug probes: ${error.message || error}`));
+  }
   const finalDataUrl = await page.evaluate(() => window.__SPARK_BENCH && window.__SPARK_BENCH.finalDataUrl || null)
     .catch(() => null);
   const bench = await page.evaluate(() => {
@@ -1397,13 +1495,6 @@ async function runTrial(browser, baseURL, serverState, scene, mode, transform, t
     return { ...bench, finalDataUrl: undefined };
   })
     .catch((error) => ({ status: "error", errors: [error.message || String(error)], frameTimes: [] }));
-  const screenshot = path.join(outputRoot, `${sanitizeName(scene.name)}-${sanitizeName(mode)}-${sanitizeName(label)}.png`);
-  let compositorScreenshot = false;
-  await page.locator("canvas").first().screenshot({ path: screenshot, timeout: 30000 }).then(() => {
-    compositorScreenshot = true;
-  }).catch((error) => {
-    screenshotErrors.push(`canvas screenshot: ${error.message || error}`);
-  });
   if (!compositorScreenshot && finalDataUrl && finalDataUrl.startsWith("data:image/png;base64,")) {
     fs.writeFileSync(screenshot, Buffer.from(finalDataUrl.split(",")[1], "base64"));
   } else if (!compositorScreenshot) {

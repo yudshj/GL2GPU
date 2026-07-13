@@ -11569,6 +11569,24 @@ function scanGlslDeclarations(source, stage, options = {}) {
     }
     return declarations;
 }
+function scanGlslFragmentOutputScalarTypes(source) {
+    const result = new Map();
+    for (const output of scanGlslDeclarations(source, "fragment").outputs) {
+        const scalar = output.glsl_type.startsWith("u")
+            ? "uint"
+            : output.glsl_type.startsWith("i")
+                ? "sint"
+                : "float";
+        const sourceName = output.source_name || output.name;
+        result.set(sourceName, scalar);
+        if (output.is_array) {
+            for (let index = 0; index < Math.max(1, output.size); index++) {
+                result.set(`${sourceName}[${index}]`, scalar);
+            }
+        }
+    }
+    return result;
+}
 function makeShaderMetadata(source, type, wgsl = "") {
     const stage = type === 0x8B31 ? "vertex" : "fragment";
     const declarations = scanGlslDeclarations(source, stage);
@@ -17626,25 +17644,16 @@ fn fragmentMain() -> @location(0) vec4<${scalar}> {
         if (/\bgl_FragColor\b|\bgl_FragData\s*\[\s*0\s*\]/.test(source)) {
             outputs.set("gl_FragColor", 0);
         }
-        const scannedOutputs = scanGlslDeclarations(fragmentShader.glsl_shader, "fragment").outputs;
-        for (const output of scannedOutputs) {
-            const scalar = output.glsl_type.startsWith("u")
-                ? "uint"
-                : output.glsl_type.startsWith("i")
-                    ? "sint"
-                    : "float";
-            const names = output.is_array
-                ? Array.from({ length: Math.max(1, output.size) }, (_, index) => `${output.name}[${index}]`)
-                : [output.name];
-            for (const name of names) {
-                const offset = output.is_array ? Number(/\[(\d+)\]$/.exec(name)?.[1] || 0) : 0;
-                const baseLocation = outputs.get(output.name);
-                const location = outputs.get(name) ??
-                    (baseLocation === undefined ? undefined : baseLocation + offset);
-                if (location !== undefined) {
-                    outputTypes.set(location, scalar);
-                }
-            }
+        const scannedOutputTypes = scanGlslFragmentOutputScalarTypes(fragmentShader.glsl_shader);
+        for (const [name, scalar] of scannedOutputTypes) {
+            const arrayElement = /^(.*)\[(\d+)\]$/.exec(name);
+            const baseName = arrayElement?.[1] || name;
+            const offset = arrayElement ? Number(arrayElement[2]) : 0;
+            const baseLocation = outputs.get(baseName);
+            const location = outputs.get(name) ??
+                (baseLocation === undefined ? undefined : baseLocation + offset);
+            if (location !== undefined)
+                outputTypes.set(location, scalar);
         }
         if (outputs.has("gl_FragColor"))
             outputTypes.set(0, "float");

@@ -599,6 +599,27 @@ export function scanGlslDeclarations(
     return declarations;
 }
 
+export type FragmentOutputScalarType = "float" | "sint" | "uint";
+
+export function scanGlslFragmentOutputScalarTypes(source: string): Map<string, FragmentOutputScalarType> {
+    const result = new Map<string, FragmentOutputScalarType>();
+    for (const output of scanGlslDeclarations(source, "fragment").outputs) {
+        const scalar = output.glsl_type.startsWith("u")
+            ? "uint"
+            : output.glsl_type.startsWith("i")
+                ? "sint"
+                : "float";
+        const sourceName = output.source_name || output.name;
+        result.set(sourceName, scalar);
+        if (output.is_array) {
+            for (let index = 0; index < Math.max(1, output.size); index++) {
+                result.set(`${sourceName}[${index}]`, scalar);
+            }
+        }
+    }
+    return result;
+}
+
 export function makeShaderMetadata(source: string, type: GLenum, wgsl: string = ""): InitShaderInfoType {
     const stage: ShaderStage = type === 0x8B31 ? "vertex" : "fragment";
     const declarations = scanGlslDeclarations(source, stage);
