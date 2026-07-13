@@ -11,10 +11,16 @@ import {
 } from "./shaderInternalUniforms";
 import { bridgeGlslIdentifier } from "./shaderGlslIdentifiers";
 import {
+    lowerInlineInterfaceStructs,
     normalizeAnonymousUniformStructs,
     planValueStructUniforms,
 } from "./shaderGlslStructs";
 import { hydTrim } from "./shaderSource";
+import { scanGlslUniformBlocks } from "./shaderGlslUniformBlocks";
+import {
+    normalizeGlslInterfaceTypeArrays,
+    sanitizeGlslangLineComments,
+} from "./shaderGlslCompatibility";
 
 export type ShaderStage = "vertex" | "fragment";
 
@@ -23,6 +29,7 @@ export interface GlslDeclarations {
     uniforms: NameAndType[];
     samplers: TextureNameAndType[];
     varyings: NameAndType[];
+    outputs: NameAndType[];
 }
 
 export interface ScanGlslDeclarationOptions {
@@ -65,12 +72,15 @@ const SAMPLER_TEXTURE_MAP: Map<string, string> = new Map([
     ["samplerCube", "texture_cube<f32>"],
     ["sampler2DArray", "texture_2d_array<f32>"],
     ["sampler3D", "texture_3d<f32>"],
+    ["sampler2DShadow", "texture_depth_2d"],
+    ["samplerCubeShadow", "texture_depth_cube"],
+    ["sampler2DArrayShadow", "texture_depth_2d_array"],
     ["isampler2D", "texture_2d<i32>"],
-    ["isamplerCube", "texture_cube<i32>"],
+    ["isamplerCube", "texture_2d_array<i32>"],
     ["isampler2DArray", "texture_2d_array<i32>"],
     ["isampler3D", "texture_3d<i32>"],
     ["usampler2D", "texture_2d<u32>"],
-    ["usamplerCube", "texture_cube<u32>"],
+    ["usamplerCube", "texture_2d_array<u32>"],
     ["usampler2DArray", "texture_2d_array<u32>"],
     ["usampler3D", "texture_3d<u32>"],
 ]);
@@ -229,7 +239,7 @@ function appendSamplerDeclarations(
             name: isArray ? `${name}_${index}` : name,
             glsl_type: glslType,
             wgsl_texture_type: textureType,
-            wgsl_sampler_type: "sampler",
+            wgsl_sampler_type: /Shadow$/.test(glslType) ? "sampler_comparison" : "sampler",
             source_name: isArray ? `${sourceName || name}[${index}]` : sourceName,
             size,
             is_array: isArray,
@@ -240,7 +250,7 @@ function appendSamplerDeclarations(
 }
 
 function sanitizeResourceName(name: string): string {
-    return name.replace(/[^A-Za-z0-9_]/g, "_").replace(/_+$/g, "");
+    return name.replace(/[^A-Za-z0-9_]/g, "_").replace(/_+/g, "_").replace(/_+$/g, "");
 }
 
 function escapeRegExp(value: string): string {
@@ -300,6 +310,7 @@ function declarationFrom(
     uniform: boolean = false,
     size: number = 1,
     isArray: boolean = false,
+    location?: number,
 ): NameAndType {
     const elementType = uniform ? toUniformWgslType(glslType) : toWgslType(glslType);
     return {
@@ -310,7 +321,14 @@ function declarationFrom(
         source_name: sourceName,
         size,
         is_array: isArray,
+        ...(location === undefined ? {} : { location }),
     };
+}
+
+function declarationLocationSpan(glslType: string, size: number, isArray: boolean): number {
+    const matrix = /^mat([2-4])(?:x[2-4])?$/.exec(glslType);
+    const elementSpan = matrix ? Number(matrix[1]) : 1;
+    return elementSpan * (isArray ? Math.max(1, size) : 1);
 }
 
 function isKnownValueType(glslType: string): boolean {
@@ -334,7 +352,7 @@ function parseStructDefinitions(source: string, defines: Map<string, number>): M
     let match: RegExpExecArray;
     while ((match = structRegex.exec(source)) !== null) {
         const fields: StructField[] = [];
-        const fieldRegex = /^\s*(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([A-Za-z_]\w*\s*(?:\[[^\]]*\])?)\s*;/gm;
+        const fieldRegex = /(?:^|;)\s*(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([A-Za-z_]\w*\s*(?:\[[^\]]*\])?)\s*(?=;|$)/gm;
         let fieldMatch: RegExpExecArray;
         while ((fieldMatch = fieldRegex.exec(match[2])) !== null) {
             const rawName = fieldMatch[2].replace(/\s+/g, "");
@@ -350,26 +368,85 @@ function parseStructDefinitions(source: string, defines: Map<string, number>): M
     return structs;
 }
 
+interface StructSamplerLeaf {
+    sourceName: string;
+    name: string;
+    glslType: string;
+    textureType: string;
+    size: number;
+    isArray: boolean;
+    arrayName?: string;
+    arrayIndex?: number;
+}
+
+function structSamplerLeaves(
+    structs: Map<string, StructField[]>,
+    rootType: string,
+    rootName: string,
+    rootSize: number,
+    rootIsArray: boolean,
+): StructSamplerLeaf[] {
+    const leaves: StructSamplerLeaf[] = [];
+    const visiting = new Set<string>();
+    const visit = (type: string, path: string) => {
+        if (visiting.has(type)) return;
+        const fields = structs.get(type);
+        if (!fields) return;
+        visiting.add(type);
+        for (const field of fields) {
+            const fieldCount = field.isArray ? field.size : 1;
+            const fieldBase = `${path}.${field.name}`;
+            for (let index = 0; index < fieldCount; index++) {
+                const sourceName = field.isArray ? `${fieldBase}[${index}]` : fieldBase;
+                const textureType = SAMPLER_TEXTURE_MAP.get(field.glslType);
+                if (textureType) {
+                    leaves.push({
+                        sourceName,
+                        name: sanitizeResourceName(sourceName),
+                        glslType: field.glslType,
+                        textureType,
+                        size: fieldCount,
+                        isArray: field.isArray,
+                        arrayName: field.isArray ? fieldBase : undefined,
+                        arrayIndex: field.isArray ? index : undefined,
+                    });
+                } else if (structs.has(field.glslType)) {
+                    visit(field.glslType, sourceName);
+                }
+            }
+        }
+        visiting.delete(type);
+    };
+    const outerCount = rootIsArray ? rootSize : 1;
+    for (let index = 0; index < outerCount; index++) {
+        visit(rootType, rootIsArray ? `${rootName}[${index}]` : rootName);
+    }
+    return leaves;
+}
+
 export function scanGlslDeclarations(
     source: string,
     stage: ShaderStage,
     options: ScanGlslDeclarationOptions = {},
 ): GlslDeclarations {
-    const cleaned = normalizeAnonymousUniformStructs(stripComments(source));
+    const cleaned = normalizeAnonymousUniformStructs(stripComments(lowerInlineInterfaceStructs(
+        normalizeGlslInterfaceTypeArrays(sanitizeGlslangLineComments(source)),
+    )));
     const defines = integerDefines(cleaned);
     const declarations: GlslDeclarations = {
         attributes: [],
         uniforms: [],
         samplers: [],
         varyings: [],
+        outputs: [],
     };
     const structs = parseStructDefinitions(cleaned, defines);
     const valueStructUniforms = planValueStructUniforms(cleaned);
 
     const seen = new Set<string>();
-    const declarationPattern = /\b(?:(?:layout\s*\([^)]*\)\s*)?)(?:invariant\s+)?(?:(?:lowp|mediump|highp)\s+)?((?:(?:flat|smooth|noperspective|centroid|sample)\s+)*)(attribute|uniform|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([^;]+)\s*;/g;
-    const bodyWithoutGlobalDeclarations = cleaned.replace(declarationPattern, (full, ...args) => {
-        const offset = args[args.length - 2] as number;
+    const declarationPattern = /\b(?:layout\s*\(([^)]*)\)\s*)?(?:invariant\s+)?(?:(?:lowp|mediump|highp)\s+)?((?:(?:flat|smooth|noperspective|centroid|sample)\s+)*)(attribute|uniform|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([^;]+)\s*;/g;
+    const bodyWithoutGlobalDeclarations = cleaned.replace(declarationPattern, (full, _layout, _interpolation, qualifier, _type, rawNames, offset) => {
+        if (qualifier === "uniform" && rawNames.trimStart().startsWith("{")) return full;
         return isTopLevelAt(cleaned, offset) ? "\n" : full;
     });
     const declarationRegex = new RegExp(declarationPattern);
@@ -378,15 +455,28 @@ export function scanGlslDeclarations(
         if (!isTopLevelAt(cleaned, match.index)) {
             continue;
         }
-        const interpolation = match[1].trim();
-        const qualifier = match[2];
-        const glslType = match[3];
-        const names = match[4].split(",");
+        const layoutQualifier = match[1] || "";
+        const interpolation = match[2].trim();
+        const qualifier = match[3];
+        const glslType = match[4];
+        if (qualifier === "uniform" && match[5].trimStart().startsWith("{")) {
+            continue;
+        }
+        const locationExpression = /(?:^|,)\s*location\s*=\s*([^,]+)/.exec(layoutQualifier)?.[1]?.trim();
+        const explicitLocation = locationExpression === undefined
+            ? undefined
+            : evaluateIntegerExpression(locationExpression, defines) ?? undefined;
+        let declarationLocationOffset = 0;
+        const names = match[5].split(",");
         for (const rawName of names) {
             const sourceName = normalizeIdentifierName(rawName);
             const name = bridgeGlslIdentifier(sourceName);
             const size = identifierArraySize(rawName, defines);
             const isArray = identifierIsArray(rawName);
+            const declarationLocation = explicitLocation === undefined
+                ? undefined
+                : explicitLocation + declarationLocationOffset;
+            declarationLocationOffset += declarationLocationSpan(glslType, size, isArray);
             if (!name) continue;
             const key = `${qualifier}:${glslType}:${name}`;
             if (seen.has(key)) continue;
@@ -409,30 +499,19 @@ export function scanGlslDeclarations(
                     );
                 } else if (structs.has(glslType)) {
                     const rootReferenced = isIdentifierReferenced(bodyWithoutGlobalDeclarations, sourceName);
-                    for (const field of structs.get(glslType)) {
-                        const fieldTextureType = SAMPLER_TEXTURE_MAP.get(field.glslType);
-                        if (fieldTextureType) {
-                            if (!rootReferenced) continue;
-                            const outerCount = isArray ? size : 1;
-                            const fieldCount = field.isArray ? field.size : 1;
-                            for (let outerIndex = 0; outerIndex < outerCount; outerIndex++) {
-                                const rootName = isArray ? `${sourceName}[${outerIndex}]` : sourceName;
-                                const fieldBase = `${rootName}.${field.name}`;
-                                for (let fieldIndex = 0; fieldIndex < fieldCount; fieldIndex++) {
-                                    const sourceName = field.isArray ? `${fieldBase}[${fieldIndex}]` : fieldBase;
-                                    declarations.samplers.push({
-                                        name: sanitizeResourceName(sourceName),
-                                        glsl_type: field.glslType,
-                                        wgsl_texture_type: fieldTextureType,
-                                        wgsl_sampler_type: "sampler",
-                                        source_name: sourceName,
-                                        size: outerCount * fieldCount,
-                                        is_array: isArray || field.isArray,
-                                        array_name: field.isArray ? fieldBase : undefined,
-                                        array_index: field.isArray ? fieldIndex : undefined,
-                                    });
-                                }
-                            }
+                    if (rootReferenced) {
+                        for (const leaf of structSamplerLeaves(structs, glslType, sourceName, size, isArray)) {
+                            declarations.samplers.push({
+                                name: leaf.name,
+                                glsl_type: leaf.glslType,
+                                wgsl_texture_type: leaf.textureType,
+                                wgsl_sampler_type: /Shadow$/.test(leaf.glslType) ? "sampler_comparison" : "sampler",
+                                source_name: leaf.sourceName,
+                                size: leaf.size,
+                                is_array: leaf.isArray,
+                                array_name: leaf.arrayName,
+                                array_index: leaf.arrayIndex,
+                            });
                         }
                     }
                     for (const leaf of valueStructUniforms.leaves.filter((item) => item.rootName === sourceName)) {
@@ -477,6 +556,7 @@ export function scanGlslDeclarations(
                     false,
                     size,
                     isArray,
+                    declarationLocation,
                 ));
                 continue;
             }
@@ -496,6 +576,21 @@ export function scanGlslDeclarations(
                     false,
                     size,
                     isArray,
+                    declarationLocation,
+                ));
+                continue;
+            }
+
+            if (qualifier === "out" && stage === "fragment" && isKnownValueType(glslType)) {
+                declarations.outputs.push(declarationFrom(
+                    glslType,
+                    name,
+                    interpolation,
+                    name === sourceName ? undefined : sourceName,
+                    false,
+                    size,
+                    isArray,
+                    declarationLocation,
                 ));
             }
         }
@@ -555,5 +650,6 @@ export function makeShaderMetadata(source: string, type: GLenum, wgsl: string = 
             stage,
             translated: wgsl.length > 0,
         }),
+        uniform_blocks: scanGlslUniformBlocks(source),
     };
 }

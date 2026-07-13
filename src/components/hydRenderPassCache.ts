@@ -2,6 +2,11 @@
 
 type GpuOperators = 'setPipeline' | 'setBindGroup' | 'setVertexBuffer' | 'setIndexBuffer' | 'draw' | 'drawIndexed';
 
+export interface HydOcclusionQueryAllocation {
+    querySet: GPUQuerySet;
+    queryIndex: number;
+}
+
 class GPURenderBundleTransition {
     public renderBundle: GPURenderBundle = null;
     // public jumpTable: { [key: string]: GPURenderBundleTransition } = {};
@@ -98,11 +103,17 @@ class HydRenderPassEncoder {
     constructor(device: GPUDevice, renderBundleEncoderDescriptor: GPURenderBundleEncoderDescriptor) {
         this.device = device;
         this.renderBundleEncoderDescriptor = renderBundleEncoderDescriptor;
-        const initKey = (renderBundleEncoderDescriptor.colorFormats as Array<GPUTextureFormat>).join(',') + renderBundleEncoderDescriptor.depthStencilFormat;
-        this.bundleCache = HydRenderPassEncoder.initBundleCache.get(initKey);
+        const initKey = (renderBundleEncoderDescriptor.colorFormats as Array<GPUTextureFormat>).join(',') +
+            renderBundleEncoderDescriptor.depthStencilFormat +
+            `:samples=${renderBundleEncoderDescriptor.sampleCount || 1}`;
+        this.bundleCache = (globalThis as any).__HYD_DISABLE_BUNDLE_CACHE === true
+            ? null
+            : HydRenderPassEncoder.initBundleCache.get(initKey);
         if (!this.bundleCache) {
             this.bundleCache = new GPURenderBundleTransition(null, null, null);
-            HydRenderPassEncoder.initBundleCache.set(initKey, this.bundleCache);
+            if ((globalThis as any).__HYD_DISABLE_BUNDLE_CACHE !== true) {
+                HydRenderPassEncoder.initBundleCache.set(initKey, this.bundleCache);
+            }
         }
     }
     public setPipeline(opHash: string, pipeline: GPURenderPipeline) {
@@ -181,9 +192,15 @@ export class HydRenderPassCache {
     private colorInfo: [number, number, number, number] = [0, 0, 0, 0];
     private __commandEncoderCount = 0;
     private bundleNum: number[];
+    private occlusionQueryProvider: (() => HydOcclusionQueryAllocation | null) | null = null;
+    private renderPassHasOcclusionQuery: boolean = false;
 
     constructor(device: GPUDevice) {
         this.device = device;
+    }
+
+    public setOcclusionQueryProvider(provider: (() => HydOcclusionQueryAllocation | null) | null) {
+        this.occlusionQueryProvider = provider;
     }
 
     public resetbundleNum() {
@@ -225,12 +242,16 @@ export class HydRenderPassCache {
         this.scissorInfo = [0, 0, 0, 0];
         this.stencilReferenceInfo = 0;
         this.colorInfo = [0, 0, 0, 0];
+        this.renderPassHasOcclusionQuery = false;
     }
 
     private RpEnd() {
         if (this.renderPassEncoder) {
             const bundle = this.renderBundleGenerator.generateBundle();
             this.renderPassEncoder.executeBundles([bundle]);
+            if (this.renderPassHasOcclusionQuery) {
+                this.renderPassEncoder.endOcclusionQuery();
+            }
             this.renderPassEncoder.end();
 
             this.resetCache();
@@ -275,8 +296,16 @@ export class HydRenderPassCache {
             this.RpEnd();
             this.renderPassDescriptorCacheKey = hash;
             this.renderPassDescriptor = callback();
+            const occlusionQuery = this.occlusionQueryProvider?.() || null;
+            if (occlusionQuery) {
+                this.renderPassDescriptor.occlusionQuerySet = occlusionQuery.querySet;
+            }
             // this.renderPassDescriptor.label += hash;
             this.renderPassEncoder = this.commandEncoder.beginRenderPass(this.renderPassDescriptor);
+            if (occlusionQuery) {
+                this.renderPassEncoder.beginOcclusionQuery(occlusionQuery.queryIndex);
+                this.renderPassHasOcclusionQuery = true;
+            }
             this.renderBundleGenerator = new HydRenderPassEncoder(this.device, renderBundleEncoderDescriptor);
             return true;
         }

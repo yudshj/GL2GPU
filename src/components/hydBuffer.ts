@@ -1,9 +1,18 @@
 import { HydHashable } from "./base/hydHashable";
 
+export function physicalWebGlBufferSize(webglSize: number): number {
+    // WebGL exposes the exact logical byte size, while WebGPU uniform structs
+    // can require trailing alignment bytes that are not included in
+    // UNIFORM_BLOCK_DATA_SIZE (notably a final vec3). Keep a small physical
+    // tail available without changing BUFFER_SIZE or WebGL bounds checks.
+    return Math.max(16, Math.ceil(Math.max(0, webglSize) / 16) * 16);
+}
+
 export interface HydExpandedIndexBuffer {
     buffer: GPUBuffer;
     indexCount: number;
     format: GPUIndexFormat;
+    maxIndex?: number;
 }
 
 export interface HydConvertedVertexBuffer {
@@ -11,11 +20,128 @@ export interface HydConvertedVertexBuffer {
     format: GPUVertexFormat;
     arrayStride: number;
     key: string;
+    data: Float32Array | Int32Array | Uint32Array;
 }
 
 export interface HydDivisorVertexBuffer {
     buffer: GPUBuffer;
     key: string;
+}
+
+function lastProvokingVertexIndices(
+    mode: GLenum,
+    source: ArrayLike<number>,
+    restartIndex: number | null,
+): Uint32Array {
+    const output: number[] = [];
+    const emitRun = (run: number[]) => {
+        switch (mode) {
+            case WebGL2RenderingContext.LINES:
+                for (let index = 0; index + 1 < run.length; index += 2) {
+                    output.push(run[index + 1], run[index]);
+                }
+                break;
+            case WebGL2RenderingContext.LINE_STRIP:
+                for (let index = 0; index + 1 < run.length; index++) {
+                    output.push(run[index + 1], run[index]);
+                }
+                break;
+            case WebGL2RenderingContext.LINE_LOOP:
+                if (run.length < 2) break;
+                for (let index = 0; index + 1 < run.length; index++) {
+                    output.push(run[index + 1], run[index]);
+                }
+                output.push(run[0], run[run.length - 1]);
+                break;
+            case WebGL2RenderingContext.TRIANGLES:
+                for (let index = 0; index + 2 < run.length; index += 3) {
+                    output.push(run[index + 2], run[index], run[index + 1]);
+                }
+                break;
+            case WebGL2RenderingContext.TRIANGLE_STRIP:
+                for (let index = 0; index + 2 < run.length; index++) {
+                    if ((index & 1) === 0) {
+                        output.push(run[index + 2], run[index], run[index + 1]);
+                    } else {
+                        output.push(run[index + 2], run[index + 1], run[index]);
+                    }
+                }
+                break;
+            case WebGL2RenderingContext.TRIANGLE_FAN:
+                for (let index = 1; index + 1 < run.length; index++) {
+                    output.push(run[index + 1], run[0], run[index]);
+                }
+                break;
+        }
+    };
+
+    let run: number[] = [];
+    for (let index = 0; index < source.length; index++) {
+        const value = Number(source[index]) >>> 0;
+        if (restartIndex !== null && value === restartIndex) {
+            emitRun(run);
+            run = [];
+        } else {
+            run.push(value);
+        }
+    }
+    emitRun(run);
+    return new Uint32Array(output);
+}
+
+export function lowerFixedRestartIndices(
+    mode: GLenum,
+    source: ArrayLike<number>,
+    restartIndex: number,
+): Uint32Array {
+    const output: number[] = [];
+    const emitRun = (run: number[]) => {
+        switch (mode) {
+            case WebGL2RenderingContext.POINTS:
+                output.push(...run);
+                break;
+            case WebGL2RenderingContext.LINES:
+            case WebGL2RenderingContext.TRIANGLES: {
+                const primitiveSize = mode === WebGL2RenderingContext.LINES ? 2 : 3;
+                const completeLength = run.length - run.length % primitiveSize;
+                output.push(...run.slice(0, completeLength));
+                break;
+            }
+            case WebGL2RenderingContext.LINE_LOOP:
+                if (run.length < 2) break;
+                for (let index = 1; index < run.length; index++) {
+                    output.push(run[index - 1], run[index]);
+                }
+                output.push(run[run.length - 1], run[0]);
+                break;
+            case WebGL2RenderingContext.TRIANGLE_FAN:
+                if (run.length < 3) break;
+                for (let index = 2; index < run.length; index++) {
+                    output.push(run[0], run[index - 1], run[index]);
+                }
+                break;
+            default:
+                output.push(...run);
+                output.push(0xffffffff);
+                break;
+        }
+    };
+
+    let run: number[] = [];
+    for (let index = 0; index < source.length; index++) {
+        const value = Number(source[index]) >>> 0;
+        if (value === restartIndex) {
+            emitRun(run);
+            run = [];
+        } else {
+            run.push(value);
+        }
+    }
+    emitRun(run);
+    if (mode === WebGL2RenderingContext.LINE_STRIP || mode === WebGL2RenderingContext.TRIANGLE_STRIP) {
+        while (output[output.length - 1] === 0xffffffff) output.pop();
+    }
+    return new Uint32Array(output);
 }
 
 export class HydBuffer implements HydHashable {
@@ -30,7 +156,9 @@ export class HydBuffer implements HydHashable {
     public bindingKind: "element-array" | "other" | null = null;
     public descriptor: GPUBufferDescriptor = {
         size: undefined,
-        usage: GPUBufferUsage.COPY_DST,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC |
+            GPUBufferUsage.VERTEX | GPUBufferUsage.INDEX |
+            GPUBufferUsage.UNIFORM | GPUBufferUsage.STORAGE,
     };
     public shadowData: Uint8Array = new Uint8Array(0);
     private writeVersion: number = 0;
@@ -40,6 +168,9 @@ export class HydBuffer implements HydHashable {
     private readonly expandedIndexBuffers: Map<string, HydExpandedIndexBuffer> = new Map();
     private readonly convertedVertexBuffers: Map<string, HydConvertedVertexBuffer> = new Map();
     private readonly divisorVertexBuffers: Map<string, HydDivisorVertexBuffer> = new Map();
+    public derivedVertexGeneration: number = 0;
+    private retiredBuffers: GPUBuffer[] = [];
+    private retirementPending: boolean = false;
     private lastMaxIndexType: GLenum = 0;
     private lastMaxIndexOffset: number = -1;
     private lastMaxIndexCount: number = -1;
@@ -51,18 +182,44 @@ export class HydBuffer implements HydHashable {
         this.descriptor.label = `buffer ${HydBuffer.__total__++}`;
     }
 
+    private retireBuffer(buffer: GPUBuffer | null | undefined) {
+        if (!buffer) return;
+        this.retiredBuffers.push(buffer);
+        this.scheduleRetirement();
+    }
+
+    private scheduleRetirement() {
+        if (this.retirementPending || this.retiredBuffers.length === 0) return;
+        this.retirementPending = true;
+        const retired = this.retiredBuffers.splice(0);
+        const destroyRetired = () => {
+            for (const retiredBuffer of retired) retiredBuffer.destroy();
+            this.retirementPending = false;
+            this.scheduleRetirement();
+        };
+        const queue = this.device?.queue;
+        if (queue && typeof queue.onSubmittedWorkDone === "function") {
+            void queue.onSubmittedWorkDone().then(destroyRetired, destroyRetired);
+        } else {
+            destroyRetired();
+        }
+    }
+
     private invalidateIndexCaches() {
-        this.uint16IndexBuffer?.destroy();
+        if (this.convertedVertexBuffers.size > 0 || this.divisorVertexBuffers.size > 0) {
+            this.derivedVertexGeneration++;
+        }
+        this.retireBuffer(this.uint16IndexBuffer);
         this.uint16IndexBuffer = null;
         this.uint16IndexBufferVersion = -1;
         for (const expanded of this.expandedIndexBuffers.values()) {
-            expanded.buffer.destroy();
+            this.retireBuffer(expanded.buffer);
         }
         for (const converted of this.convertedVertexBuffers.values()) {
-            converted.buffer.destroy();
+            this.retireBuffer(converted.buffer);
         }
         for (const expanded of this.divisorVertexBuffers.values()) {
-            expanded.buffer.destroy();
+            this.retireBuffer(expanded.buffer);
         }
         this.expandedIndexBuffers.clear();
         this.convertedVertexBuffers.clear();
@@ -75,7 +232,7 @@ export class HydBuffer implements HydHashable {
         this.writeVersion++;
         this.invalidateIndexCaches();
         if (this.__buffer__ && (this.__buffer__.size !== this.descriptor.size)) {
-            this.__buffer__.destroy();
+            this.retireBuffer(this.__buffer__);
             this.__buffer__ = null;
         }
         if (!this.__buffer__) {
@@ -104,6 +261,25 @@ export class HydBuffer implements HydHashable {
                 );
             }
         }
+    }
+
+    public commitShadowData(offset: number = 0, byteLength: number = this.webglSize - offset) {
+        if (!this.__buffer__ || byteLength <= 0) return;
+        this.writeVersion++;
+        this.invalidateIndexCaches();
+        const alignedStart = Math.max(0, offset) & ~3;
+        const alignedEnd = Math.min(
+            this.shadowData.byteLength,
+            (Math.max(0, offset) + byteLength + 3) & ~3,
+        );
+        if (alignedEnd <= alignedStart) return;
+        this.device.queue.writeBuffer(
+            this.__buffer__,
+            alignedStart,
+            this.shadowData.buffer,
+            this.shadowData.byteOffset + alignedStart,
+            alignedEnd - alignedStart,
+        );
     }
 
     public get version(): number {
@@ -205,6 +381,86 @@ export class HydBuffer implements HydHashable {
         return expanded;
     }
 
+    public getLastProvokingVertexIndexBuffer(
+        mode: GLenum,
+        type: GLenum,
+        byteOffset: number,
+        count: number,
+        fixedRestart: boolean,
+    ): HydExpandedIndexBuffer {
+        const key = `last-provoking:${mode}:${type}:${byteOffset}:${count}:${fixedRestart ? 1 : 0}`;
+        const cached = this.expandedIndexBuffers.get(key);
+        if (cached) return cached;
+
+        const indexSize = type === WebGL2RenderingContext.UNSIGNED_BYTE ? 1 :
+            type === WebGL2RenderingContext.UNSIGNED_SHORT ? 2 : 4;
+        const source = Array.from({ length: count }, (_, index) =>
+            this.readIndex(type, byteOffset + index * indexSize));
+        const restartIndex = !fixedRestart ? null :
+            type === WebGL2RenderingContext.UNSIGNED_BYTE ? 0xff :
+                type === WebGL2RenderingContext.UNSIGNED_SHORT ? 0xffff : 0xffffffff;
+        const indices = lastProvokingVertexIndices(mode, source, restartIndex);
+        const buffer = this.device.createBuffer({
+            label: `${this.descriptor.label} last-provoking-${mode}-${type}-${byteOffset}-${count}-v${this.writeVersion}`,
+            size: Math.max(4, indices.byteLength),
+            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        });
+        if (indices.byteLength > 0) {
+            this.device.queue.writeBuffer(buffer, 0, indices.buffer, indices.byteOffset, indices.byteLength);
+        }
+        let maxIndex = -1;
+        for (const index of indices) maxIndex = Math.max(maxIndex, index);
+        const expanded: HydExpandedIndexBuffer = {
+            buffer,
+            indexCount: indices.length,
+            format: "uint32",
+            maxIndex,
+        };
+        this.expandedIndexBuffers.set(key, expanded);
+        return expanded;
+    }
+
+    public getFixedRestartIndexBuffer(
+        mode: GLenum,
+        type: GLenum,
+        byteOffset: number,
+        count: number,
+    ): HydExpandedIndexBuffer | null {
+        const restartIndex = type === WebGL2RenderingContext.UNSIGNED_BYTE ? 0xff :
+            type === WebGL2RenderingContext.UNSIGNED_SHORT ? 0xffff : 0xffffffff;
+        const indexSize = type === WebGL2RenderingContext.UNSIGNED_BYTE ? 1 :
+            type === WebGL2RenderingContext.UNSIGNED_SHORT ? 2 : 4;
+        const source = Array.from({ length: count }, (_, index) =>
+            this.readIndex(type, byteOffset + index * indexSize));
+        if (!source.includes(restartIndex)) return null;
+
+        const key = `restart:${mode}:${type}:${byteOffset}:${count}`;
+        const cached = this.expandedIndexBuffers.get(key);
+        if (cached) return cached;
+
+        const indices = lowerFixedRestartIndices(mode, source, restartIndex);
+        const buffer = this.device.createBuffer({
+            label: `${this.descriptor.label} fixed-restart-${mode}-${type}-${byteOffset}-${count}-v${this.writeVersion}`,
+            size: Math.max(4, indices.byteLength),
+            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        });
+        if (indices.byteLength > 0) {
+            this.device.queue.writeBuffer(buffer, 0, indices.buffer, indices.byteOffset, indices.byteLength);
+        }
+        let maxIndex = -1;
+        for (const index of source) {
+            if (index !== restartIndex) maxIndex = Math.max(maxIndex, index);
+        }
+        const expanded: HydExpandedIndexBuffer = {
+            buffer,
+            indexCount: indices.length,
+            format: "uint32",
+            maxIndex,
+        };
+        this.expandedIndexBuffers.set(key, expanded);
+        return expanded;
+    }
+
     private vertexComponent(view: DataView, type: GLenum, byteOffset: number, normalized: boolean): number {
         switch (type) {
             case WebGL2RenderingContext.BYTE: {
@@ -223,10 +479,14 @@ export class HydBuffer implements HydHashable {
                 const value = view.getUint16(byteOffset, true);
                 return normalized ? value / 65535 : value;
             }
-            case WebGL2RenderingContext.INT:
-                return view.getInt32(byteOffset, true);
-            case WebGL2RenderingContext.UNSIGNED_INT:
-                return view.getUint32(byteOffset, true);
+            case WebGL2RenderingContext.INT: {
+                const value = view.getInt32(byteOffset, true);
+                return normalized ? Math.max(value / 2147483647, -1) : value;
+            }
+            case WebGL2RenderingContext.UNSIGNED_INT: {
+                const value = view.getUint32(byteOffset, true);
+                return normalized ? value / 4294967295 : value;
+            }
             case WebGL2RenderingContext.HALF_FLOAT: {
                 const bits = view.getUint16(byteOffset, true);
                 const sign = bits & 0x8000 ? -1 : 1;
@@ -241,6 +501,20 @@ export class HydBuffer implements HydHashable {
         }
     }
 
+    private packedVertexComponent(view: DataView, type: GLenum, byteOffset: number, component: number, normalized: boolean): number {
+        const packed = view.getUint32(byteOffset, true);
+        const bits = component === 3 ? 2 : 10;
+        const shift = component === 0 ? 0 : component === 1 ? 10 : component === 2 ? 20 : 30;
+        const mask = (1 << bits) - 1;
+        let value = (packed >>> shift) & mask;
+        if (type === WebGL2RenderingContext.INT_2_10_10_10_REV) {
+            const signBit = 1 << (bits - 1);
+            if (value & signBit) value -= 1 << bits;
+            return normalized ? Math.max(-1, value / ((1 << (bits - 1)) - 1)) : value;
+        }
+        return normalized ? value / mask : value;
+    }
+
     public getFloatVertexBuffer(
         type: GLenum,
         size: number,
@@ -252,9 +526,11 @@ export class HydBuffer implements HydHashable {
         const key = `${type}:${size}:${normalized ? 1 : 0}:${webglStride}:${offset}:d${divisor}`;
         const cached = this.convertedVertexBuffers.get(key);
         if (cached) return cached;
+        const packed = type === WebGL2RenderingContext.INT_2_10_10_10_REV ||
+            type === WebGL2RenderingContext.UNSIGNED_INT_2_10_10_10_REV;
         const componentBytes = type === WebGL2RenderingContext.BYTE || type === WebGL2RenderingContext.UNSIGNED_BYTE ? 1 :
             type === WebGL2RenderingContext.SHORT || type === WebGL2RenderingContext.UNSIGNED_SHORT || type === WebGL2RenderingContext.HALF_FLOAT ? 2 : 4;
-        const elementBytes = size * componentBytes;
+        const elementBytes = packed ? 4 : size * componentBytes;
         const sourceStride = webglStride || elementBytes;
         const elementCount = this.webglSize < offset + elementBytes
             ? 0
@@ -265,7 +541,9 @@ export class HydBuffer implements HydHashable {
         for (let element = 0; element < elementCount; element++) {
             const sourceBase = offset + element * sourceStride;
             for (let component = 0; component < size; component++) {
-                const value = this.vertexComponent(sourceView, type, sourceBase + component * componentBytes, normalized);
+                const value = packed
+                    ? this.packedVertexComponent(sourceView, type, sourceBase, component, normalized)
+                    : this.vertexComponent(sourceView, type, sourceBase + component * componentBytes, normalized);
                 for (let repeat = 0; repeat < repeatCount; repeat++) {
                     values[(element * repeatCount + repeat) * size + component] = value;
                 }
@@ -281,7 +559,69 @@ export class HydBuffer implements HydHashable {
         if (values.byteLength > 0) {
             this.device.queue.writeBuffer(buffer, 0, values.buffer, values.byteOffset, values.byteLength);
         }
-        const converted = { buffer, format, arrayStride, key: `${this.hash}|float:${key}:v${this.writeVersion}` };
+        const converted = {
+            buffer,
+            format,
+            arrayStride,
+            key: `${this.hash}|float:${key}:v${this.writeVersion}`,
+            data: values,
+        };
+        this.convertedVertexBuffers.set(key, converted);
+        return converted;
+    }
+
+    public getIntegerVertexBuffer(
+        type: GLenum,
+        size: number,
+        webglStride: number,
+        offset: number,
+        divisor: number = 1,
+    ): HydConvertedVertexBuffer {
+        const signed = type === WebGL2RenderingContext.BYTE ||
+            type === WebGL2RenderingContext.SHORT ||
+            type === WebGL2RenderingContext.INT;
+        const key = `integer:${type}:${size}:${webglStride}:${offset}:d${divisor}`;
+        const cached = this.convertedVertexBuffers.get(key);
+        if (cached) return cached;
+        const componentBytes = type === WebGL2RenderingContext.BYTE || type === WebGL2RenderingContext.UNSIGNED_BYTE ? 1 :
+            type === WebGL2RenderingContext.SHORT || type === WebGL2RenderingContext.UNSIGNED_SHORT ? 2 : 4;
+        const elementBytes = size * componentBytes;
+        const sourceStride = webglStride || elementBytes;
+        const elementCount = this.webglSize < offset + elementBytes
+            ? 0
+            : Math.floor((this.webglSize - offset - elementBytes) / sourceStride) + 1;
+        const repeatCount = Math.max(1, divisor);
+        const values = signed
+            ? new Int32Array(elementCount * repeatCount * size)
+            : new Uint32Array(elementCount * repeatCount * size);
+        const sourceView = new DataView(this.shadowData.buffer, this.shadowData.byteOffset, this.shadowData.byteLength);
+        for (let element = 0; element < elementCount; element++) {
+            const sourceBase = offset + element * sourceStride;
+            for (let component = 0; component < size; component++) {
+                const value = this.vertexComponent(sourceView, type, sourceBase + component * componentBytes, false);
+                for (let repeat = 0; repeat < repeatCount; repeat++) {
+                    values[(element * repeatCount + repeat) * size + component] = value;
+                }
+            }
+        }
+        const prefix = signed ? "sint32" : "uint32";
+        const format = (size === 1 ? prefix : `${prefix}x${size}`) as GPUVertexFormat;
+        const arrayStride = size * 4;
+        const buffer = this.device.createBuffer({
+            label: `${this.descriptor.label} integer-vertex-${key}-v${this.writeVersion}`,
+            size: Math.max(4, values.byteLength),
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        });
+        if (values.byteLength > 0) {
+            this.device.queue.writeBuffer(buffer, 0, values.buffer, values.byteOffset, values.byteLength);
+        }
+        const converted = {
+            buffer,
+            format,
+            arrayStride,
+            key: `${this.hash}|${key}:v${this.writeVersion}`,
+            data: values,
+        };
         this.convertedVertexBuffers.set(key, converted);
         return converted;
     }

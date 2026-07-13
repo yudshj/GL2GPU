@@ -361,6 +361,143 @@ function removeRanges(source: string, ranges: SourceRange[]): string {
     return out;
 }
 
+interface FragmentOutputWidth {
+    scalar: "f32" | "i32" | "u32";
+    width: number;
+}
+
+function fragmentOutputWidth(type: string): FragmentOutputWidth | null {
+    const compact = type.replace(/\s+/g, "");
+    if (compact === "f32" || compact === "i32" || compact === "u32") {
+        return { scalar: compact, width: 1 };
+    }
+    const alias = /^vec([234])([fiu])$/.exec(compact);
+    if (alias) {
+        const scalar = alias[2] === "f" ? "f32" : alias[2] === "i" ? "i32" : "u32";
+        return { scalar, width: Number(alias[1]) };
+    }
+    const generic = /^vec([234])<(f32|i32|u32)>$/.exec(compact);
+    return generic ? { scalar: generic[2] as FragmentOutputWidth["scalar"], width: Number(generic[1]) } : null;
+}
+
+function expandedFragmentOutputType(output: FragmentOutputWidth): string {
+    return output.scalar === "f32" ? "vec4f" : output.scalar === "i32" ? "vec4i" : "vec4u";
+}
+
+function expandFragmentOutputExpression(expression: string, output: FragmentOutputWidth): string {
+    const constructor = expandedFragmentOutputType(output);
+    const zero = output.scalar === "f32" ? "0.0f" : output.scalar === "i32" ? "0i" : "0u";
+    const one = output.scalar === "f32" ? "1.0f" : output.scalar === "i32" ? "1i" : "1u";
+    if (output.width === 1) return `${constructor}(${expression.trim()}, ${zero}, ${zero}, ${one})`;
+    if (output.width === 2) return `${constructor}(${expression.trim()}, ${zero}, ${one})`;
+    return `${constructor}(${expression.trim()}, ${one})`;
+}
+
+function expandStructConstructorCalls(
+    body: string,
+    structName: string,
+    outputs: Array<FragmentOutputWidth | null>,
+): { body: string, replacements: number } {
+    const call = new RegExp(`\\b${escapeRegExp(structName)}\\s*\\(`, "g");
+    let result = "";
+    let cursor = 0;
+    let replacements = 0;
+    for (let match = call.exec(body); match !== null; match = call.exec(body)) {
+        const openParen = body.indexOf("(", match.index);
+        const closeParen = findMatching(body, openParen, "(", ")");
+        if (closeParen < 0) break;
+        const args = splitTopLevelArguments(body.slice(openParen + 1, closeParen));
+        if (args.length === outputs.length) {
+            const rewritten = args.map((arg, index) => outputs[index]
+                ? expandFragmentOutputExpression(arg, outputs[index]!)
+                : arg);
+            result += body.slice(cursor, openParen + 1) + rewritten.join(", ") + ")";
+            cursor = closeParen + 1;
+            replacements++;
+        }
+        call.lastIndex = closeParen + 1;
+    }
+    if (replacements === 0) return { body, replacements: 0 };
+    return { body: result + body.slice(cursor), replacements };
+}
+
+/**
+ * WebGL fragment colors conceptually supply RGBA values even when the shader
+ * declares a scalar or shorter vector output. WebGPU requires the entry-point
+ * output width to cover the physical attachment width, so materialize WebGL's
+ * missing-channel defaults at the entry boundary.
+ */
+export function normalizeWebGlFragmentOutputWidths(source: string): { wgsl: string, expanded: number } {
+    const fragment = parseFunctions(source).find((fn) => /@fragment\b/.test(fn.attributes));
+    if (!fragment) return { wgsl: source, expanded: 0 };
+
+    const directReturn = /^\s*->\s*((?:(?:@[A-Za-z_]\w*(?:\([^)]*\))?)\s*)+)([\s\S]+?)\s*$/.exec(fragment.returnType);
+    if (directReturn && /@location\s*\(/.test(directReturn[1])) {
+        const output = fragmentOutputWidth(directReturn[2]);
+        if (output && output.width < 4) {
+            let bodyReplacements = 0;
+            const body = fragment.body.replace(/\breturn\s+([^;]+);/g, (_match, expression: string) => {
+                bodyReplacements++;
+                return `return ${expandFragmentOutputExpression(expression, output)};`;
+            });
+            if (bodyReplacements > 0) {
+                return {
+                    wgsl: removeRanges(source, [
+                        {
+                            start: fragment.closeParen + 1,
+                            end: fragment.bodyOpen,
+                            replacement: ` -> ${directReturn[1].trim()} ${expandedFragmentOutputType(output)} `,
+                        },
+                        { start: fragment.bodyOpen + 1, end: fragment.bodyClose, replacement: body },
+                    ]),
+                    expanded: 1,
+                };
+            }
+        }
+        return { wgsl: source, expanded: 0 };
+    }
+
+    const structName = returnStructName(fragment.returnType);
+    const outputStruct = structName ? parseStructs(source).find((item) => item.name === structName) : undefined;
+    if (!outputStruct || outputStruct.fieldDetails.length !== outputStruct.fields.length) {
+        return { wgsl: source, expanded: 0 };
+    }
+    const outputs = outputStruct.fieldDetails.map((field) => {
+        if (!/@location\s*\(/.test(field.attributes)) return null;
+        const output = fragmentOutputWidth(field.type);
+        return output && output.width < 4 ? output : null;
+    });
+    const expanded = outputs.filter(Boolean).length;
+    if (expanded === 0) return { wgsl: source, expanded: 0 };
+
+    let body = expandStructConstructorCalls(fragment.body, outputStruct.name, outputs).body;
+    const structVariables = Array.from(body.matchAll(new RegExp(`\\bvar\\s+([A-Za-z_]\\w*)\\s*:\\s*${escapeRegExp(outputStruct.name)}\\b`, "g")))
+        .map((match) => match[1]);
+    for (const variable of structVariables) {
+        outputs.forEach((output, index) => {
+            if (!output) return;
+            const field = outputStruct.fieldDetails[index];
+            body = body.replace(
+                new RegExp(`\\b${escapeRegExp(variable)}\\.${escapeRegExp(field.name)}\\s*=\\s*([^;]+);`, "g"),
+                (_match, expression: string) => `${variable}.${field.name} = ${expandFragmentOutputExpression(expression, output)};`,
+            );
+        });
+    }
+
+    const structReplacement = `struct ${outputStruct.name} {\n` + outputStruct.fieldDetails.map((field, index) => {
+        const attributes = field.attributes ? `${field.attributes}\n  ` : "";
+        const type = outputs[index] ? expandedFragmentOutputType(outputs[index]!) : field.type;
+        return `  ${attributes}${field.name} : ${type},`;
+    }).join("\n") + "\n}";
+    return {
+        wgsl: removeRanges(source, [
+            { start: outputStruct.start, end: outputStruct.end, replacement: structReplacement },
+            { start: fragment.bodyOpen + 1, end: fragment.bodyClose, replacement: body },
+        ]),
+        expanded,
+    };
+}
+
 function assignmentCount(source: string, name: string): number {
     const regex = new RegExp(`\\b${escapeRegExp(name)}\\s*(?:[+\\-*/%&|^]?=)`, "g");
     return source.match(regex)?.length ?? 0;
@@ -815,7 +952,7 @@ function removeSingleUseLetsInBody(
     let changed = true;
     while (changed) {
         changed = false;
-        const regex = /^([ \t]*)let\s+(x_\d+)(?:\s*:\s*[^=]+?)?\s*=\s*([^;{}]+);\s*\n/gm;
+        const regex = /^([ \t]*)let\s+((?:x|v)_\d+)(?:\s*:\s*[^=]+?)?\s*=\s*([^;{}]+);\s*\n/gm;
         for (let match = regex.exec(out); match !== null; match = regex.exec(out)) {
             const full = match[0];
             const name = match[2];
@@ -839,7 +976,13 @@ function removeSingleUseLetsInBody(
                     continue;
                 }
             } else if (betweenDeclarationAndUse.trim().length > 0) {
-                continue;
+                const statementPrefix = betweenDeclarationAndUse.trim();
+                const afterUse = after.slice(firstUse + name.length);
+                const unaryCallAssignment = /^(?:(?:let|var)\s+[A-Za-z_]\w*(?:\s*:\s*[^=;]+)?|[A-Za-z_]\w*)\s*=\s*[A-Za-z_]\w*\(\s*$/.test(statementPrefix) &&
+                    /^\s*\)\s*;/.test(afterUse);
+                if (!unaryCallAssignment) {
+                    continue;
+                }
             }
 
             out = out.slice(0, match.index) + out.slice(match.index + full.length);
@@ -1627,6 +1770,12 @@ function promoteSingleAssignmentVarsInBody(body: string): { body: string, promot
             const assignmentRegex = new RegExp(`^([ \\t]*)${escapeRegExp(name)}\\s*=\\s*([^;{}]+);\\s*$`, "m");
             const assignment = assignmentRegex.exec(out);
             if (!assignment) {
+                continue;
+            }
+            // `var t; t = f(t);` observes the zero-initialized variable on the
+            // RHS. Turning it into `let t = f(t)` creates an invalid
+            // self-reference and changes GLSL initialization semantics.
+            if (countIdentifier(assignment[2], name) > 0) {
                 continue;
             }
             if (assignment.index < declaration.index) {

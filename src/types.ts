@@ -152,7 +152,7 @@ export class HydVertexArrayAttribute implements HydHashable{
     }
 
     public get hash() {
-        return this.__hash__;
+        return `${this.__hash__}:derived-${this.buffer?.derivedVertexGeneration || 0}`;
     }
 
     public get layoutHash() {
@@ -180,17 +180,22 @@ export const HYD_WEBGL_OBJECT_BRAND = Symbol.for("gl2gpu.webglObjectBrand");
 
 export type HydWebGlObjectBrand =
     "active-info" | "buffer" | "framebuffer" | "program" | "renderbuffer" |
-    "shader" | "shader-precision-format" | "texture" | "uniform-location" | "vertex-array";
+    "query" | "sampler" | "shader" | "shader-precision-format" | "sync" | "texture" | "transform-feedback" |
+    "uniform-location" | "vertex-array";
 
 const WEBGL_OBJECT_TAGS: Record<HydWebGlObjectBrand, string> = {
     "active-info": "WebGLActiveInfo",
     buffer: "WebGLBuffer",
     framebuffer: "WebGLFramebuffer",
     program: "WebGLProgram",
+    query: "WebGLQuery",
     renderbuffer: "WebGLRenderbuffer",
+    sampler: "WebGLSampler",
     shader: "WebGLShader",
     "shader-precision-format": "WebGLShaderPrecisionFormat",
+    sync: "WebGLSync",
     texture: "WebGLTexture",
+    "transform-feedback": "WebGLTransformFeedback",
     "uniform-location": "WebGLUniformLocation",
     "vertex-array": "WebGLVertexArrayObject",
 };
@@ -232,10 +237,13 @@ installHydObjectHasInstance("WebGLActiveInfo", "active-info");
 installHydObjectHasInstance("WebGLBuffer", "buffer");
 installHydObjectHasInstance("WebGLFramebuffer", "framebuffer");
 installHydObjectHasInstance("WebGLProgram", "program");
+installHydObjectHasInstance("WebGLQuery", "query");
 installHydObjectHasInstance("WebGLRenderbuffer", "renderbuffer");
+installHydObjectHasInstance("WebGLSampler", "sampler");
 installHydObjectHasInstance("WebGLShader", "shader");
 installHydObjectHasInstance("WebGLShaderPrecisionFormat", "shader-precision-format");
 installHydObjectHasInstance("WebGLTexture", "texture");
+installHydObjectHasInstance("WebGLTransformFeedback", "transform-feedback");
 installHydObjectHasInstance("WebGLUniformLocation", "uniform-location");
 installHydObjectHasInstance("WebGLVertexArrayObject", "vertex-array");
 installHydHasInstance(WebGLRenderingContext, (instance) =>

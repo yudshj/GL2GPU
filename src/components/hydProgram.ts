@@ -1,7 +1,15 @@
 import fastHashCode from 'fast-hash-code';
 
 import {HydShader} from "./hydShader";
-import {MergeShaderInfo, samplerFlipYUniformName, ShaderInfo2HydAus, ShaderInfo2String, hydTrim} from "./shaderDB";
+import {
+    MergeShaderInfo,
+    SamplerOriginCoordinateKind,
+    samplerFlipYUniformName,
+    samplerOriginCoordinateKind,
+    ShaderInfo2HydAus,
+    ShaderInfo2String,
+    hydTrim,
+} from "./shaderDB";
 import {
     DEPTH_RANGE_DIFF_UNIFORM_NAME,
     DEPTH_RANGE_FAR_UNIFORM_NAME,
@@ -10,8 +18,17 @@ import {
 } from "./shaderInternalUniforms";
 import { HydHashable } from './base/hydHashable';
 import { ShaderTranslator } from './shaderTranslator';
+import {
+    integerSamplerOverrideNames,
+    IntegerSamplerOverrideNames,
+} from './shaderGlslIntegerSampling';
+import {
+    samplerCoordinateScaleOverrideNames,
+    SamplerCoordinateScaleOverrideNames,
+} from './shaderSamplerState';
 import { emitShaderCapture, sourceCapture } from './shaderCapture';
 import { composeShaderModuleWgsl } from './shaderWgslTypes';
+import type { HydBuffer } from './hydBuffer';
 
 export const ALIGNMENT_BLOCK_SIZE: number = 256;
 
@@ -90,6 +107,51 @@ export function uniformMatrixDimensions(type: GLenum): { columns: number, rows: 
     return glMatrixDimensions.get(type) || null;
 }
 
+export interface ProgramUniformReflection {
+    name: string;
+    size: number;
+    type: GLenum;
+    blockIndex: number;
+    offset: number;
+    arrayStride: number;
+    matrixStride: number;
+    rowMajor: boolean;
+}
+
+export interface ProgramTransformFeedbackVarying {
+    name: string;
+    size: number;
+    type: GLenum;
+}
+
+export interface HydIndexedBufferBinding {
+    buffer: HydBuffer;
+    offset: number;
+    size: number;
+    wholeBuffer?: boolean;
+}
+
+export class ProgramUniformBlock {
+    public binding: number = 0;
+    public resourceBinding: number = -1;
+    public bufferBinding: HydIndexedBufferBinding | null = null;
+
+    constructor(
+        public readonly name: string,
+        public readonly index: number,
+        public readonly dataSize: number,
+        public readonly activeUniformIndices: number[],
+        public readonly referencedByVertex: boolean,
+        public readonly referencedByFragment: boolean,
+    ) {}
+
+    public get wgslBindingSize(): number {
+        // WebGL block data size may omit the final base-alignment padding.
+        // WGSL host-shareable uniform structs include that trailing padding.
+        return Math.max(16, Math.ceil(this.dataSize / 16) * 16);
+    }
+}
+
 export class ProgramUniformBuffer {
     public name: string;
     public size: number;
@@ -109,6 +171,14 @@ export class ProgramUniformBuffer {
     public writeFloat32View: Float32Array | null = null;
     public writeInt32View: Int32Array | null = null;
     public writeUint32View: Uint32Array | null = null;
+    public writeUniform1fFloatView: Float32Array | null = null;
+    public writeUniform2fFloatView: Float32Array | null = null;
+    public writeUniform3fFloatView: Float32Array | null = null;
+    public writeUniform4fFloatView: Float32Array | null = null;
+    public writeUniform1fBooleanView: Int32Array | null = null;
+    public writeUniform2fBooleanView: Int32Array | null = null;
+    public writeUniform3fBooleanView: Int32Array | null = null;
+    public writeUniform4fBooleanView: Int32Array | null = null;
     public wordOffset: number;
     public arrayStrideWords: number = 0;
     public remainingArrayElements: number = 1;
@@ -144,6 +214,7 @@ export class ProgramUniformSampler {
     sampleType: GPUTextureSampleType;
     samplerBindingType: GPUSamplerBindingType;
     viewDimension: GPUTextureViewDimension;
+    bindingViewDimension: GPUTextureViewDimension;
     sourceName?: string;
     originFlipUniform?: ProgramUniformBuffer;
     originFlipValue?: boolean;
@@ -168,6 +239,7 @@ export class ProgramUniformSampler {
         arrayName?: string,
         arrayIndex?: number,
         isArray: boolean = false,
+        bindingViewDimension: GPUTextureViewDimension = viewDimension,
     ) {
         this.name = name;
         this.size = size;
@@ -177,6 +249,7 @@ export class ProgramUniformSampler {
         this.sampleType = sampleType;
         this.samplerBindingType = samplerBindingType;
         this.viewDimension = viewDimension;
+        this.bindingViewDimension = bindingViewDimension;
         this.sourceName = sourceName;
         this.arrayName = arrayName;
         this.arrayIndex = arrayIndex;
@@ -201,7 +274,7 @@ function cloneShaderInfo(info: ReturnType<typeof MergeShaderInfo>): ReturnType<t
 
 function addSamplerFlipUniforms(info: ReturnType<typeof MergeShaderInfo>) {
     for (const sampler of info.samplers) {
-        if (sampler.glsl_type !== "sampler2D") {
+        if (samplerOriginCoordinateKind(sampler.glsl_type) === null) {
             continue;
         }
         const name = samplerFlipYUniformName(sampler.name);
@@ -265,56 +338,79 @@ function replaceSamplerOriginCalls(
     wgsl: string,
     samplerName: string,
     flip: boolean,
-): { wgsl: string, replacements: number, needsFlipHelper: boolean } {
+): { wgsl: string, replacements: number, flipDimensions: Set<SamplerOriginCoordinateKind> } {
     const uniformName = samplerFlipYUniformName(samplerName);
-    const callee = "_hyd_samplerOriginCoord";
     let replacements = 0;
-    let out = "";
-    let last = 0;
-    let searchStart = 0;
-    while (true) {
-        const index = wgsl.indexOf(callee, searchStart);
-        if (index < 0) {
-            break;
+    const flipDimensions = new Set<SamplerOriginCoordinateKind>();
+    let out = wgsl;
+    for (const [callee, dimension, flipHelper] of [
+        ["_hyd_samplerOriginCubeCoord", "cube", "_hyd_samplerOriginCubeCoordFlip"],
+        ["_hyd_samplerOriginCoord3", 3, "_hyd_samplerOriginCoordFlip3"],
+        ["_hyd_samplerOriginCoord", 2, "_hyd_samplerOriginCoordFlip"],
+    ] as const) {
+        let rewritten = "";
+        let last = 0;
+        let searchStart = 0;
+        while (true) {
+            const index = out.indexOf(callee, searchStart);
+            if (index < 0) break;
+            const before = out.slice(Math.max(0, index - 4), index);
+            const openParen = index + callee.length;
+            if (/\bfn\s+$/.test(before) || out[openParen] !== "(") {
+                searchStart = index + callee.length;
+                continue;
+            }
+            const closeParen = findMatchingParen(out, openParen);
+            if (closeParen < 0) break;
+            const args = splitTopLevelCallArguments(out.slice(openParen + 1, closeParen));
+            const expectedArgumentCount = dimension === "cube" ? 3 : 2;
+            if (args.length === expectedArgumentCount && args[1] === `_hyd_uniforms_.${uniformName}`) {
+                rewritten += out.slice(last, index);
+                const coordinate = flip ? `${flipHelper}(${args[0]})` : `(${args[0]})`;
+                rewritten += dimension === "cube"
+                    ? `_hyd_samplerCubeCoordScale(${coordinate}, ${args[2]})`
+                    : coordinate;
+                last = closeParen + 1;
+                replacements++;
+                if (flip) flipDimensions.add(dimension);
+            }
+            searchStart = closeParen + 1;
         }
-        const before = wgsl.slice(Math.max(0, index - 4), index);
-        const openParen = index + callee.length;
-        if (/\bfn\s+$/.test(before) || wgsl[openParen] !== "(") {
-            searchStart = index + callee.length;
-            continue;
-        }
-        const closeParen = findMatchingParen(wgsl, openParen);
-        if (closeParen < 0) {
-            break;
-        }
-        const args = splitTopLevelCallArguments(wgsl.slice(openParen + 1, closeParen));
-        if (args.length === 2 && args[1] === `_hyd_uniforms_.${uniformName}`) {
-            const expression = args[0];
-            out += wgsl.slice(last, index);
-            out += flip ? `_hyd_samplerOriginCoordFlip(${expression})` : `(${expression})`;
-            last = closeParen + 1;
-            replacements++;
-        }
-        searchStart = closeParen + 1;
+        rewritten += out.slice(last);
+        out = rewritten;
     }
-    out += wgsl.slice(last);
-    return { wgsl: out, replacements, needsFlipHelper: flip && replacements > 0 };
+    return { wgsl: out, replacements, flipDimensions };
 }
 
-function insertSamplerOriginFlipHelper(wgsl: string): string {
-    if (wgsl.includes("fn _hyd_samplerOriginCoordFlip")) {
-        return wgsl;
+function insertSamplerOriginFlipHelpers(wgsl: string, dimensions: Set<SamplerOriginCoordinateKind>): string {
+    const helpers: string[] = [];
+    if (dimensions.has(2) && !wgsl.includes("fn _hyd_samplerOriginCoordFlip(")) {
+        helpers.push(`fn _hyd_samplerOriginCoordFlip(texCoord: vec2<f32>) -> vec2<f32> {\n    return vec2<f32>(texCoord.x, 1.0 - texCoord.y);\n}`);
     }
-    const helper = `fn _hyd_samplerOriginCoordFlip(texCoord: vec2<f32>) -> vec2<f32> {\n    return vec2<f32>(texCoord.x, 1.0 - texCoord.y);\n}\n\n`;
+    if (dimensions.has(3) && !wgsl.includes("fn _hyd_samplerOriginCoordFlip3(")) {
+        helpers.push(`fn _hyd_samplerOriginCoordFlip3(texCoord: vec3<f32>) -> vec3<f32> {\n    return vec3<f32>(texCoord.x, 1.0 - texCoord.y, texCoord.z);\n}`);
+    }
+    if (dimensions.has("cube") && !wgsl.includes("fn _hyd_samplerOriginCubeCoordFlip(")) {
+        helpers.push(`fn _hyd_samplerOriginCubeCoordFlip(direction: vec3<f32>) -> vec3<f32> {
+    let magnitude = abs(direction);
+    if (magnitude.x >= magnitude.y && magnitude.x >= magnitude.z) {
+        return vec3<f32>(direction.x, -direction.y, direction.z);
+    }
+    if (magnitude.y >= magnitude.z) {
+        return vec3<f32>(direction.x, direction.y, -direction.z);
+    }
+    return vec3<f32>(direction.x, -direction.y, direction.z);
+}`);
+    }
+    if (helpers.length === 0) return wgsl;
     const directivePrefix = wgsl.match(
         /^\s*(?:(?:(?:enable|requires)\s+[^;]+;|diagnostic\s*\([^;]+\)\s*;)\s*)+/,
     );
     const insertion = directivePrefix ? directivePrefix[0].length : 0;
-    return wgsl.slice(0, insertion) + helper + wgsl.slice(insertion);
+    return wgsl.slice(0, insertion) + helpers.join("\n\n") + "\n\n" + wgsl.slice(insertion);
 }
 
-function hasSamplerOriginCall(wgsl: string): boolean {
-    const callee = "_hyd_samplerOriginCoord";
+function hasFunctionCall(wgsl: string, callee: string): boolean {
     let searchStart = 0;
     while (true) {
         const index = wgsl.indexOf(callee, searchStart);
@@ -331,25 +427,32 @@ function hasSamplerOriginCall(wgsl: string): boolean {
 }
 
 function stripUnusedSamplerOriginHelper(wgsl: string): string {
-    if (hasSamplerOriginCall(wgsl)) {
-        return wgsl;
+    let out = wgsl;
+    if (!hasFunctionCall(out, "_hyd_samplerOriginCoord")) {
+        out = out.replace(
+            /fn\s+_hyd_samplerOriginCoord\s*\([^)]*\)\s*->\s*vec2\s*<\s*f32\s*>\s*\{\s*return\s+vec2\s*<\s*f32\s*>\s*\([^;]+;\s*\}\s*\n*/m,
+            "",
+        );
     }
-    return wgsl.replace(
-        /fn\s+_hyd_samplerOriginCoord\s*\([^)]*\)\s*->\s*vec2\s*<\s*f32\s*>\s*\{\s*return\s+vec2\s*<\s*f32\s*>\s*\([^;]+;\s*\}\s*\n*/m,
-        "",
-    );
+    if (!hasFunctionCall(out, "_hyd_samplerOriginCoord3")) {
+        out = out.replace(
+            /fn\s+_hyd_samplerOriginCoord3\s*\([^)]*\)\s*->\s*vec3\s*<\s*f32\s*>\s*\{\s*return\s+vec3\s*<\s*f32\s*>\s*\([^;]+;\s*\}\s*\n*/m,
+            "",
+        );
+    }
+    return out;
 }
 
 export function specializeSamplerOriginWgsl(wgsl: string, samplerOriginFlips: Map<string, boolean>): string {
     let out = wgsl;
-    let needsFlipHelper = false;
+    const flipDimensions = new Set<SamplerOriginCoordinateKind>();
     for (const [samplerName, flip] of samplerOriginFlips) {
         const result = replaceSamplerOriginCalls(out, samplerName, flip);
         out = result.wgsl;
-        needsFlipHelper = needsFlipHelper || result.needsFlipHelper;
+        for (const dimension of result.flipDimensions) flipDimensions.add(dimension);
     }
-    if (needsFlipHelper) {
-        out = insertSamplerOriginFlipHelper(out);
+    if (flipDimensions.size > 0) {
+        out = insertSamplerOriginFlipHelpers(out, flipDimensions);
     }
     return stripUnusedSamplerOriginHelper(out);
 }
@@ -384,6 +487,12 @@ export class HydProgram implements HydHashable {
     private fragmentWgsl: string = "";
     private readonly samplerOriginVariants: Map<string, SamplerOriginVariant> = new Map();
     private samplerOriginVariantKey: string = "";
+    private readonly vertexIntegerSamplerOverrides = new Map<string, IntegerSamplerOverrideNames>();
+    private readonly fragmentIntegerSamplerOverrides = new Map<string, IntegerSamplerOverrideNames>();
+    private readonly vertexSamplerCoordinateScaleOverrides =
+        new Map<string, SamplerCoordinateScaleOverrideNames>();
+    private readonly fragmentSamplerCoordinateScaleOverrides =
+        new Map<string, SamplerCoordinateScaleOverrideNames>();
     private readonly device: GPUDevice;
 
     public deleted: boolean = false;
@@ -395,6 +504,7 @@ export class HydProgram implements HydHashable {
     public validated: boolean = false;
 
     public hydAttributes: Array<ProgramAttribute> = [];
+    public activeBuiltInAttributes: Array<ProgramAttribute> = [];
     public hydAttributeLocations: Set<number> = new Set();
     public hydUniforms: Array<ProgramUniformBuffer> = [];
     public fragCoordHeightUniform: ProgramUniformBuffer = null;
@@ -404,11 +514,60 @@ export class HydProgram implements HydHashable {
     public hydSamplers: Array<ProgramUniformSampler> = [];
     public uniformBufferLocations: Array<ProgramUniformBuffer> = [];
     public uniformSamplerLocations: Array<ProgramUniformSampler> = [];
-    public hydSampler2D: Array<ProgramUniformSampler> = [];
+    public hydOriginSamplers: Array<ProgramUniformSampler> = [];
     public originUniformStateVersion: number = -1;
     public originVariantStateVersion: number = -1;
     public staticSamplerOriginVariants: boolean = true;
     public readonly boundAttributeLocations: Map<string, number> = new Map();
+    public transformFeedbackVaryingNames: string[] = [];
+    public transformFeedbackBufferMode: GLenum = 0;
+    public pendingTransformFeedbackVaryingNames: string[] = [];
+    public pendingTransformFeedbackBufferMode: GLenum = 0;
+    public transformFeedbackVaryingInfo: ProgramTransformFeedbackVarying[] = [];
+    public uniformReflection: ProgramUniformReflection[] = [];
+    public hydUniformBlocks: ProgramUniformBlock[] = [];
+    public fragmentOutputLocations: Map<string, number> = new Map();
+    public fragmentOutputTypes: Map<number, "float" | "sint" | "uint"> = new Map();
+    public usesFlatInterpolation: boolean = false;
+
+    public get attachedVertexShader(): HydShader | undefined {
+        return this.vertexShader;
+    }
+
+    public setUniformBlockReflection(
+        uniforms: ProgramUniformReflection[],
+        blocks: ProgramUniformBlock[],
+    ) {
+        this.uniformReflection = uniforms;
+        this.hydUniformBlocks = blocks;
+    }
+
+    public integerSamplerOverrides(stage: "vertex" | "fragment"): ReadonlyMap<string, IntegerSamplerOverrideNames> {
+        return stage === "vertex"
+            ? this.vertexIntegerSamplerOverrides
+            : this.fragmentIntegerSamplerOverrides;
+    }
+
+    public samplerCoordinateScaleOverrides(
+        stage: "vertex" | "fragment",
+    ): ReadonlyMap<string, SamplerCoordinateScaleOverrideNames> {
+        return stage === "vertex"
+            ? this.vertexSamplerCoordinateScaleOverrides
+            : this.fragmentSamplerCoordinateScaleOverrides;
+    }
+
+    public resolveUniformBlockBindings(bindings: Array<HydIndexedBufferBinding | null>) {
+        for (const block of this.hydUniformBlocks) {
+            block.bufferBinding = bindings[block.binding] || null;
+        }
+    }
+
+    public commitTransformFeedbackVaryings(info: ProgramTransformFeedbackVarying[]) {
+        this.transformFeedbackVaryingNames = [...this.pendingTransformFeedbackVaryingNames];
+        this.transformFeedbackBufferMode = this.pendingTransformFeedbackBufferMode ||
+            WebGL2RenderingContext.INTERLEAVED_ATTRIBS;
+        this.transformFeedbackVaryingInfo = info;
+    }
     
     // public uniformMergedBuffer: Uint8Array;
     // public uniformArrayBufferView: DataView;
@@ -537,6 +696,13 @@ export class HydProgram implements HydHashable {
         if (this.fragmentShader && translatedProgram.fragment) {
             this.fragmentShader.shader_info = translatedProgram.fragment;
         }
+        this.usesFlatInterpolation = translatedProgram.usesFlatInterpolation === true;
+        const uniformBlockResourceBindings = translatedProgram.uniformBlockBindings || new Map<string, number>();
+        for (const block of this.hydUniformBlocks) {
+            const baseName = block.name.replace(/\[\d+\]$/, "");
+            block.resourceBinding = uniformBlockResourceBindings.get(block.name) ??
+                uniformBlockResourceBindings.get(baseName) ?? -1;
+        }
 
         HydProgram.linkedPrograms++;
         this._hash = HydProgram.linkedPrograms.toString();
@@ -562,12 +728,32 @@ export class HydProgram implements HydHashable {
         const dynamicCode = this.staticSamplerOriginVariants ? ShaderInfo2String(dynamicShaderInfo) : code;
         this.vertexWgsl = composeShaderModuleWgsl(code, this.vertexShader.shader_info.wgsl);
         this.fragmentWgsl = composeShaderModuleWgsl(code, this.fragmentShader.shader_info.wgsl);
+        this.vertexIntegerSamplerOverrides.clear();
+        this.fragmentIntegerSamplerOverrides.clear();
+        this.vertexSamplerCoordinateScaleOverrides.clear();
+        this.fragmentSamplerCoordinateScaleOverrides.clear();
+        for (const sampler of runtimeShaderInfo.samplers) {
+            const overrides = integerSamplerOverrideNames(sampler.name);
+            if (Object.values(overrides).some((name) => this.vertexWgsl.includes(name))) {
+                this.vertexIntegerSamplerOverrides.set(sampler.name, overrides);
+            }
+            if (Object.values(overrides).some((name) => this.fragmentWgsl.includes(name))) {
+                this.fragmentIntegerSamplerOverrides.set(sampler.name, overrides);
+            }
+            const coordinateScale = samplerCoordinateScaleOverrideNames(sampler.name);
+            if (Object.values(coordinateScale).some((name) => this.vertexWgsl.includes(name))) {
+                this.vertexSamplerCoordinateScaleOverrides.set(sampler.name, coordinateScale);
+            }
+            if (Object.values(coordinateScale).some((name) => this.fragmentWgsl.includes(name))) {
+                this.fragmentSamplerCoordinateScaleOverrides.set(sampler.name, coordinateScale);
+            }
+        }
         let vs = this.vertexWgsl;
         let fs = this.fragmentWgsl;
         if (this.staticSamplerOriginVariants) {
             const defaultFlips = new Map<string, boolean>();
             for (const sampler of runtimeShaderInfo.samplers) {
-                if (sampler.glsl_type === "sampler2D") {
+                if (samplerOriginCoordinateKind(sampler.glsl_type) !== null) {
                     defaultFlips.set(sampler.name, false);
                 }
             }
@@ -617,6 +803,22 @@ export class HydProgram implements HydHashable {
                 attribute.location = location;
             }
         }
+        this.activeBuiltInAttributes = [];
+        const vertexSource = this.vertexShader
+            ? this.vertexShader.compiled_glsl_shader || this.vertexShader.glsl_shader
+            : "";
+        for (const builtIn of ["gl_VertexID", "gl_InstanceID"]) {
+            if (new RegExp(`\\b${builtIn}\\b`).test(vertexSource)) {
+                this.activeBuiltInAttributes.push({
+                    name: builtIn,
+                    shaderName: builtIn,
+                    size: 1,
+                    type: WebGL2RenderingContext.INT,
+                    location: -1,
+                    locationSpan: 0,
+                });
+            }
+        }
         this.hydAttributeLocations = new Set();
         for (const attribute of this.hydAttributes) {
             for (let offset = 0; offset < attribute.locationSpan; offset++) {
@@ -644,12 +846,12 @@ export class HydProgram implements HydHashable {
             sampler.program = this;
             sampler.linkGeneration = this.linkGeneration;
         }
-        this.hydSampler2D = [];
+        this.hydOriginSamplers = [];
         for (const sampler of this.hydSamplers) {
-            if (sampler.webgl_type === WebGL2RenderingContext.SAMPLER_2D) {
-                this.hydSampler2D.push(sampler);
-                sampler.originFlipUniform = this.hydUniforms.find((uniform) => uniform.name === samplerFlipYUniformName(sampler.name));
-            }
+            const originFlipUniform = this.hydUniforms.find((uniform) =>
+                uniform.name === samplerFlipYUniformName(sampler.name));
+            this.hydOriginSamplers.push(sampler);
+            sampler.originFlipUniform = originFlipUniform || null;
         }
 
         // TODO: algorithm: uniform buffer alignment
@@ -701,21 +903,21 @@ export class HydProgram implements HydHashable {
             this.samplerOriginVariantKey = "";
             return;
         }
-        if (this.hydSampler2D.length === 0) {
+        if (this.hydOriginSamplers.length === 0) {
             this.samplerOriginVariantKey = "";
             return;
         }
         let key: string;
-        if (this.hydSampler2D.length <= 30) {
+        if (this.hydOriginSamplers.length <= 30) {
             let bits = 0;
-            for (let i = 0; i < this.hydSampler2D.length; i++) {
-                if (samplerOriginFlips.get(this.hydSampler2D[i].name)) {
+            for (let i = 0; i < this.hydOriginSamplers.length; i++) {
+                if (samplerOriginFlips.get(this.hydOriginSamplers[i].name)) {
                     bits |= 1 << i;
                 }
             }
             key = `b${bits.toString(36)}`;
         } else {
-            key = this.hydSampler2D
+            key = this.hydOriginSamplers
                 .map((sampler) => samplerOriginFlips.get(sampler.name) ? "1" : "0")
                 .join("");
         }

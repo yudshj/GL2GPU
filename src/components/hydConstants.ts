@@ -61,7 +61,9 @@ export const enumToConstant: Map<number, any> = new Map([
     [WebGL2RenderingContext.ALIASED_POINT_SIZE_RANGE, new Float32Array([1, 1])],
     [WebGL2RenderingContext.COMPRESSED_TEXTURE_FORMATS, new Uint32Array(0)],
     [WebGL2RenderingContext.SUBPIXEL_BITS, 4],
-    [WebGL2RenderingContext.MAX_COMBINED_TEXTURE_IMAGE_UNITS, 16],
+    // WebGL 2 requires at least 32 combined units while retaining a minimum
+    // of 16 sampled textures in each programmable stage.
+    [WebGL2RenderingContext.MAX_COMBINED_TEXTURE_IMAGE_UNITS, 32],
     [WebGL2RenderingContext.MAX_CUBE_MAP_TEXTURE_SIZE, 4096],
     [WebGL2RenderingContext.MAX_FRAGMENT_UNIFORM_VECTORS, 1024],
     [WebGL2RenderingContext.MAX_RENDERBUFFER_SIZE, 4096],
@@ -87,6 +89,7 @@ export const enumToConstant: Map<number, any> = new Map([
     [WebGL2RenderingContext.MAX_FRAGMENT_INPUT_COMPONENTS, 128],
     [WebGL2RenderingContext.MAX_FRAGMENT_UNIFORM_BLOCKS, 12],
     [WebGL2RenderingContext.MAX_FRAGMENT_UNIFORM_COMPONENTS, 4096],
+    [WebGL2RenderingContext.MIN_PROGRAM_TEXEL_OFFSET, -8],
     [WebGL2RenderingContext.MAX_PROGRAM_TEXEL_OFFSET, 7],
     [WebGL2RenderingContext.MAX_SAMPLES, 4],
     [WebGL2RenderingContext.MAX_SERVER_WAIT_TIMEOUT, 0],
@@ -96,6 +99,7 @@ export const enumToConstant: Map<number, any> = new Map([
     [WebGL2RenderingContext.MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS, 4],
     [WebGL2RenderingContext.MAX_UNIFORM_BLOCK_SIZE, 16384],
     [WebGL2RenderingContext.MAX_UNIFORM_BUFFER_BINDINGS, 72],
+    [WebGL2RenderingContext.UNIFORM_BUFFER_OFFSET_ALIGNMENT, 256],
     [WebGL2RenderingContext.MAX_VARYING_COMPONENTS, 60],
     [WebGL2RenderingContext.MAX_VERTEX_OUTPUT_COMPONENTS, 64],
     [WebGL2RenderingContext.MAX_VERTEX_UNIFORM_BLOCKS, 12],

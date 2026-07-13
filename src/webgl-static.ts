@@ -35,59 +35,103 @@ const WEBGL_METHOD_ARGUMENTS: Readonly<Record<string, WebIdlArgument[]>> = {
     attachShader: [requiredObject("program"), requiredObject("shader")],
     bindAttribLocation: [requiredObject("program"), "u32", "string"],
     bindBuffer: ["u32", nullableObject("buffer")],
+    bindBufferBase: ["u32", "u32", nullableObject("buffer")],
+    bindBufferRange: ["u32", "u32", nullableObject("buffer")],
     bindFramebuffer: ["u32", nullableObject("framebuffer")],
     bindRenderbuffer: ["u32", nullableObject("renderbuffer")],
+    bindSampler: ["u32", nullableObject("sampler")],
     bindTexture: ["u32", nullableObject("texture")],
+    bindTransformFeedback: ["u32", nullableObject("transform-feedback")],
+    bindVertexArray: [nullableObject("vertex-array")],
+    beginQuery: ["u32", requiredObject("query")],
     blendColor: ["f32", "f32", "f32", "f32"],
     bufferSubData: ["u32", "i32"],
     clear: ["u32"],
+    clearBufferfi: ["u32", "i32", "f32", "i32"],
+    clearBufferfv: ["u32", "i32"],
+    clearBufferiv: ["u32", "i32"],
+    clearBufferuiv: ["u32", "i32"],
     clearColor: ["f32", "f32", "f32", "f32"],
     clearDepth: ["f32"],
     clearStencil: ["i32"],
+    clientWaitSync: [requiredObject("sync"), "u32"],
     compileShader: [requiredObject("shader")],
     copyTexImage2D: ["u32", "i32", "u32", "i32", "i32", "i32", "i32", "i32"],
     copyTexSubImage2D: ["u32", "i32", "i32", "i32", "i32", "i32", "i32", "i32"],
+    copyBufferSubData: ["u32", "u32"],
     deleteBuffer: [nullableObject("buffer")],
     deleteFramebuffer: [nullableObject("framebuffer")],
     deleteProgram: [nullableObject("program")],
+    deleteQuery: [nullableObject("query")],
     deleteRenderbuffer: [nullableObject("renderbuffer")],
+    deleteSampler: [nullableObject("sampler")],
     deleteShader: [nullableObject("shader")],
+    deleteSync: [nullableObject("sync")],
     deleteTexture: [nullableObject("texture")],
+    deleteTransformFeedback: [nullableObject("transform-feedback")],
+    deleteVertexArray: [nullableObject("vertex-array")],
     depthMask: ["bool"],
     depthRange: ["f32", "f32"],
     detachShader: [requiredObject("program"), requiredObject("shader")],
+    drawingBufferStorage: ["u32", "i32", "i32"],
     disableVertexAttribArray: ["u32"],
     drawArrays: ["u32", "i32", "i32"],
+    drawRangeElements: ["u32", "u32", "u32", "i32", "u32"],
     enableVertexAttribArray: ["u32"],
     framebufferRenderbuffer: ["u32", "u32", "u32", nullableObject("renderbuffer")],
     framebufferTexture2D: ["u32", "u32", "u32", nullableObject("texture"), "i32"],
     getActiveAttrib: [requiredObject("program"), "u32"],
+    getActiveUniformBlockName: [requiredObject("program"), "u32"],
+    getActiveUniformBlockParameter: [requiredObject("program"), "u32", "u32"],
     getActiveUniform: [requiredObject("program"), "u32"],
+    getActiveUniforms: [requiredObject("program")],
     getAttachedShaders: [requiredObject("program")],
     getAttribLocation: [requiredObject("program"), "string"],
+    getFragDataLocation: [requiredObject("program"), "string"],
     getParameter: ["u32"],
+    getIndexedParameter: ["u32", "u32"],
     getProgramInfoLog: [requiredObject("program")],
     getProgramParameter: [requiredObject("program"), "u32"],
+    getQuery: ["u32", "u32"],
+    getQueryParameter: [requiredObject("query"), "u32"],
+    getSamplerParameter: [requiredObject("sampler"), "u32"],
     getShaderInfoLog: [requiredObject("shader")],
     getShaderParameter: [requiredObject("shader"), "u32"],
     getShaderSource: [requiredObject("shader")],
+    getSyncParameter: [requiredObject("sync"), "u32"],
     getUniform: [requiredObject("program"), requiredObject("uniform-location")],
+    getUniformBlockIndex: [requiredObject("program"), "string"],
+    getUniformIndices: [requiredObject("program")],
     getUniformLocation: [requiredObject("program"), "string"],
+    getTransformFeedbackVarying: [requiredObject("program"), "u32"],
+    getVertexAttrib: ["u32", "u32"],
+    getVertexAttribOffset: ["u32", "u32"],
     isBuffer: [nullableObject("buffer")],
     isFramebuffer: [nullableObject("framebuffer")],
     isProgram: [nullableObject("program")],
+    isQuery: [nullableObject("query")],
     isRenderbuffer: [nullableObject("renderbuffer")],
+    isSampler: [nullableObject("sampler")],
     isShader: [nullableObject("shader")],
+    isSync: [nullableObject("sync")],
     isTexture: [nullableObject("texture")],
+    isTransformFeedback: [nullableObject("transform-feedback")],
     isVertexArray: [nullableObject("vertex-array")],
     lineWidth: ["f32"],
     linkProgram: [requiredObject("program")],
+    endQuery: ["u32"],
     polygonOffset: ["f32", "f32"],
+    pixelStorei: ["u32", "i32"],
     sampleCoverage: ["f32", "bool"],
+    samplerParameterf: [requiredObject("sampler"), "u32", "f32"],
+    samplerParameteri: [requiredObject("sampler"), "u32", "i32"],
     scissor: ["i32", "i32", "i32", "i32"],
     shaderSource: [requiredObject("shader"), "string"],
     stencilFunc: ["u32", "i32", "u32"],
     stencilMask: ["u32"],
+    texImage3D: ["u32", "i32", "i32", "i32", "i32", "i32", "i32", "u32", "u32"],
+    texSubImage3D: ["u32", "i32", "i32", "i32", "i32", "i32", "i32", "i32", "u32", "u32"],
+    transformFeedbackVaryings: [requiredObject("program")],
     uniform1f: [nullableObject("uniform-location"), "f32"],
     uniform1fv: [nullableObject("uniform-location")],
     uniform1i: [nullableObject("uniform-location"), "i32"],
@@ -112,10 +156,24 @@ const WEBGL_METHOD_ARGUMENTS: Readonly<Record<string, WebIdlArgument[]>> = {
     uniform4iv: [nullableObject("uniform-location")],
     uniform4ui: [nullableObject("uniform-location"), "u32", "u32", "u32", "u32"],
     uniform4uiv: [nullableObject("uniform-location")],
+    uniformBlockBinding: [requiredObject("program"), "u32", "u32"],
     uniformMatrix2fv: [nullableObject("uniform-location"), "bool"],
+    uniformMatrix2x3fv: [nullableObject("uniform-location"), "bool"],
+    uniformMatrix2x4fv: [nullableObject("uniform-location"), "bool"],
     uniformMatrix3fv: [nullableObject("uniform-location"), "bool"],
+    uniformMatrix3x2fv: [nullableObject("uniform-location"), "bool"],
+    uniformMatrix3x4fv: [nullableObject("uniform-location"), "bool"],
     uniformMatrix4fv: [nullableObject("uniform-location"), "bool"],
+    uniformMatrix4x2fv: [nullableObject("uniform-location"), "bool"],
+    uniformMatrix4x3fv: [nullableObject("uniform-location"), "bool"],
     useProgram: [nullableObject("program")],
+    waitSync: [requiredObject("sync"), "u32"],
+    vertexAttribI4i: ["u32", "i32", "i32", "i32", "i32"],
+    vertexAttribI4ui: ["u32", "u32", "u32", "u32", "u32"],
+    vertexAttribI4iv: ["u32"],
+    vertexAttribI4uiv: ["u32"],
+    vertexAttribIPointer: ["u32", "i32", "u32", "i32"],
+    vertexAttribDivisor: ["u32", "u32"],
 };
 
 function convertWebIdlArgument(method: string, index: number, value: unknown, argument: WebIdlArgument): unknown {
@@ -243,7 +301,7 @@ export interface HydRuntime {
 function normalizeContextAttributes(attributes: WebGLContextAttributes = {}): WebGLContextAttributes {
     return {
         alpha: attributes.alpha !== undefined ? attributes.alpha : true,
-        antialias: false,
+        antialias: attributes.antialias !== undefined ? attributes.antialias : true,
         depth: attributes.depth !== undefined ? attributes.depth : true,
         desynchronized: attributes.desynchronized !== undefined ? attributes.desynchronized : false,
         failIfMajorPerformanceCaveat: attributes.failIfMajorPerformanceCaveat !== undefined ? attributes.failIfMajorPerformanceCaveat : false,
@@ -287,7 +345,22 @@ async function createHydRuntime(
         navigator.gpu.requestAdapter({ powerPreference }),
     ]);
     if (!hydAdapter) throw new Error("Unable to acquire a WebGPU adapter");
-    const hydDevice = await hydAdapter.requestDevice({ label: "hydDevice" });
+    const optionalFeatures: GPUFeatureName[] = [
+        "texture-compression-etc2",
+        "texture-formats-tier1",
+        "depth32float-stencil8",
+    ];
+    const requiredFeatures = optionalFeatures.filter((feature) => hydAdapter.features.has(feature));
+    const requiredLimits: Record<string, number> = {};
+    const maxColorAttachmentBytesPerSample = Number(hydAdapter.limits.maxColorAttachmentBytesPerSample);
+    if (Number.isFinite(maxColorAttachmentBytesPerSample)) {
+        requiredLimits.maxColorAttachmentBytesPerSample = maxColorAttachmentBytesPerSample;
+    }
+    const hydDevice = await hydAdapter.requestDevice({
+        label: "hydDevice",
+        requiredFeatures,
+        requiredLimits,
+    });
     hydDevice.addEventListener("uncapturederror", (event: GPUUncapturedErrorEvent) => {
         console.error("[HYD] WebGPU uncaptured error:", event.error && event.error.message);
     });
@@ -320,6 +393,7 @@ function createHydContextFacade(context: HydWebGLStatic, contextType: string): H
     // context as the receiver.
     const facadePrototype = Object.create(contextPrototype);
     const facade = Object.create(facadePrototype) as HydWebGLStatic;
+    const prototypeOnlyApiNames = new Set(["drawingBufferStorage"]);
     const nativeDescriptor = (property: string): PropertyDescriptor | undefined => {
         for (let prototype: object | null = contextPrototype; prototype; prototype = Object.getPrototypeOf(prototype)) {
             const descriptor = Object.getOwnPropertyDescriptor(prototype, property);
@@ -336,12 +410,14 @@ function createHydContextFacade(context: HydWebGLStatic, contextType: string): H
         if (typeof value === "function") {
             const method = value;
             const facadeMethod = createFacadeMethod(facade, context, property, method);
-            Object.defineProperty(facade, property, {
-                configurable: true,
-                enumerable: true,
-                writable: true,
-                value: facadeMethod,
-            });
+            if (!prototypeOnlyApiNames.has(property)) {
+                Object.defineProperty(facade, property, {
+                    configurable: true,
+                    enumerable: true,
+                    writable: true,
+                    value: facadeMethod,
+                });
+            }
             Object.defineProperty(facadePrototype, property, {
                 configurable: true,
                 enumerable: true,

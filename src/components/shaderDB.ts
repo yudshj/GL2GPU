@@ -1,7 +1,9 @@
 // import {HydSampler} from "./hydSampler";
 import { ProgramAttribute, ProgramUniformBuffer, ProgramUniformSampler } from "./hydProgram";
 import type { ShaderCaptureRecord } from "./shaderCapture";
+import type { GlslUniformBlockDeclaration } from "./shaderGlslUniformBlocks";
 import { hydTrim } from "./shaderSource";
+import { wgslUniformMemberDeclaration } from "./shaderWgslTypes";
 
 export { hydTrim };
 
@@ -15,6 +17,7 @@ export interface NameAndType {
     size?: number;
     is_array?: boolean;
     wgsl_declarations?: string[];
+    location?: number;
 }
 
 function attributeLocationSpan(glslType: string): number {
@@ -48,10 +51,27 @@ export interface InitShaderInfoType {
     glsl: string;
     debug_info: string;
     shader_capture?: ShaderCaptureRecord;
+    uniform_blocks?: GlslUniformBlockDeclaration[];
 }
 
 export function samplerFlipYUniformName(samplerName: string): string {
     return `_hyd_samplerFlipY_${samplerName}`;
+}
+
+export type SamplerOriginCoordinateKind = 2 | 3 | "cube";
+
+export function samplerOriginCoordinateKind(glslType: string): SamplerOriginCoordinateKind | null {
+    if (/^(?:[iu]?samplerCube|samplerCubeShadow)$/.test(glslType)) return "cube";
+    if (/^(?:[iu]?sampler3D)$/.test(glslType)) return 3;
+    if (/^(?:[iu]?sampler2D|[iu]?sampler2DArray|sampler2DShadow|sampler2DArrayShadow)$/.test(glslType)) {
+        return 2;
+    }
+    return null;
+}
+
+export function samplerOriginCoordinateDimension(glslType: string): 2 | 3 | null {
+    const kind = samplerOriginCoordinateKind(glslType);
+    return kind === "cube" ? null : kind;
 }
 
 const Type2Constant: Map<string, number> = new Map([
@@ -74,6 +94,9 @@ const Type2Constant: Map<string, number> = new Map([
     ["mat2", WebGL2RenderingContext.FLOAT_MAT2],
     ["mat3", WebGL2RenderingContext.FLOAT_MAT3],
     ["mat4", WebGL2RenderingContext.FLOAT_MAT4],
+    ["mat2x2", WebGL2RenderingContext.FLOAT_MAT2],
+    ["mat3x3", WebGL2RenderingContext.FLOAT_MAT3],
+    ["mat4x4", WebGL2RenderingContext.FLOAT_MAT4],
     ["mat2x3", WebGL2RenderingContext.FLOAT_MAT2x3],
     ["mat2x4", WebGL2RenderingContext.FLOAT_MAT2x4],
     ["mat3x2", WebGL2RenderingContext.FLOAT_MAT3x2],
@@ -84,6 +107,9 @@ const Type2Constant: Map<string, number> = new Map([
     ["samplerCube", WebGL2RenderingContext.SAMPLER_CUBE],
     ["sampler2DArray", WebGL2RenderingContext.SAMPLER_2D_ARRAY],
     ["sampler3D", WebGL2RenderingContext.SAMPLER_3D],
+    ["sampler2DShadow", WebGL2RenderingContext.SAMPLER_2D_SHADOW],
+    ["samplerCubeShadow", WebGL2RenderingContext.SAMPLER_CUBE_SHADOW],
+    ["sampler2DArrayShadow", WebGL2RenderingContext.SAMPLER_2D_ARRAY_SHADOW],
     ["isampler2D", WebGL2RenderingContext.INT_SAMPLER_2D],
     ["isamplerCube", WebGL2RenderingContext.INT_SAMPLER_CUBE],
     ["isampler2DArray", WebGL2RenderingContext.INT_SAMPLER_2D_ARRAY],
@@ -95,6 +121,9 @@ const Type2Constant: Map<string, number> = new Map([
 ]);
 
 function samplerSampleType(wgslTextureType: string): GPUTextureSampleType {
+    if (/^texture_depth_/.test(wgslTextureType)) {
+        return "depth";
+    }
     if (/<u32>\s*$/.test(wgslTextureType)) {
         return "uint";
     }
@@ -109,13 +138,13 @@ function samplerBindingType(sampleType: GPUTextureSampleType): GPUSamplerBinding
 }
 
 function samplerViewDimension(wgslTextureType: string): GPUTextureViewDimension {
-    if (/^texture_2d<.+>$/.test(wgslTextureType)) {
+    if (/^(?:texture_2d<.+>|texture_depth_2d)$/.test(wgslTextureType)) {
         return "2d";
     }
-    if (/^texture_cube<.+>$/.test(wgslTextureType)) {
+    if (/^(?:texture_cube<.+>|texture_depth_cube)$/.test(wgslTextureType)) {
         return "cube";
     }
-    if (/^texture_2d_array<.+>$/.test(wgslTextureType)) {
+    if (/^(?:texture_2d_array<.+>|texture_depth_2d_array)$/.test(wgslTextureType)) {
         return "2d-array";
     }
     if (/^texture_3d<.+>$/.test(wgslTextureType)) {
@@ -204,12 +233,15 @@ export function ShaderInfo2HydAus(shaderInfo: ShaderInfoType): { attributes: Arr
                 webglType,
                 samplerViewDimension(sampler.wgsl_texture_type),
                 sampleType,
-                samplerBindingType(sampleType),
+                sampler.wgsl_sampler_type === "sampler_comparison"
+                    ? "comparison"
+                    : samplerBindingType(sampleType),
                 sampler.source_name,
                 sampler.size || 1,
                 sampler.array_name,
                 sampler.array_index,
                 !!sampler.is_array,
+                /samplerCube/.test(sampler.glsl_type) ? "cube" : samplerViewDimension(sampler.wgsl_texture_type),
             );
         }),
     };
@@ -228,7 +260,7 @@ export function ShaderInfo2String(shaderInfo: ShaderInfoType): string {
         }
         res += "struct HydUniformObject {\n";
         for (const uniform of shaderInfo.uniforms) {
-            res += `  ${uniform.name}: ${uniform.wgsl_type},\n`;
+            res += `  ${wgslUniformMemberDeclaration(uniform)}\n`;
         }
         res += "};\n\n";
         res += "@binding(0) @group(0) var<uniform> _hyd_uniforms_ : HydUniformObject;\n\n";

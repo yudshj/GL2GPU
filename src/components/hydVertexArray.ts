@@ -6,6 +6,8 @@ import { HydBuffer } from "./hydBuffer";
 export class HydVertexArray  implements HydHashable {
     private __hash__: string;
     public readonly ownerToken: object;
+    public initialized: boolean = false;
+    public deleted: boolean = false;
     public attributes: Array<HydVertexArrayAttribute> = [
         new HydVertexArrayAttribute(),
         new HydVertexArrayAttribute(),

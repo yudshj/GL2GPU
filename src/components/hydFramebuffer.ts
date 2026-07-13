@@ -1,6 +1,88 @@
 import { HydHashable } from "./base/hydHashable";
 import { HydTexture, HydTextureImageState, isWebGlColorRenderableInternalFormat } from "./hydTexture";
 
+export function webGlInternalFormatColorBits(internalFormat: GLenum): [number, number, number, number] {
+    switch (internalFormat) {
+        case WebGL2RenderingContext.R8:
+        case WebGL2RenderingContext.R8_SNORM:
+        case WebGL2RenderingContext.R8UI:
+        case WebGL2RenderingContext.R8I:
+            return [8, 0, 0, 0];
+        case WebGL2RenderingContext.R16F:
+        case WebGL2RenderingContext.R16UI:
+        case WebGL2RenderingContext.R16I:
+            return [16, 0, 0, 0];
+        case WebGL2RenderingContext.R32F:
+        case WebGL2RenderingContext.R32UI:
+        case WebGL2RenderingContext.R32I:
+            return [32, 0, 0, 0];
+        case WebGL2RenderingContext.RG8:
+        case WebGL2RenderingContext.RG8_SNORM:
+        case WebGL2RenderingContext.RG8UI:
+        case WebGL2RenderingContext.RG8I:
+            return [8, 8, 0, 0];
+        case WebGL2RenderingContext.RG16F:
+        case WebGL2RenderingContext.RG16UI:
+        case WebGL2RenderingContext.RG16I:
+            return [16, 16, 0, 0];
+        case WebGL2RenderingContext.RG32F:
+        case WebGL2RenderingContext.RG32UI:
+        case WebGL2RenderingContext.RG32I:
+            return [32, 32, 0, 0];
+        case WebGL2RenderingContext.RGB8:
+        case WebGL2RenderingContext.SRGB8:
+        case WebGL2RenderingContext.RGB8_SNORM:
+        case WebGL2RenderingContext.RGB8UI:
+        case WebGL2RenderingContext.RGB8I:
+            return [8, 8, 8, 0];
+        case WebGL2RenderingContext.RGB16F:
+        case WebGL2RenderingContext.RGB16UI:
+        case WebGL2RenderingContext.RGB16I:
+            return [16, 16, 16, 0];
+        case WebGL2RenderingContext.RGB32F:
+        case WebGL2RenderingContext.RGB32UI:
+        case WebGL2RenderingContext.RGB32I:
+            return [32, 32, 32, 0];
+        case WebGL2RenderingContext.RGBA8:
+        case WebGL2RenderingContext.SRGB8_ALPHA8:
+        case WebGL2RenderingContext.RGBA8_SNORM:
+        case WebGL2RenderingContext.RGBA8UI:
+        case WebGL2RenderingContext.RGBA8I:
+            return [8, 8, 8, 8];
+        case WebGL2RenderingContext.RGBA16F:
+        case WebGL2RenderingContext.RGBA16UI:
+        case WebGL2RenderingContext.RGBA16I:
+            return [16, 16, 16, 16];
+        case WebGL2RenderingContext.RGBA32F:
+        case WebGL2RenderingContext.RGBA32UI:
+        case WebGL2RenderingContext.RGBA32I:
+            return [32, 32, 32, 32];
+        case WebGL2RenderingContext.RGBA4:
+            return [4, 4, 4, 4];
+        case WebGL2RenderingContext.RGB565:
+            return [5, 6, 5, 0];
+        case WebGL2RenderingContext.RGB5_A1:
+            return [5, 5, 5, 1];
+        case WebGL2RenderingContext.RGB10_A2:
+        case WebGL2RenderingContext.RGB10_A2UI:
+            return [10, 10, 10, 2];
+        case WebGL2RenderingContext.R11F_G11F_B10F:
+            return [11, 11, 10, 0];
+        case WebGL2RenderingContext.RGB9_E5:
+            return [9, 9, 9, 0];
+        case WebGL2RenderingContext.ALPHA:
+            return [0, 0, 0, 8];
+        case WebGL2RenderingContext.LUMINANCE:
+        case WebGL2RenderingContext.RGB:
+            return [8, 8, 8, 0];
+        case WebGL2RenderingContext.LUMINANCE_ALPHA:
+        case WebGL2RenderingContext.RGBA:
+            return [8, 8, 8, 8];
+        default:
+            return [0, 0, 0, 0];
+    }
+}
+
 export class FramebufferAttributes implements HydHashable {
     public attachmentPoint: number;
     public level: number;
@@ -26,8 +108,12 @@ export class FramebufferAttributes implements HydHashable {
         return this.attachment.getFramebufferView(this.face, this.level, this.layer);
     }
 
+    public get depthSlice(): number | undefined {
+        return this.attachment.textureDimension === "3d" ? (this.layer || 0) : undefined;
+    }
+
     public get format(): GPUTextureFormat {
-        return this.attachment.format;
+        return this.attachment.gpuFormat;
     }
 
     public get image(): HydTextureImageState | null {
@@ -46,11 +132,10 @@ export class FramebufferAttributes implements HydHashable {
         }
         const image = this.image;
         if (!image || !isWebGlColorRenderableInternalFormat(image.internalFormat)) return false;
-        if (image.internalFormat === WebGL2RenderingContext.RGB565 ||
-            image.internalFormat === WebGL2RenderingContext.RGBA4 ||
-            image.internalFormat === WebGL2RenderingContext.RGB5_A1) return false;
         return image.internalFormat !== WebGL2RenderingContext.RGBA ||
-            image.type === WebGL2RenderingContext.UNSIGNED_BYTE;
+            image.type === WebGL2RenderingContext.UNSIGNED_BYTE ||
+            image.type === WebGL2RenderingContext.UNSIGNED_SHORT_4_4_4_4 ||
+            image.type === WebGL2RenderingContext.UNSIGNED_SHORT_5_5_5_1;
     }
 
     public get internalFormat(): GLenum {
@@ -60,22 +145,9 @@ export class FramebufferAttributes implements HydHashable {
     }
 
     public get colorBits(): [number, number, number, number] {
-        switch (this.internalFormat) {
-            case WebGL2RenderingContext.RGBA4:
-                return [4, 4, 4, 4];
-            case WebGL2RenderingContext.RGB565:
-                return [5, 6, 5, 0];
-            case WebGL2RenderingContext.RGB5_A1:
-                return [5, 5, 5, 1];
-            case WebGL2RenderingContext.RGB:
-            case WebGL2RenderingContext.RGB8:
-                return [8, 8, 8, 0];
-            case WebGL2RenderingContext.RGBA:
-            case WebGL2RenderingContext.RGBA8:
-                return [8, 8, 8, 8];
-            default:
-                return this.colorRenderable ? [8, 8, 8, 8] : [0, 0, 0, 0];
-        }
+        if (this.image?.effectiveColorBits) return this.image.effectiveColorBits;
+        const bits = webGlInternalFormatColorBits(this.internalFormat);
+        return bits.some(Boolean) ? bits : this.colorRenderable ? [8, 8, 8, 8] : bits;
     }
 
     public get depthBits(): number {
@@ -94,6 +166,10 @@ export class FramebufferAttributes implements HydHashable {
 
     public get height(): number {
         return this.image?.height ?? (this.objectType === WebGL2RenderingContext.RENDERBUFFER ? this.attachment.height : 0);
+    }
+
+    public get sampleCount(): number {
+        return this.attachment.sampleCount;
     }
 }
 

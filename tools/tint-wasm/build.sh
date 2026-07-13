@@ -2,10 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TINT_SRC="${TINT_SRC:-/Users/hanyd/Code/tint}"
+TINT_SRC="${TINT_SRC:-/Volumes/Code/dawn}"
 BUILD_DIR="${TINT_BUILD_DIR:-${TINT_SRC}/out/gl2gpu_em}"
 VENDOR_DIR="${ROOT_DIR}/src/vendor/tint-wasm"
-CXX_WRAPPER="${ROOT_DIR}/tools/tint-wasm/emxx-wrapper.sh"
 
 if ! command -v gclient >/dev/null 2>&1; then
   echo "gclient is required. Install depot_tools and add it to PATH." >&2
@@ -21,18 +20,25 @@ if ! command -v cmake >/dev/null 2>&1 || ! command -v ninja >/dev/null 2>&1; the
 fi
 
 cd "${TINT_SRC}"
-if [ ! -f .gclient ]; then
-  cp standalone.gclient .gclient
+if [ "${TINT_SYNC:-1}" != "0" ]; then
+  if [ ! -f .gclient ] && [ -f standalone.gclient ]; then
+    cp standalone.gclient .gclient
+  fi
+  gclient sync
 fi
-gclient sync
 
-export CXX="${CXX_WRAPPER}"
-if [ -f "${BUILD_DIR}/CMakeCache.txt" ] && ! grep -Fq "CMAKE_CXX_COMPILER:FILEPATH=${CXX_WRAPPER}" "${BUILD_DIR}/CMakeCache.txt"; then
-  rm -rf "${BUILD_DIR}"
-fi
 mkdir -p "${BUILD_DIR}"
 cd "${BUILD_DIR}"
-emcmake cmake ../.. -GNinja \
+emcmake cmake "${ROOT_DIR}/tools/tint-wasm/cmake" -GNinja \
+  -DDAWN_SOURCE_DIR="${TINT_SRC}" \
+  -DDAWN_BUILD_SAMPLES=OFF \
+  -DDAWN_BUILD_TESTS=OFF \
+  -DDAWN_BUILD_NODE_BINDINGS=OFF \
+  -DDAWN_ENABLE_NULL=OFF \
+  -DDAWN_ENABLE_DESKTOP_GL=OFF \
+  -DDAWN_ENABLE_OPENGLES=OFF \
+  -DDAWN_ENABLE_VULKAN=OFF \
+  -DDAWN_ENABLE_METAL=OFF \
   -DTINT_BUILD_SPV_READER=ON \
   -DTINT_BUILD_WGSL_WRITER=ON \
   -DTINT_BUILD_GLSL_WRITER=OFF \
@@ -43,10 +49,14 @@ emcmake cmake ../.. -GNinja \
   -DTINT_BUILD_CMD_TOOLS=OFF \
   -DTINT_BUILD_TESTS=OFF \
   -DTINT_BUILD_BENCHMARKS=OFF \
+  -DTINT_BUILD_IR_BINARY=OFF \
   -DTINT_BUILD_DOCS=OFF \
   -DTINT_BUILD_AS_OTHER_OS=ON \
   -DTINT_BUILD_REMOTE_COMPILE=OFF \
   -DTINT_WERROR=OFF \
+  -DTINT_ENABLE_IR_DUMPING=OFF \
+  -DTINT_ENABLE_IR_VALIDATION_ASSERTS=OFF \
+  -DDAWN_BUILD_PROTOBUF=OFF \
   -DCMAKE_CXX_FLAGS="-Wno-c2y-extensions -Wno-error=c2y-extensions -Wno-deprecated-pragma -Wno-error=deprecated-pragma -Wno-lifetime-safety -Wno-lifetime-safety-intra-tu-suggestions -Wno-lifetime-safety-cross-tu-suggestions -Wno-switch-default -Wno-nrvo" \
   -DCMAKE_BUILD_TYPE=Release
 ninja tint_api tint_lang_spirv_reader tint_lang_wgsl_writer
@@ -62,6 +72,7 @@ mkdir -p "${VENDOR_DIR}"
 em++ "${ROOT_DIR}/tools/tint-wasm/tint_wasm.cpp" \
   -I"${TINT_SRC}" \
   -Wl,--whole-archive "${TMP_OBJS}/libtint.a" -Wl,--no-whole-archive \
+  -std=c++20 \
   -O3 \
   -sMODULARIZE=1 \
   -sEXPORT_ES6=1 \

@@ -115,9 +115,13 @@ function delayedBodyScripts(html) {
 function bootScript(bodyOnload) {
   return `
 <script>
-window.__GL2GPU_CTS_RESULT = { ready: false, finished: false, passes: [], failures: [], shaders: [], bootError: null };
+window.__GL2GPU_CTS_RESULT = { ready: false, finished: false, passes: [], failures: [], shaders: [], bootError: null, lastActivity: performance.now() };
 window.__HYD_DEBUG_READBACK = ${argv.get("debug-readback") === "true"};
 window.__HYD_DEBUG_TEXTURE_UPLOAD = ${argv.get("debug-texture-upload") === "true"};
+window.__HYD_DEBUG_GL_ERRORS = ${argv.get("debug-errors") === "true"};
+window.__HYD_STATIC_SAMPLER_ORIGIN_VARIANTS = ${argv.get("static-origin-variants") !== "false"};
+window.__HYD_DISABLE_STATE_CACHE = ${argv.get("state-cache") === "false"};
+window.__HYD_DISABLE_BUNDLE_CACHE = ${argv.get("bundle-cache") === "false"};
 if (${argv.get("capture-shaders") === "true"}) {
   window.__HYD_SHADER_CAPTURE = function(record) {
     window.__GL2GPU_CTS_RESULT.shaders.push(record);
@@ -128,10 +132,11 @@ window.addEventListener("DOMContentLoaded", async () => {
   try {
     if (!window.GL2GPU) throw new Error("GL2GPU bundle was not loaded");
     const nativeGetContext = HTMLCanvasElement.prototype.getContext;
-    const runtime = await GL2GPU.gl2gpuCreateRuntime({
-      optimizeTintWgsl: true,
-      legacyTextureCoordinateFixups: false
-    });
+    const useNativeBackend = ${argv.get("backend") === "native"};
+    const runtime = useNativeBackend ? null : await GL2GPU.gl2gpuCreateRuntime({
+        optimizeTintWgsl: ${argv.get("optimize-tint-wgsl") !== "false"},
+        legacyTextureCoordinateFixups: false
+      });
     const contextMap = new WeakMap();
     const contextTypes = new WeakMap();
     HTMLCanvasElement.prototype.getContext = function(type, attributes) {
@@ -139,16 +144,356 @@ window.addEventListener("DOMContentLoaded", async () => {
         const normalizedType = type === "webgl2" ? "webgl2" : "webgl";
         const existing = contextMap.get(this);
         if (existing) return contextTypes.get(this) === normalizedType ? existing : null;
-        const gpuContext = nativeGetContext.call(this, "webgpu");
-        if (!gpuContext) return null;
-        const context = GL2GPU.gl2gpuCreateContext(
-          runtime,
-          this,
-          null,
-          [normalizedType, attributes || {}],
-          [1 << 21, 0],
-          gpuContext
-        );
+        let context;
+        if (useNativeBackend) {
+          context = nativeGetContext.call(this, normalizedType, attributes || {});
+          if (!context) return null;
+        } else {
+          const gpuContext = nativeGetContext.call(this, "webgpu");
+          if (!gpuContext) return null;
+          context = GL2GPU.gl2gpuCreateContext(
+            runtime,
+            this,
+            null,
+            [normalizedType, attributes || {}],
+            [1 << 21, 0],
+            gpuContext
+          );
+        }
+        if (${argv.get("trace-buffer-copy") === "true"}) {
+          result.bufferCopies = result.bufferCopies || [];
+          const bindingPname = target => new Map([
+            [context.ARRAY_BUFFER, context.ARRAY_BUFFER_BINDING],
+            [context.ELEMENT_ARRAY_BUFFER, context.ELEMENT_ARRAY_BUFFER_BINDING],
+            [context.COPY_READ_BUFFER, context.COPY_READ_BUFFER_BINDING],
+            [context.COPY_WRITE_BUFFER, context.COPY_WRITE_BUFFER_BINDING],
+            [context.PIXEL_PACK_BUFFER, context.PIXEL_PACK_BUFFER_BINDING],
+            [context.PIXEL_UNPACK_BUFFER, context.PIXEL_UNPACK_BUFFER_BINDING],
+            [context.TRANSFORM_FEEDBACK_BUFFER, context.TRANSFORM_FEEDBACK_BUFFER_BINDING],
+            [context.UNIFORM_BUFFER, context.UNIFORM_BUFFER_BINDING],
+          ]).get(target);
+          const hashBytes = bytes => {
+            let hash = 2166136261;
+            for (let index = 0; index < bytes.length; index++) {
+              hash = Math.imul(hash ^ bytes[index], 16777619);
+            }
+            return (hash >>> 0).toString(16);
+          };
+          const snapshotBuffer = buffer => buffer ? {
+            label: buffer.label,
+            webglSize: buffer.webglSize,
+            version: buffer.version,
+            derivedVertexGeneration: buffer.derivedVertexGeneration,
+            convertedVertexBuffers: buffer.convertedVertexBuffers?.size,
+            divisorVertexBuffers: buffer.divisorVertexBuffers?.size,
+            shadowHash: hashBytes(buffer.shadowData || []),
+          } : null;
+          const traceDerivedBuilds = buffer => {
+            if (!buffer || buffer.__hydCtsTracesDerivedBuilds) return;
+            buffer.__hydCtsTracesDerivedBuilds = true;
+            for (const method of ["getFloatVertexBuffer", "getIntegerVertexBuffer", "getDivisorVertexBuffer"]) {
+              const original = buffer[method];
+              if (typeof original !== "function") continue;
+              buffer[method] = function(...args) {
+                const value = original.apply(this, args);
+                result.bufferCopies.push({
+                  derivedBuild: method,
+                  args,
+                  buffer: snapshotBuffer(buffer),
+                  derivedKey: value?.key,
+                });
+                return value;
+              };
+            }
+          };
+          const copyBufferSubData = context.copyBufferSubData;
+          context.copyBufferSubData = function(readTarget, writeTarget, readOffset, writeOffset, size) {
+            const source = context.getParameter(bindingPname(readTarget));
+            const destination = context.getParameter(bindingPname(writeTarget));
+            traceDerivedBuilds(source);
+            traceDerivedBuilds(destination);
+            const trace = {
+              readTarget, writeTarget, readOffset, writeOffset, size,
+              sourceBefore: snapshotBuffer(source),
+              destinationBefore: snapshotBuffer(destination),
+            };
+            const returned = copyBufferSubData.apply(this, arguments);
+            trace.sourceAfter = snapshotBuffer(source);
+            trace.destinationAfter = snapshotBuffer(destination);
+            result.bufferCopies.push(trace);
+            return returned;
+          };
+        }
+        if (${argv.get("trace-vertex-input") === "true"}) {
+          result.vertexInputTrace = result.vertexInputTrace || [];
+          const snapshotVertexInputs = (drawName, drawArgs) => {
+            const state = context.hydGlobalState;
+            const program = state?.commonState?.currentProgram || context.getParameter(context.CURRENT_PROGRAM);
+            const vao = state?.commonState?.vertexArrayBinding;
+            const activeLocations = Array.from(program?.hydAttributeLocations || []).sort((a, b) => a - b);
+            const attributes = activeLocations.map(location => {
+              const attribute = vao?.attributes?.[location] || {
+                enabled: context.getVertexAttrib(location, context.VERTEX_ATTRIB_ARRAY_ENABLED),
+                size: context.getVertexAttrib(location, context.VERTEX_ATTRIB_ARRAY_SIZE),
+                type: context.getVertexAttrib(location, context.VERTEX_ATTRIB_ARRAY_TYPE),
+                normalized: context.getVertexAttrib(location, context.VERTEX_ATTRIB_ARRAY_NORMALIZED),
+                stride: context.getVertexAttrib(location, context.VERTEX_ATTRIB_ARRAY_STRIDE),
+                webglStride: context.getVertexAttrib(location, context.VERTEX_ATTRIB_ARRAY_STRIDE),
+                offset: context.getVertexAttribOffset(location, context.VERTEX_ATTRIB_ARRAY_POINTER),
+                buffer: context.getVertexAttrib(location, context.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING),
+                format: null,
+              };
+              const buffer = attribute?.buffer;
+              const shadow = buffer?.shadowData;
+              const records = [];
+              if (attribute?.enabled && shadow instanceof Uint8Array) {
+                const view = new DataView(shadow.buffer, shadow.byteOffset, shadow.byteLength);
+                const componentBytes = attribute.type === context.BYTE || attribute.type === context.UNSIGNED_BYTE ? 1 :
+                  attribute.type === context.SHORT || attribute.type === context.UNSIGNED_SHORT || attribute.type === context.HALF_FLOAT ? 2 : 4;
+                const stride = attribute.stride || attribute.size * componentBytes;
+                const recordCount = Math.min(128, Math.max(0,
+                  Math.floor((shadow.byteLength - attribute.offset) / Math.max(1, stride))));
+                for (let record = 0; record < recordCount; record++) {
+                  const byteOffset = attribute.offset + record * stride;
+                  if (byteOffset + componentBytes > view.byteLength) break;
+                  if (attribute.type === context.FLOAT) {
+                    records.push({
+                      f32: view.getFloat32(byteOffset, true),
+                      u32: view.getUint32(byteOffset, true),
+                    });
+                  } else {
+                    records.push({ byteOffset });
+                  }
+                }
+              }
+              return {
+                location,
+                programAttribute: program?.hydAttributes?.find(item =>
+                  location >= item.location && location < item.location + item.locationSpan),
+                enabled: attribute?.enabled,
+                size: attribute?.size,
+                type: attribute?.type,
+                integer: attribute?.int ?? context.getVertexAttrib(location, context.VERTEX_ATTRIB_ARRAY_INTEGER),
+                normalized: attribute?.normalized,
+                stride: attribute?.stride,
+                webglStride: attribute?.webglStride,
+                offset: attribute?.offset,
+                format: attribute?.format,
+                buffer: buffer ? {
+                  label: buffer.label,
+                  webglSize: buffer.webglSize,
+                  version: buffer.version,
+                  shadowByteLength: shadow?.byteLength,
+                } : null,
+                records,
+              };
+            });
+            let vertexBuffers = null;
+            try {
+              const resolved = state?.getVertexBuffer?.();
+              if (resolved) {
+                vertexBuffers = {
+                  keys: resolved[0],
+                  offsets: resolved[2],
+                  layoutHash: resolved[3],
+                  layouts: resolved[4].map(layout => ({
+                    arrayStride: layout.arrayStride,
+                    stepMode: layout.stepMode,
+                    attributes: Array.from(layout.attributes),
+                  })),
+                };
+              }
+            } catch (error) {
+              vertexBuffers = { error: String(error && (error.stack || error.message) || error) };
+            }
+            result.vertexInputTrace.push({ drawName, drawArgs, attributes, vertexBuffers });
+          };
+          for (const name of ["drawArrays", "drawArraysInstanced", "drawElements", "drawElementsInstanced"]) {
+            const original = context[name];
+            if (typeof original !== "function") continue;
+            context[name] = function(...args) {
+              snapshotVertexInputs(name, args);
+              return original.apply(this, args);
+            };
+          }
+        }
+        if (${argv.get("trace-uniforms") === "true"}) {
+          result.uniformTrace = result.uniformTrace || [];
+          const summarizeLocation = location => location ? {
+            name: location.name,
+            sourceName: location.sourceName,
+            type: location.webgl_type,
+            wordOffset: location.wordOffset,
+            isArray: location.isArray,
+          } : null;
+          const originalGetUniformLocation = context.getUniformLocation;
+          context.getUniformLocation = function(program, name) {
+            const location = originalGetUniformLocation.call(this, program, name);
+            result.uniformTrace.push({ kind: "location", requested: String(name), location: summarizeLocation(location) });
+            return location;
+          };
+          for (const name of [
+            "uniform1f", "uniform2f", "uniform3f", "uniform4f",
+            "uniform1i", "uniform2i", "uniform3i", "uniform4i",
+            "uniform1ui", "uniform2ui", "uniform3ui", "uniform4ui",
+            "uniform1fv", "uniform2fv", "uniform3fv", "uniform4fv",
+            "uniform1iv", "uniform2iv", "uniform3iv", "uniform4iv",
+            "uniform1uiv", "uniform2uiv", "uniform3uiv", "uniform4uiv",
+          ]) {
+            const original = context[name];
+            if (typeof original !== "function") continue;
+            context[name] = function(location, ...values) {
+              const returned = original.call(this, location, ...values);
+              const storage = location ? {
+                f32: location.float32View?.[location.wordOffset],
+                i32: location.int32View?.[location.wordOffset],
+                u32: location.uint32View?.[location.wordOffset],
+              } : null;
+              result.uniformTrace.push({
+                kind: "write",
+                method: name,
+                location: summarizeLocation(location),
+                values: values.map(value => value && typeof value !== "string" && typeof value.length === "number"
+                  ? Array.from(value).slice(0, 32)
+                  : value),
+                storage,
+              });
+              return returned;
+            };
+          }
+        }
+        if (${argv.get("trace-read-pixels") === "true"}) {
+          result.readPixelsTrace = result.readPixelsTrace || [];
+          const originalReadPixels = context.readPixels;
+          context.readPixels = function(...args) {
+            const returned = originalReadPixels.apply(this, args);
+            const pixels = args[6];
+            if (pixels && ArrayBuffer.isView(pixels)) {
+              const bytes = new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength);
+              const width = Number(args[2]) || 0;
+              const height = Number(args[3]) || 0;
+              const destinationOffset = Number(args[7]) || 0;
+              const pixel = (x, y) => {
+                const offset = destinationOffset + (y * width + x) * 4;
+                return Array.from(bytes.slice(offset, offset + 4));
+              };
+              let hash = 2166136261;
+              for (let index = destinationOffset; index < bytes.length; index++) {
+                hash = Math.imul(hash ^ bytes[index], 16777619);
+              }
+              result.readPixelsTrace.push({
+                x: args[0], y: args[1], width, height,
+                format: args[4], type: args[5], byteLength: bytes.length,
+                hash: (hash >>> 0).toString(16),
+                first: Array.from(bytes.slice(destinationOffset, destinationOffset + 16)),
+                center: width > 0 && height > 0 ? pixel(Math.floor(width / 2), Math.floor(height / 2)) : [],
+                last: width > 0 && height > 0 ? pixel(width - 1, height - 1) : [],
+              });
+            }
+            return returned;
+          };
+        }
+        if (${argv.get("trace-api-state") === "true"}) {
+          result.apiStateTrace = result.apiStateTrace || [];
+          const objectIds = new WeakMap();
+          let nextObjectId = 1;
+          const objectId = value => {
+            if (!value || (typeof value !== "object" && typeof value !== "function")) return value;
+            let id = objectIds.get(value);
+            if (!id) {
+              id = nextObjectId++;
+              objectIds.set(value, id);
+            }
+            return id;
+          };
+          const query = (pname, fallback = null) => {
+            try { return context.getParameter(pname); } catch (_) { return fallback; }
+          };
+          const enabled = cap => {
+            try { return context.isEnabled(cap); } catch (_) { return false; }
+          };
+          const attachmentObject = point => {
+            try {
+              return context.getFramebufferAttachmentParameter(
+                context.DRAW_FRAMEBUFFER,
+                point,
+                context.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
+              );
+            } catch (_) {
+              return null;
+            }
+          };
+          const snapshot = () => {
+            const drawFramebuffer = query(context.DRAW_FRAMEBUFFER_BINDING);
+            const colorAttachment = drawFramebuffer ? attachmentObject(context.COLOR_ATTACHMENT0) : null;
+            const depthAttachment = drawFramebuffer ? attachmentObject(context.DEPTH_ATTACHMENT) : null;
+            const stencilAttachment = drawFramebuffer ? attachmentObject(context.STENCIL_ATTACHMENT) : null;
+            return {
+              drawFramebuffer: {
+                id: objectId(drawFramebuffer),
+                color: { id: objectId(colorAttachment), label: colorAttachment?.label },
+                depth: { id: objectId(depthAttachment), label: depthAttachment?.label },
+                stencil: { id: objectId(stencilAttachment), label: stencilAttachment?.label },
+              },
+              readFramebuffer: objectId(query(context.READ_FRAMEBUFFER_BINDING)),
+              program: objectId(query(context.CURRENT_PROGRAM)),
+              activeTexture: query(context.ACTIVE_TEXTURE),
+              texture2d: query(context.TEXTURE_BINDING_2D)?.label,
+              viewport: Array.from(query(context.VIEWPORT, [])),
+              clear: {
+                color: Array.from(query(context.COLOR_CLEAR_VALUE, [])),
+                depth: query(context.DEPTH_CLEAR_VALUE),
+                stencil: query(context.STENCIL_CLEAR_VALUE),
+              },
+              depth: {
+                enabled: enabled(context.DEPTH_TEST),
+                writeMask: query(context.DEPTH_WRITEMASK),
+                func: query(context.DEPTH_FUNC),
+              },
+              stencil: {
+                enabled: enabled(context.STENCIL_TEST),
+                ref: query(context.STENCIL_REF),
+                func: query(context.STENCIL_FUNC),
+                valueMask: query(context.STENCIL_VALUE_MASK),
+                writeMask: query(context.STENCIL_WRITEMASK),
+                fail: query(context.STENCIL_FAIL),
+                depthFail: query(context.STENCIL_PASS_DEPTH_FAIL),
+                pass: query(context.STENCIL_PASS_DEPTH_PASS),
+              },
+              scissor: {
+                enabled: enabled(context.SCISSOR_TEST),
+                box: Array.from(query(context.SCISSOR_BOX, [])),
+              },
+            };
+          };
+          const traceMethods = new Set([
+            "bindFramebuffer", "framebufferTexture2D", "framebufferRenderbuffer",
+            "clear", "clearColor", "clearDepth", "clearStencil",
+            "enable", "disable", "viewport", "scissor", "stencilFunc",
+            "bindTexture", "useProgram", "drawArrays", "drawElements", "readPixels",
+          ]);
+          for (const name of traceMethods) {
+            const original = context[name];
+            if (typeof original !== "function") continue;
+            context[name] = function(...args) {
+              const before = snapshot();
+              const returned = original.apply(this, args);
+              const consoleText = document.getElementById("console")?.innerText || "";
+              const testCase = Array.from(consoleText.matchAll(/Start testcase:\\s*([^\\n]+)/g)).at(-1)?.[1] || "";
+              result.apiStateTrace.push({
+                index: result.apiStateTrace.length,
+                testCase,
+                name,
+                args: args.map(value => typeof value === "object" && value !== null
+                  ? { id: objectId(value), label: value.label }
+                  : value),
+                before,
+                after: snapshot(),
+              });
+              return returned;
+            };
+          }
+        }
         if (${argv.get("debug-api") === "true"}) {
           result.apiDebug = {
             keys: Object.keys(context).slice(0, 400),
@@ -168,6 +513,7 @@ window.addEventListener("DOMContentLoaded", async () => {
       return nativeGetContext.call(this, type, attributes);
     };
     const installResultHooks = () => {
+      const recordActivity = () => { result.lastActivity = performance.now(); };
       const wrap = (name, callback) => {
         const original = window[name];
         if (typeof original !== "function" || original.__gl2gpuResultHook) return;
@@ -178,8 +524,8 @@ window.addEventListener("DOMContentLoaded", async () => {
         wrapped.__gl2gpuResultHook = true;
         window[name] = wrapped;
       };
-      wrap("testPassed", args => result.passes.push(Array.from(args, String).join(" | ")));
-      wrap("testFailed", args => result.failures.push(Array.from(args, String).join(" | ")));
+      wrap("testPassed", args => { recordActivity(); result.passes.push(Array.from(args, String).join(" | ")); });
+      wrap("testFailed", args => { recordActivity(); result.failures.push(Array.from(args, String).join(" | ")); });
       wrap("notifyFinishedToHarness", () => { result.finished = true; });
     };
     installResultHooks();
@@ -216,6 +562,31 @@ window.addEventListener("DOMContentLoaded", async () => {
       Function(bodyOnload).call(document.body);
     }
     window.dispatchEvent(new Event("load"));
+    const hasStandardPostScript = Array.from(document.scripts).some(script =>
+      new RegExp("(?:^|/)js-test-post[.]js(?:[?#]|$)").test(
+        script.src || script.getAttribute("data-gl2gpu-src") || ""));
+    if (!hasStandardPostScript) {
+      result.lastActivity = performance.now();
+      const consoleElement = document.getElementById("console");
+      const observer = consoleElement ? new MutationObserver(() => {
+        result.lastActivity = performance.now();
+      }) : null;
+      observer?.observe(consoleElement, { childList: true, subtree: true, characterData: true });
+      const finishWhenQuiescent = () => {
+        if (result.finished) {
+          observer?.disconnect();
+          return;
+        }
+        if (window.successfullyParsed === true && performance.now() - result.lastActivity >= 2000) {
+          result.finished = true;
+          result.completionFallback = "quiescent-without-js-test-post";
+          observer?.disconnect();
+          return;
+        }
+        setTimeout(finishWhenQuiescent, 100);
+      };
+      setTimeout(finishWhenQuiescent, 100);
+    }
   } catch (error) {
     result.bootError = String(error && (error.stack || error.message) || error);
     result.finished = true;
@@ -377,6 +748,45 @@ function isBenignConsoleError(message) {
   return /^Failed to load resource: the server responded with a status of 404 \(Not Found\)$/i.test(message);
 }
 
+function writeJsonAtomic(filePath, value) {
+  const temporaryPath = `${filePath}.tmp`;
+  fs.writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`);
+  fs.renameSync(temporaryPath, filePath);
+}
+
+function buildReport({
+  results,
+  selectedTotal,
+  complete,
+  chromeExecutablePath,
+  restartEvery,
+  ctsRoot,
+  ctsCommit,
+  gl2gpuCommit,
+}) {
+  return {
+    generatedAt: new Date().toISOString(),
+    suite: suiteName,
+    version: suiteName === "official" ? officialVersion : null,
+    headed: true,
+    complete,
+    selectedTotal,
+    chrome: chromeExecutablePath,
+    browserRestartEvery: restartEvery,
+    ctsRoot,
+    ctsCommit,
+    expectedCtsCommit: EXPECTED_CTS_COMMIT,
+    gl2gpuCommit,
+    summary: {
+      total: results.length,
+      passed: results.filter((result) => result.valid).length,
+      failed: results.filter((result) => !result.valid).length,
+      remaining: Math.max(0, selectedTotal - results.length),
+    },
+    results,
+  };
+}
+
 async function main() {
   const ctsRoot = path.resolve(argv.get("cts-root") || process.env.WEBGL_CTS_ROOT || "/tmp/gl2gpu-webgl-cts");
   const ctsTestsRoot = path.join(ctsRoot, "sdk", "tests");
@@ -395,6 +805,8 @@ async function main() {
   }
   const timeoutMs = Number(argv.get("timeout-ms") || 45000);
   const restartEvery = Math.max(0, Number(argv.get("restart-every") || 100));
+  const gl2gpuCommit = execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const partialReportPath = path.join(outputRoot, "results.partial.json");
   const { chromium } = loadPlaywright();
   let launched = await launchHeadedChrome(chromium);
   const chromeExecutablePath = launched.executablePath;
@@ -414,10 +826,10 @@ async function main() {
       page.on("console", (message) => {
         const text = message.text();
         if (captureConsole && consoleMessages.length < 1000) {
-          consoleMessages.push({ type: message.type(), text: text.slice(0, 12000) });
+          consoleMessages.push({ type: message.type(), text: text.slice(0, 100000) });
         }
         if (message.type() === "error" || /GPUValidationError|Runtime shader translation failed|\[HYD\] WebGPU uncaptured error|not implemented/i.test(text)) {
-          consoleErrors.push(text.slice(0, 4000));
+          consoleErrors.push(text.slice(0, 100000));
         }
       });
       page.on("pageerror", (error) => pageErrors.push(String(error.stack || error.message || error).slice(0, 4000)));
@@ -467,7 +879,11 @@ async function main() {
         pageErrors.push(String(error.stack || error.message || error).slice(0, 4000));
       }
       const name = test.replace(/[^A-Za-z0-9_.-]+/g, "_");
-      await page.screenshot({ path: path.join(outputRoot, `${name}.png`), fullPage: true }).catch(() => {});
+      await page.screenshot({
+        path: path.join(outputRoot, `${name}.png`),
+        fullPage: argv.get("full-page-screenshot") === "true",
+        timeout: Math.min(timeoutMs, 5000),
+      }).catch(() => {});
       const hardConsoleErrors = consoleErrors.filter((message) => !isBenignConsoleError(message));
       const result = {
         test,
@@ -483,31 +899,34 @@ async function main() {
       };
       results.push(result);
       console.log(`[cts] ${result.valid ? "PASS" : "FAIL"} ${test} (${result.durationMs} ms, ${state ? state.failures.length : "no"} failures)`);
+      writeJsonAtomic(partialReportPath, buildReport({
+        results,
+        selectedTotal: tests.length,
+        complete: false,
+        chromeExecutablePath,
+        restartEvery,
+        ctsRoot,
+        ctsCommit,
+        gl2gpuCommit,
+      }));
       await page.close();
     }
   } finally {
     await launched.browser.close();
     await new Promise((resolve) => server.server.close(resolve));
   }
-  const report = {
-    generatedAt: new Date().toISOString(),
-    suite: suiteName,
-    version: suiteName === "official" ? officialVersion : null,
-    headed: true,
-    chrome: chromeExecutablePath,
-    browserRestartEvery: restartEvery,
+  const report = buildReport({
+    results,
+    selectedTotal: tests.length,
+    complete: true,
+    chromeExecutablePath,
+    restartEvery,
     ctsRoot,
     ctsCommit,
-    expectedCtsCommit: EXPECTED_CTS_COMMIT,
-    gl2gpuCommit: execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
-    summary: {
-      total: results.length,
-      passed: results.filter((result) => result.valid).length,
-      failed: results.filter((result) => !result.valid).length,
-    },
-    results,
-  };
-  fs.writeFileSync(path.join(outputRoot, "results.json"), `${JSON.stringify(report, null, 2)}\n`);
+    gl2gpuCommit,
+  });
+  writeJsonAtomic(path.join(outputRoot, "results.json"), report);
+  fs.rmSync(partialReportPath, { force: true });
   console.log(`[cts] ${report.summary.passed}/${report.summary.total} passed; ${path.join(outputRoot, "results.json")}`);
   process.exitCode = report.summary.failed === 0 ? 0 : 1;
 }

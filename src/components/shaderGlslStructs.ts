@@ -42,6 +42,11 @@ export interface ValueStructUniformPlan {
     aggregates: Array<{ sourceName: string, glslType: string }>;
 }
 
+export interface DynamicStructUniformRewrite {
+    source: string;
+    helpers: string[];
+}
+
 function integerDefines(source: string): Map<string, number> {
     const defines = new Map<string, number>();
     const pattern = /^\s*#define\s+([A-Za-z_]\w*)\s+(\d+)\s*$/gm;
@@ -72,7 +77,84 @@ function stableHash(value: string): string {
 
 function internalLeafName(sourceName: string): string {
     const readable = sourceName.replace(/[^A-Za-z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_|_$/g, "");
-    return `hydgl2gpu_uniform_${readable}_${stableHash(sourceName)}`;
+    // Flattened paths may originate from a legal 1024-character WebGL uniform
+    // location. Bound the generated Vulkan GLSL identifier and retain the hash
+    // as the collision-resistant identity.
+    return `hydgl2gpu_uniform_${readable.slice(0, 96)}_${stableHash(sourceName)}`;
+}
+
+interface InlineInterfaceField {
+    type: string;
+    name: string;
+    arraySuffix: string;
+}
+
+function parseInlineInterfaceFields(body: string): InlineInterfaceField[] | null {
+    const fields: InlineInterfaceField[] = [];
+    const fieldPattern = /(?:^|;)\s*(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*((?:\[[^\]]+\]\s*)*)\s*(?=;|$)/g;
+    let cursor = 0;
+    for (let match = fieldPattern.exec(body); match !== null; match = fieldPattern.exec(body)) {
+        if (body.slice(cursor, match.index).replace(/^\s*;?\s*/, "").trim().length > 0) return null;
+        fields.push({ type: match[1], name: match[2], arraySuffix: match[3].replace(/\s+/g, "") });
+        cursor = fieldPattern.lastIndex;
+    }
+    if (body.slice(cursor).replace(/^\s*;?\s*/, "").trim().length > 0) return null;
+    return fields.length > 0 ? fields : null;
+}
+
+/**
+ * Lower WebGL inline struct interface declarations to ordinary interface
+ * fields. Generated names are stage-independent, so separately translated
+ * vertex and fragment shaders retain identical linkage.
+ */
+export function lowerInlineInterfaceStructs(source: string): string {
+    const declaration = /\b((?:(?:flat|smooth|noperspective|centroid|sample)\s+)*)(attribute|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?struct\s+([A-Za-z_]\w*)\s*\{([\s\S]*?)\}\s*([A-Za-z_]\w*)\s*;/g;
+    const replacements: Array<{ instance: string, field: string, name: string }> = [];
+    let out = source.replace(declaration, (full, interpolation, qualifier, structName, body, instance, offset) => {
+        if (!isTopLevelAt(source, offset)) return full;
+        const fields = parseInlineInterfaceFields(body);
+        if (!fields) return full;
+        const structDefinition = `struct ${structName} {${body}};`;
+        const declarations = fields.map((field) => {
+            const name = `hydgl2gpu_io_${instance}_${field.name}_${stableHash(`${instance}.${field.name}`)}`;
+            replacements.push({ instance, field: field.name, name });
+            return `${interpolation || ""}${qualifier} ${field.type} ${name}${field.arraySuffix};`;
+        });
+        return `${structDefinition}\n${declarations.join("\n")}`;
+    });
+    const definitions = parseDefinitions(out, integerDefines(out));
+    const namedDeclaration = /\b((?:(?:flat|smooth|noperspective|centroid|sample)\s+)*)(attribute|varying|in|out)\s+(?:(?:lowp|mediump|highp)\s+)?([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*;/g;
+    out = out.replace(namedDeclaration, (full, interpolation, qualifier, structType, instance, offset) => {
+        if (!isTopLevelAt(out, offset) || !definitions.has(structType)) return full;
+        const declarations: string[] = [];
+        const flatten = (type: string, sourcePath: string, generatedPath: string, arraySuffix: string = "") => {
+            if (VALUE_TYPES.has(type)) {
+                const name = `hydgl2gpu_io_${generatedPath}_${stableHash(sourcePath)}`;
+                replacements.push({ instance, field: sourcePath.slice(instance.length + 1), name });
+                declarations.push(`${interpolation || ""}${qualifier} ${type} ${name}${arraySuffix};`);
+                return;
+            }
+            const definition = definitions.get(type);
+            if (!definition || arraySuffix) return;
+            for (const field of definition.fields) {
+                flatten(
+                    field.glslType,
+                    `${sourcePath}.${field.name}`,
+                    `${generatedPath}_${field.name}`,
+                    field.isArray ? `[${field.size}]` : "",
+                );
+            }
+        };
+        flatten(structType, instance, instance);
+        return declarations.length > 0 ? declarations.join("\n") : full;
+    });
+    for (const replacement of replacements.sort((left, right) => right.field.length - left.field.length)) {
+        out = out.replace(
+            new RegExp(`\\b${escapeRegExp(replacement.instance)}\\s*\\.\\s*${escapeRegExp(replacement.field)}\\b`, "g"),
+            replacement.name,
+        );
+    }
+    return out;
 }
 
 function isTopLevelAt(source: string, index: number): boolean {
@@ -126,6 +208,189 @@ function blankRanges(source: string, ranges: Array<{ start: number, end: number 
         }
     }
     return chars.join("");
+}
+
+interface ParsedStructUniformAccess {
+    start: number;
+    end: number;
+    root: ValueStructUniformRoot;
+    fields: StructField[];
+    glslType: string;
+    selectionIndices: Array<{ expression: string, size: number }>;
+    terminalArrayIndex?: { expression: string, size: number };
+}
+
+function skipWhitespace(source: string, start: number): number {
+    let cursor = start;
+    while (cursor < source.length && /\s/.test(source[cursor])) cursor++;
+    return cursor;
+}
+
+function parseBracketExpression(source: string, start: number): { expression: string, end: number } | null {
+    const open = skipWhitespace(source, start);
+    if (source[open] !== "[") return null;
+    let bracketDepth = 0;
+    let parenDepth = 0;
+    for (let cursor = open; cursor < source.length; cursor++) {
+        const character = source[cursor];
+        if (character === "[") bracketDepth++;
+        else if (character === "]") {
+            bracketDepth--;
+            if (bracketDepth === 0 && parenDepth === 0) {
+                return {
+                    expression: source.slice(open + 1, cursor).trim(),
+                    end: cursor + 1,
+                };
+            }
+        } else if (character === "(") parenDepth++;
+        else if (character === ")") parenDepth--;
+    }
+    return null;
+}
+
+function maskComments(source: string): string {
+    const chars = source.split("");
+    let lineComment = false;
+    let blockComment = false;
+    for (let index = 0; index < chars.length; index++) {
+        const character = source[index];
+        const next = source[index + 1];
+        if (lineComment) {
+            if (character === "\n") lineComment = false;
+            else chars[index] = " ";
+            continue;
+        }
+        if (blockComment) {
+            if (character === "*" && next === "/") {
+                chars[index] = " ";
+                chars[index + 1] = " ";
+                blockComment = false;
+                index++;
+            } else if (character !== "\n" && character !== "\r") chars[index] = " ";
+            continue;
+        }
+        if (character === "/" && next === "/") {
+            chars[index] = " ";
+            chars[index + 1] = " ";
+            lineComment = true;
+            index++;
+        } else if (character === "/" && next === "*") {
+            chars[index] = " ";
+            chars[index + 1] = " ";
+            blockComment = true;
+            index++;
+        }
+    }
+    return chars.join("");
+}
+
+function parseStructUniformAccesses(
+    source: string,
+    definitions: Map<string, StructDefinition>,
+    roots: ValueStructUniformRoot[],
+): ParsedStructUniformAccess[] {
+    const masked = maskComments(source);
+    const accesses: ParsedStructUniformAccess[] = [];
+    for (const root of roots) {
+        const pattern = new RegExp(`\\b${escapeRegExp(root.name)}\\b`, "g");
+        for (let match = pattern.exec(masked); match !== null; match = pattern.exec(masked)) {
+            const previous = skipWhitespace(masked, match.index) - 1;
+            if (previous >= 0 && masked[previous] === ".") continue;
+            let cursor = match.index + root.name.length;
+            let currentType = root.glslType;
+            const fields: StructField[] = [];
+            const selectionIndices: Array<{ expression: string, size: number }> = [];
+            let terminalArrayIndex: { expression: string, size: number } | undefined;
+            if (root.isArray) {
+                const bracket = parseBracketExpression(masked, cursor);
+                if (!bracket || bracket.expression.length === 0) continue;
+                selectionIndices.push({ expression: bracket.expression, size: root.size });
+                cursor = bracket.end;
+            }
+            let valid = true;
+            while (!VALUE_TYPES.has(currentType)) {
+                const definition = definitions.get(currentType);
+                cursor = skipWhitespace(masked, cursor);
+                if (!definition || masked[cursor] !== ".") {
+                    valid = false;
+                    break;
+                }
+                cursor = skipWhitespace(masked, cursor + 1);
+                const fieldMatch = /^[A-Za-z_]\w*/.exec(masked.slice(cursor));
+                if (!fieldMatch) {
+                    valid = false;
+                    break;
+                }
+                const field = definition.fields.find((candidate) => candidate.name === fieldMatch[0]);
+                if (!field) {
+                    valid = false;
+                    break;
+                }
+                fields.push(field);
+                cursor += field.name.length;
+                if (field.isArray) {
+                    const bracket = parseBracketExpression(masked, cursor);
+                    if (!bracket || bracket.expression.length === 0) {
+                        valid = false;
+                        break;
+                    }
+                    const expression = bracket.expression;
+                    if (VALUE_TYPES.has(field.glslType)) {
+                        terminalArrayIndex = { expression, size: field.size };
+                    } else {
+                        selectionIndices.push({ expression, size: field.size });
+                    }
+                    cursor = bracket.end;
+                }
+                currentType = field.glslType;
+            }
+            if (!valid || !VALUE_TYPES.has(currentType) || fields.length === 0) continue;
+            accesses.push({
+                start: match.index,
+                end: cursor,
+                root,
+                fields,
+                glslType: currentType,
+                selectionIndices,
+                terminalArrayIndex,
+            });
+        }
+    }
+    return accesses.sort((left, right) => left.start - right.start || right.end - left.end);
+}
+
+function accessLeafSourceName(access: ParsedStructUniformAccess, indices: number[]): string {
+    let path = access.root.name;
+    let selection = 0;
+    if (access.root.isArray) path += `[${indices[selection++]}]`;
+    for (const field of access.fields) {
+        path += `.${field.name}`;
+        if (field.isArray && !VALUE_TYPES.has(field.glslType)) {
+            path += `[${indices[selection++]}]`;
+        }
+    }
+    return path;
+}
+
+function enumerateSelectionIndices(sizes: number[]): number[][] {
+    const values: number[][] = [];
+    const visit = (dimension: number, current: number[]) => {
+        if (dimension === sizes.length) {
+            values.push([...current]);
+            return;
+        }
+        for (let value = 0; value < sizes[dimension]; value++) {
+            current.push(value);
+            visit(dimension + 1, current);
+            current.pop();
+        }
+    };
+    visit(0, []);
+    return values;
+}
+
+function isLiteralArrayIndex(expression: string): boolean {
+    return /^\s*\d+\s*$/.test(expression);
 }
 
 export function planValueStructUniforms(rawSource: string): ValueStructUniformPlan {
@@ -190,9 +455,17 @@ export function planValueStructUniforms(rawSource: string): ValueStructUniformPl
             expand(root.name, root.glslType, root.name);
         }
     }
+    const dynamicallySelectedLeaves = new Set<string>();
+    for (const access of parseStructUniformAccesses(body, definitions, roots)) {
+        if (!access.selectionIndices.some((index) => !isLiteralArrayIndex(index.expression))) continue;
+        for (const indices of enumerateSelectionIndices(access.selectionIndices.map((index) => index.size))) {
+            dynamicallySelectedLeaves.add(accessLeafSourceName(access, indices));
+        }
+    }
     const leaves = allLeaves.filter((leaf) => {
         const root = roots.find((item) => item.name === leaf.rootName);
-        return !!root && (root.aggregateRead || body.includes(leaf.sourceName) ||
+        return !!root && (root.aggregateRead || dynamicallySelectedLeaves.has(leaf.sourceName) ||
+            body.includes(leaf.sourceName) ||
             aggregates.some((aggregate) => leaf.sourceName.startsWith(`${aggregate.sourceName}.`)));
     });
     return { definitions, roots, leaves, aggregates };
@@ -222,15 +495,88 @@ function constructorFor(
     return `${glslType}(${args.join(", ")})`;
 }
 
+export function rewriteDynamicStructUniformReads(
+    source: string,
+    plan: ValueStructUniformPlan,
+): DynamicStructUniformRewrite {
+    const leafBySourceName = new Map(plan.leaves.map((leaf) => [leaf.sourceName, leaf]));
+    const replacements: Array<{ start: number, end: number, text: string }> = [];
+    let coveredUntil = -1;
+    for (const access of parseStructUniformAccesses(source, plan.definitions, plan.roots)) {
+        if (access.start < coveredUntil ||
+            !access.selectionIndices.some((index) => !isLiteralArrayIndex(index.expression))) {
+            continue;
+        }
+        const selectionSizes = access.selectionIndices.map((index) => index.size);
+        const indexSets = enumerateSelectionIndices(selectionSizes);
+        const values: string[] = [];
+        for (const indices of indexSets) {
+            const leaf = leafBySourceName.get(accessLeafSourceName(access, indices));
+            if (!leaf) {
+                values.length = 0;
+                break;
+            }
+            if (access.terminalArrayIndex) {
+                for (let index = 0; index < access.terminalArrayIndex.size; index++) {
+                    values.push(`${leaf.name}[${index}]`);
+                }
+            } else {
+                values.push(leaf.name);
+            }
+        }
+        if (values.length === 0) continue;
+        const dimensions = [
+            ...access.selectionIndices,
+            ...(access.terminalArrayIndex ? [access.terminalArrayIndex] : []),
+        ];
+        const linearTerms = dimensions.map((dimension, index) => {
+            const stride = dimensions.slice(index + 1)
+                .reduce((product, later) => product * later.size, 1);
+            const expression = `(${dimension.expression})`;
+            return stride === 1 ? expression : `${expression} * ${stride}`;
+        });
+        const linearIndex = linearTerms.join(" + ");
+        replacements.push({
+            start: access.start,
+            end: access.end,
+            text: `${access.glslType}[${values.length}](${values.join(", ")})[${linearIndex}]`,
+        });
+        coveredUntil = access.end;
+    }
+    let out = source;
+    for (const replacement of replacements.sort((left, right) => right.start - left.start)) {
+        out = out.slice(0, replacement.start) + replacement.text + out.slice(replacement.end);
+    }
+    return {
+        source: out,
+        helpers: [],
+    };
+}
+
+function rewriteOutsideStructDefinitions(
+    source: string,
+    rewrite: (segment: string) => string,
+): string {
+    const structPattern = /\bstruct\s+[A-Za-z_]\w*\s*\{[\s\S]*?\}\s*;/g;
+    let result = "";
+    let cursor = 0;
+    for (let match = structPattern.exec(source); match !== null; match = structPattern.exec(source)) {
+        result += rewrite(source.slice(cursor, match.index));
+        result += match[0];
+        cursor = structPattern.lastIndex;
+    }
+    return result + rewrite(source.slice(cursor));
+}
+
 export function rewriteStructUniformAggregateReads(source: string, plan: ValueStructUniformPlan): string {
     let out = source;
     for (const aggregate of [...plan.aggregates].sort((left, right) => right.sourceName.length - left.sourceName.length)) {
         const constructor = constructorFor(plan, aggregate.glslType, aggregate.sourceName);
         if (!constructor) continue;
-        out = out.replace(
+        out = rewriteOutsideStructDefinitions(out, (segment) => segment.replace(
             new RegExp(`(^|[^A-Za-z0-9_])${escapeRegExp(aggregate.sourceName)}(?![A-Za-z0-9_])(?!\\s*[.\\[])`, "gm"),
             (_match, prefix) => `${prefix}${constructor}`,
-        );
+        ));
     }
     return out;
 }

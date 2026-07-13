@@ -40,7 +40,7 @@ interface SamplerStructFunctionLowering {
     params: SamplerStructFunctionParam[];
 }
 
-const SAMPLER_TYPE_PATTERN = /^[iu]?sampler(?:2D|Cube|2DArray|3D)$/;
+const SAMPLER_TYPE_PATTERN = /^(?:[iu]?sampler(?:2D|Cube|2DArray|3D)|sampler(?:2D|Cube|2DArray)Shadow)$/;
 const STRUCT_FUNCTION_SIGNATURE = /((?:^|[;\n{}])\s*(?:[A-Za-z_]\w*\s+)+([A-Za-z_]\w*)\s*)\(([^()]*)\)(\s*[;{])/gm;
 
 function escapeRegExp(value: string): string {
@@ -48,7 +48,28 @@ function escapeRegExp(value: string): string {
 }
 
 function sanitizeResourceName(name: string): string {
-    return name.replace(/[^A-Za-z0-9_]/g, "_").replace(/_+$/g, "");
+    return name.replace(/[^A-Za-z0-9_]/g, "_").replace(/_+/g, "_").replace(/_+$/g, "");
+}
+
+export function replaceGlslSourcePath(source: string, from: string, to: string): string {
+    if (/^[A-Za-z_]\w*$/.test(from)) {
+        return source.replace(new RegExp(`\\b${escapeRegExp(from)}\\b`, "g"), to);
+    }
+    let pattern = "";
+    let cursor = 0;
+    const token = /([A-Za-z_]\w*)|\.\s*|\[\s*([^\]]+?)\s*\]/g;
+    for (let match = token.exec(from); match !== null; match = token.exec(from)) {
+        if (match.index !== cursor) return source;
+        if (match[1]) pattern += escapeRegExp(match[1]);
+        else if (match[0].trimStart().startsWith(".")) pattern += "\\s*\\.\\s*";
+        else pattern += `\\s*\\[\\s*${escapeRegExp(match[2].trim())}\\s*\\]`;
+        cursor = token.lastIndex;
+    }
+    if (cursor !== from.length || !pattern) return source;
+    return source.replace(
+        new RegExp(`(^|[^A-Za-z0-9_])${pattern}(?=$|[^A-Za-z0-9_])`, "g"),
+        (_match, prefix) => `${prefix}${to}`,
+    );
 }
 
 function parseSamplerOnlyStructs(source: string): Map<string, SamplerStructDefinition> {
@@ -264,6 +285,45 @@ function splitTopLevelArguments(source: string): string[] {
     }
     args.push(source.slice(start).trim());
     return args;
+}
+
+export function lowerTexelFetchOffsetCalls(
+    source: string,
+    samplers: Array<{ name: string, glsl_type: string }>,
+): string {
+    const samplerTypes = new Map(samplers.map((sampler) => [sampler.name, sampler.glsl_type]));
+    const helpers = new Set<string>();
+    let result = "";
+    let cursor = 0;
+    const call = /\btexelFetchOffset\s*\(/g;
+    for (let match = call.exec(source); match !== null; match = call.exec(source)) {
+        const openParen = call.lastIndex - 1;
+        const closeParen = findMatchingParen(source, openParen);
+        if (closeParen < 0) break;
+        const args = splitTopLevelArguments(source.slice(openParen + 1, closeParen));
+        const samplerType = samplerTypes.get(args[0]?.trim());
+        let helper = "";
+        if (samplerType === "sampler2D" || samplerType === "isampler2D" || samplerType === "usampler2D") {
+            helper = "_hyd_texel_fetch_offset_2d";
+            helpers.add("ivec2 _hyd_texel_fetch_offset_2d(ivec2 coord, ivec2 offset) { return coord + offset; }");
+        } else if (samplerType === "sampler3D" || samplerType === "isampler3D" || samplerType === "usampler3D") {
+            helper = "_hyd_texel_fetch_offset_3d";
+            helpers.add("ivec3 _hyd_texel_fetch_offset_3d(ivec3 coord, ivec3 offset) { return coord + offset; }");
+        } else if (samplerType === "sampler2DArray" || samplerType === "isampler2DArray" || samplerType === "usampler2DArray") {
+            helper = "_hyd_texel_fetch_offset_2d_array";
+            helpers.add("ivec3 _hyd_texel_fetch_offset_2d_array(ivec3 coord, ivec2 offset) { return ivec3(coord.xy + offset, coord.z); }");
+        }
+        if (!helper || args.length !== 4) {
+            call.lastIndex = closeParen + 1;
+            continue;
+        }
+        result += source.slice(cursor, match.index);
+        result += `texelFetch(${args[0]}, ${helper}(${args[1]}, ${args[3]}), ${args[2]})`;
+        cursor = closeParen + 1;
+        call.lastIndex = closeParen + 1;
+    }
+    if (cursor === 0) return source;
+    return `${Array.from(helpers).join("\n")}\n${result}${source.slice(cursor)}`;
 }
 
 function sampleResultType(glslType: string): string {

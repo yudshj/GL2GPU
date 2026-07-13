@@ -159,6 +159,17 @@ function rewriteMatrixArrayUniform(source: string, uniform: NameAndType): string
 
 export function rewriteMatrixArrayUniformReads(source: string, uniforms: NameAndType[]): string {
     let out = source;
+    const matrixArrays = new Map(uniforms
+        .filter((uniform) => glslMatrixDimensions(uniform.glsl_type) && uniform.is_array)
+        .map((uniform) => [uniform.name, uniform]));
+    out = out.replace(/\b([A-Za-z_]\w*)\s*(==|!=)\s*([A-Za-z_]\w*)\b/g, (full, leftName, operator, rightName) => {
+        const left = matrixArrays.get(leftName);
+        const right = matrixArrays.get(rightName);
+        if (!left || !right || left.glsl_type !== right.glsl_type || left.size !== right.size) return full;
+        const comparisons = Array.from({ length: left.size || 1 }, (_, index) =>
+            `(${matrixArrayLoaderName(left.name)}(${index}) ${operator} ${matrixArrayLoaderName(right.name)}(${index}))`);
+        return `(${comparisons.join(operator === "==" ? " && " : " || ")})`;
+    });
     for (const uniform of uniforms) {
         if (glslMatrixDimensions(uniform.glsl_type) && uniform.is_array) {
             out = rewriteMatrixArrayUniform(out, uniform);

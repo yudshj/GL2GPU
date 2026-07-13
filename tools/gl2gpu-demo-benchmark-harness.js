@@ -61,11 +61,15 @@ const fpsThreshold = Number(argv.get("threshold") || 0.90);
 const captureScreenshots = argv.get("screenshots") !== "false";
 const captureShaders = argv.get("capture-shaders") === "true";
 const captureCpuProfile = argv.get("cpu-profile") === "true";
+const captureRuntimeState = argv.get("capture-runtime-state") === "true";
 const staticSamplerOriginVariants = argv.has("static-sampler-origin-variants")
   ? argv.get("static-sampler-origin-variants") !== "false"
   : null;
 const optimizeTintWgsl = argv.has("optimize-tint-wgsl")
   ? argv.get("optimize-tint-wgsl") !== "false"
+  : null;
+const contextAntialias = argv.has("context-antialias")
+  ? argv.get("context-antialias") !== "false"
   : null;
 
 function parseList(value) {
@@ -275,6 +279,13 @@ async function startServer(mode) {
         return;
       }
 
+      if (contextAntialias !== null && type.startsWith("text/javascript")) {
+        const source = buffer.toString("utf8");
+        buffer = Buffer.from(source.replace(
+          /\{\s*preserveDrawingBuffer\s*:\s*true\s*\}/g,
+          `{ antialias: ${contextAntialias}, preserveDrawingBuffer: true }`,
+        ));
+      }
       sendBuffer(response, 200, buffer, type);
     } catch (error) {
       const message = error instanceof Error ? error.stack || error.message : String(error);
@@ -654,6 +665,52 @@ async function runTrial(browser, benchmark, mode, trial) {
     });
   }
   const shaderCaptureFile = captureShaders ? writeShaderCaptures(mode, benchmark, trial, shaderCaptures) : null;
+  const runtimeState = captureRuntimeState ? await page.evaluate(() => {
+    const stage = window.a;
+    const gl = stage && stage._gl;
+    if (!gl) return null;
+    const uniformNames = ["Scale", "Time", "OffsetX", "OffsetY", "Scalar", "ScalarOffset"];
+    const uniforms = {};
+    for (const name of uniformNames) {
+      const location = stage[`_u${name}`];
+      if (!location) continue;
+      uniforms[name] = {
+        name: location.name,
+        type: location.webgl_type,
+        offset: location.offset,
+        wordOffset: location.wordOffset,
+        value: location.float32View?.[location.wordOffset],
+        writableValue: location.writeFloat32View?.[location.wordOffset],
+      };
+    }
+    const attributes = {};
+    for (const name of ["Position", "Color"]) {
+      const location = stage[`_a${name}`];
+      if (!Number.isInteger(location) || location < 0) continue;
+      const buffer = gl.getVertexAttrib(location, gl.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING);
+      let shadowPrefix = null;
+      if (buffer?.shadowData instanceof Uint8Array) {
+        const length = Math.min(16, Math.floor(buffer.shadowData.byteLength / 4));
+        shadowPrefix = Array.from(new Float32Array(
+          buffer.shadowData.buffer,
+          buffer.shadowData.byteOffset,
+          length,
+        ));
+      }
+      attributes[name] = {
+        location,
+        enabled: gl.getVertexAttrib(location, gl.VERTEX_ATTRIB_ARRAY_ENABLED),
+        size: gl.getVertexAttrib(location, gl.VERTEX_ATTRIB_ARRAY_SIZE),
+        type: gl.getVertexAttrib(location, gl.VERTEX_ATTRIB_ARRAY_TYPE),
+        normalized: gl.getVertexAttrib(location, gl.VERTEX_ATTRIB_ARRAY_NORMALIZED),
+        stride: gl.getVertexAttrib(location, gl.VERTEX_ATTRIB_ARRAY_STRIDE),
+        offset: gl.getVertexAttribOffset(location, gl.VERTEX_ATTRIB_ARRAY_POINTER),
+        bufferSize: buffer?.webglSize,
+        shadowPrefix,
+      };
+    }
+    return { uniforms, attributes };
+  }).catch((error) => ({ error: error.message || String(error) })) : null;
 
   await page.close().catch(() => {});
   await context.close().catch(() => {});
@@ -693,6 +750,7 @@ async function runTrial(browser, benchmark, mode, trial) {
     shaderCaptureFile,
     shaderCaptureCount: shaderCaptures.length,
     cpuProfileFile,
+    runtimeState,
   };
 }
 
@@ -910,8 +968,10 @@ async function main() {
     tintVariants: Object.fromEntries(tintVariantRoots),
     captureShaders,
     captureCpuProfile,
+    captureRuntimeState,
     staticSamplerOriginVariants,
     optimizeTintWgsl,
+    contextAntialias,
     fpsThreshold,
     rmseThreshold,
     summary,

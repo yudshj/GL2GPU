@@ -1,4 +1,9 @@
-import type { InitShaderInfoType } from "./shaderDB";
+import type { InitShaderInfoType, NameAndType } from "./shaderDB";
+
+export function wgslUniformMemberDeclaration(uniform: NameAndType): string {
+    const attributes = uniform.is_array ? "@align(16) " : "";
+    return `${attributes}${uniform.name}: ${uniform.wgsl_type},`;
+}
 
 function escapeRegExp(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -35,11 +40,47 @@ static_assert static_cast std subroutine super target template this thread_local
 typename typeof union unless unorm unsafe unsized use using varying virtual volatile wgsl where with writeonly yield
 `.trim().split(/\s+/));
 
+const WGSL_LANGUAGE_KEYWORDS = new Set(`
+alias break case const const_assert continue continuing default diagnostic discard else enable false fn for if let
+loop override requires return struct switch true var while
+`.trim().split(/\s+/));
+
 export function isReservedWgslIdentifier(name: string): boolean {
     return WGSL_RESERVED_IDENTIFIERS.has(name);
 }
 
 export function renameReservedWgslIdentifiers(wgsl: string): string {
+    const memberReplacements = new Map<string, string>();
+    const structs = Array.from(parseStructs(wgsl).values()).sort((a, b) => b.start - a.start);
+    for (const struct of structs) {
+        for (const field of struct.fields) {
+            if (!WGSL_LANGUAGE_KEYWORDS.has(field.name) || memberReplacements.has(field.name)) continue;
+            let replacement = `${field.name}_`;
+            while (new RegExp(`\\b${escapeRegExp(replacement)}\\b`).test(wgsl)) replacement += "_";
+            memberReplacements.set(field.name, replacement);
+        }
+    }
+
+    let out = wgsl;
+    for (const struct of structs) {
+        let declaration = out.slice(struct.start, struct.end);
+        for (const field of struct.fields) {
+            const replacement = memberReplacements.get(field.name);
+            if (!replacement) continue;
+            declaration = declaration.replace(
+                new RegExp(`\\b${escapeRegExp(field.name)}\\s*(?=:)`, "g"),
+                replacement,
+            );
+        }
+        out = out.slice(0, struct.start) + declaration + out.slice(struct.end);
+    }
+    for (const [name, replacement] of memberReplacements) {
+        out = out.replace(
+            new RegExp(`(\\.\\s*)${escapeRegExp(name)}\\b`, "g"),
+            `$1${replacement}`,
+        );
+    }
+
     const declaredNames = new Set<string>();
     const declarationPatterns = [
         /\b(?:alias|const|let|override|struct|fn)\s+([A-Za-z_]\w*)/g,
@@ -47,12 +88,11 @@ export function renameReservedWgslIdentifiers(wgsl: string): string {
         /(?:^|[({,])\s*(?:@[A-Za-z_]\w*(?:\([^)]*\))?\s*)*([A-Za-z_]\w*)\s*:/gm,
     ];
     for (const pattern of declarationPatterns) {
-        for (let match = pattern.exec(wgsl); match !== null; match = pattern.exec(wgsl)) {
+        for (let match = pattern.exec(out); match !== null; match = pattern.exec(out)) {
             if (WGSL_RESERVED_IDENTIFIERS.has(match[1])) declaredNames.add(match[1]);
         }
     }
 
-    let out = wgsl;
     for (const name of declaredNames) {
         let replacement = `${name}_`;
         while (new RegExp(`\\b${escapeRegExp(replacement)}\\b`).test(out)) replacement += "_";
@@ -61,8 +101,16 @@ export function renameReservedWgslIdentifiers(wgsl: string): string {
     return out;
 }
 
-export function wgslUniformVariableNames(source: string): string[] {
+export function wgslUniformVariableNames(source: string, bindings?: ReadonlySet<number>): string[] {
     const names: string[] = [];
+    if (bindings) {
+        const attributedPattern = /((?:(?:@group|@binding)\([^)]*\)\s*)+)var\s*<\s*uniform\s*>\s+([A-Za-z_]\w*)\s*:/g;
+        for (let match = attributedPattern.exec(source); match !== null; match = attributedPattern.exec(source)) {
+            const binding = /@binding\(\s*(\d+)u?\s*\)/.exec(match[1]);
+            if (binding && bindings.has(Number(binding[1]))) names.push(match[2]);
+        }
+        return names;
+    }
     const pattern = /\bvar\s*<\s*uniform\s*>\s+([A-Za-z_]\w*)\s*:/g;
     for (let match = pattern.exec(source); match !== null; match = pattern.exec(source)) {
         names.push(match[1]);
@@ -241,8 +289,16 @@ function parseAliases(wgsl: string): Map<string, ParsedAlias> {
     return aliases;
 }
 
-function uniformStructNames(wgsl: string): Set<string> {
+function uniformStructNames(wgsl: string, bindings?: ReadonlySet<number>): Set<string> {
     const names = new Set<string>();
+    if (bindings) {
+        const attributedRegex = /((?:(?:@group|@binding)\([^)]*\)\s*)+)var\s*<\s*uniform\s*>\s+[A-Za-z_]\w*\s*:\s*([A-Za-z_]\w*)\s*;/g;
+        for (let match = attributedRegex.exec(wgsl); match !== null; match = attributedRegex.exec(wgsl)) {
+            const binding = /@binding\(\s*(\d+)u?\s*\)/.exec(match[1]);
+            if (binding && bindings.has(Number(binding[1]))) names.add(match[2]);
+        }
+        return names;
+    }
     const uniformVarRegex = /\bvar\s*<\s*uniform\s*>\s+[A-Za-z_]\w*\s*:\s*([A-Za-z_]\w*)\s*;/g;
     for (let match = uniformVarRegex.exec(wgsl); match !== null; match = uniformVarRegex.exec(wgsl)) {
         names.add(match[1]);
@@ -250,7 +306,11 @@ function uniformStructNames(wgsl: string): Set<string> {
     return names;
 }
 
-export function synchronizeTintUniformTypes(wgsl: string, metadata: InitShaderInfoType): string {
+export function synchronizeTintUniformTypes(
+    wgsl: string,
+    metadata: InitShaderInfoType,
+    bindings?: ReadonlySet<number>,
+): string {
     if (metadata.uniforms.length === 0) return wgsl;
     const structs = parseStructs(wgsl);
     const aliases = parseAliases(wgsl);
@@ -286,7 +346,7 @@ export function synchronizeTintUniformTypes(wgsl: string, metadata: InitShaderIn
     });
 
     const tintFields = new Map<string, string>();
-    for (const structName of uniformStructNames(wgsl)) {
+    for (const structName of uniformStructNames(wgsl, bindings)) {
         const uniformStruct = structs.get(structName);
         if (!uniformStruct) continue;
         for (const field of uniformStruct.fields) tintFields.set(field.name, field.type);

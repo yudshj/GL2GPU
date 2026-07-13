@@ -3,7 +3,7 @@ import {
     brandHydWebGlObject,
     // TTurboMode,
 } from "../types";
-import { HydRenderPassCache } from "./hydRenderPassCache";
+import { HydOcclusionQueryAllocation, HydRenderPassCache } from "./hydRenderPassCache";
 import {
     HydGlobalStateHashed,
     HydPixelUnpackState,
@@ -22,25 +22,79 @@ import {
     getVertexFormat,
 } from './hydConstants';
 import { HydShader } from "./hydShader";
-import { HydProgram, ProgramUniformBuffer, ProgramUniformSampler, uniformMatrixDimensions } from "./hydProgram";
-import { HydTexture, packedPixelLayout, textureUploadBytesPerPixel } from "./hydTexture";
-import { HydBuffer } from "./hydBuffer";
-import { FramebufferAttributes, HydFramebuffer } from "./hydFramebuffer";
+import {
+    HydIndexedBufferBinding,
+    HydProgram,
+    ProgramUniformBlock,
+    ProgramUniformBuffer,
+    ProgramUniformReflection,
+    ProgramUniformSampler,
+    ProgramTransformFeedbackVarying,
+    uniformMatrixDimensions,
+} from "./hydProgram";
+import {
+    externalVideoFrameDisplayExtent,
+    HydTexture,
+    packedPixelLayout,
+    packedPixelLayout3D,
+    textureUploadBytesPerPixel,
+} from "./hydTexture";
+import { HydBuffer, physicalWebGlBufferSize } from "./hydBuffer";
+import { HydSampler } from "./hydSampler";
+import {
+    HydTransformFeedback,
+    transformFeedbackOutputVertexCount,
+} from "./hydTransformFeedback";
+import { HydTransformFeedbackExecutor, TransformFeedbackDraw } from "./hydTransformFeedbackExecutor";
+import { HydOcclusionQuerySegment, HydQuery } from "./hydQuery";
+import { HydSync } from "./hydSync";
+import { FramebufferAttributes, HydFramebuffer, webGlInternalFormatColorBits } from "./hydFramebuffer";
 import TypedArray = NodeJS.TypedArray;
 import { hydWebGLConstants } from "./hydWebGLConstants";
 import { ShaderTranslator } from "./shaderTranslator";
 import { bridgeGlslDunderIdentifier, bridgeGlslDunderIdentifiers } from "./shaderGlslIdentifiers";
+import { hasMisplacedGlslEs3VersionDirective } from "./shaderGlslCompatibility";
+import { scanGlslDeclarations } from "./shaderMetadata";
 
 const NATIVE_CANVAS_GET_CONTEXT = HTMLCanvasElement.prototype.getContext;
 const GL_SRGB_EXT = 0x8C40;
 const GL_SRGB_ALPHA_EXT = 0x8C42;
 const GL_SRGB8_ALPHA8_EXT = 0x8C43;
 const GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING_EXT = 0x8210;
+const GL_COMPRESSED_RGB_ETC1_WEBGL = 0x8D64;
+interface CompressedTextureFormatInfo {
+    gpuFormat: GPUTextureFormat;
+    blockBytes: number;
+    supportsSubImage: boolean;
+}
+const ETC2_COMPRESSED_FORMATS = new Map<GLenum, CompressedTextureFormatInfo>([
+    [0x9270, { gpuFormat: "eac-r11unorm", blockBytes: 8, supportsSubImage: true }],
+    [0x9271, { gpuFormat: "eac-r11snorm", blockBytes: 8, supportsSubImage: true }],
+    [0x9272, { gpuFormat: "eac-rg11unorm", blockBytes: 16, supportsSubImage: true }],
+    [0x9273, { gpuFormat: "eac-rg11snorm", blockBytes: 16, supportsSubImage: true }],
+    [0x9274, { gpuFormat: "etc2-rgb8unorm", blockBytes: 8, supportsSubImage: true }],
+    [0x9275, { gpuFormat: "etc2-rgb8unorm-srgb", blockBytes: 8, supportsSubImage: true }],
+    [0x9276, { gpuFormat: "etc2-rgb8a1unorm", blockBytes: 8, supportsSubImage: true }],
+    [0x9277, { gpuFormat: "etc2-rgb8a1unorm-srgb", blockBytes: 8, supportsSubImage: true }],
+    [0x9278, { gpuFormat: "etc2-rgba8unorm", blockBytes: 16, supportsSubImage: true }],
+    [0x9279, { gpuFormat: "etc2-rgba8unorm-srgb", blockBytes: 16, supportsSubImage: true }],
+]);
+const ETC1_COMPRESSED_FORMAT: CompressedTextureFormatInfo = {
+    gpuFormat: "etc2-rgb8unorm",
+    blockBytes: 8,
+    supportsSubImage: false,
+};
 const RENDER_PASS_DESCRIPTOR_CALLBACK = Symbol("renderPassDescriptorCallback");
 type NativeValidationContext = WebGLRenderingContext | WebGL2RenderingContext;
 let validationWebGl1: NativeValidationContext | null = null;
 let validationWebGl2: NativeValidationContext | null = null;
 const hydCanvasContexts = new WeakMap<HTMLCanvasElement, HydWebGLStatic>();
+const videoDisplayExtents = new WeakMap<HTMLVideoElement, {
+    reportedWidth: number;
+    reportedHeight: number;
+    width: number;
+    height: number;
+}>();
 let canvasReadHooksInstalled = false;
 
 interface StraightAlphaCanvasScratch {
@@ -170,11 +224,94 @@ function nativeValidationContext(type: string): NativeValidationContext | null {
 const frameBeginFuncLst = [];
 const frameEndFuncList = [];
 const VALID_PIXEL_ALIGNMENT = new Set([1, 2, 4, 8]);
+const VALID_WEBGL2_RENDERBUFFER_INTERNAL_FORMATS = new Set<GLenum>([
+    WebGL2RenderingContext.R8, WebGL2RenderingContext.R8_SNORM,
+    WebGL2RenderingContext.RG8, WebGL2RenderingContext.RG8_SNORM,
+    WebGL2RenderingContext.RGB8, WebGL2RenderingContext.RGB8_SNORM,
+    WebGL2RenderingContext.RGB565, WebGL2RenderingContext.RGBA4,
+    WebGL2RenderingContext.RGB5_A1, WebGL2RenderingContext.RGBA8,
+    WebGL2RenderingContext.RGBA8_SNORM, WebGL2RenderingContext.RGB10_A2,
+    WebGL2RenderingContext.RGB10_A2UI, WebGL2RenderingContext.SRGB8,
+    WebGL2RenderingContext.SRGB8_ALPHA8, WebGL2RenderingContext.R16F,
+    WebGL2RenderingContext.RG16F, WebGL2RenderingContext.RGB16F,
+    WebGL2RenderingContext.RGBA16F, WebGL2RenderingContext.R32F,
+    WebGL2RenderingContext.RG32F, WebGL2RenderingContext.RGB32F,
+    WebGL2RenderingContext.RGBA32F, WebGL2RenderingContext.R11F_G11F_B10F,
+    WebGL2RenderingContext.RGB9_E5, WebGL2RenderingContext.R8I,
+    WebGL2RenderingContext.R8UI, WebGL2RenderingContext.R16I,
+    WebGL2RenderingContext.R16UI, WebGL2RenderingContext.R32I,
+    WebGL2RenderingContext.R32UI, WebGL2RenderingContext.RG8I,
+    WebGL2RenderingContext.RG8UI, WebGL2RenderingContext.RG16I,
+    WebGL2RenderingContext.RG16UI, WebGL2RenderingContext.RG32I,
+    WebGL2RenderingContext.RG32UI, WebGL2RenderingContext.RGB8I,
+    WebGL2RenderingContext.RGB8UI, WebGL2RenderingContext.RGB16I,
+    WebGL2RenderingContext.RGB16UI, WebGL2RenderingContext.RGB32I,
+    WebGL2RenderingContext.RGB32UI, WebGL2RenderingContext.RGBA8I,
+    WebGL2RenderingContext.RGBA8UI, WebGL2RenderingContext.RGBA16I,
+    WebGL2RenderingContext.RGBA16UI, WebGL2RenderingContext.RGBA32I,
+    WebGL2RenderingContext.RGBA32UI, WebGL2RenderingContext.RGB,
+    WebGL2RenderingContext.RGBA, WebGL2RenderingContext.DEPTH_STENCIL,
+    WebGL2RenderingContext.DEPTH_COMPONENT16, WebGL2RenderingContext.DEPTH_COMPONENT24,
+    WebGL2RenderingContext.DEPTH_COMPONENT32F, WebGL2RenderingContext.DEPTH24_STENCIL8,
+    WebGL2RenderingContext.DEPTH32F_STENCIL8, WebGL2RenderingContext.STENCIL_INDEX8,
+]);
+const INTEGER_WEBGL2_RENDERBUFFER_INTERNAL_FORMATS = new Set<GLenum>([
+    WebGL2RenderingContext.R8I, WebGL2RenderingContext.R8UI,
+    WebGL2RenderingContext.R16I, WebGL2RenderingContext.R16UI,
+    WebGL2RenderingContext.R32I, WebGL2RenderingContext.R32UI,
+    WebGL2RenderingContext.RG8I, WebGL2RenderingContext.RG8UI,
+    WebGL2RenderingContext.RG16I, WebGL2RenderingContext.RG16UI,
+    WebGL2RenderingContext.RG32I, WebGL2RenderingContext.RG32UI,
+    WebGL2RenderingContext.RGBA8I, WebGL2RenderingContext.RGBA8UI,
+    WebGL2RenderingContext.RGBA16I, WebGL2RenderingContext.RGBA16UI,
+    WebGL2RenderingContext.RGBA32I, WebGL2RenderingContext.RGBA32UI,
+    WebGL2RenderingContext.RGB10_A2UI,
+]);
 const SUPPORTED_EXTENSION_NAMES = [
     "ANGLE_instanced_arrays",
     "OES_element_index_uint",
     "EXT_sRGB",
+    "WEBGL_compressed_texture_etc",
+    "WEBGL_compressed_texture_etc1",
 ] as const;
+const WEBGL2_PROMOTED_EXTENSION_NAMES = new Set<string>([
+    "ANGLE_instanced_arrays",
+    "EXT_blend_minmax",
+    "EXT_frag_depth",
+    "EXT_shader_texture_lod",
+    "EXT_sRGB",
+    "OES_element_index_uint",
+    "OES_standard_derivatives",
+    "OES_texture_float",
+    "OES_texture_half_float",
+    "OES_texture_half_float_linear",
+    "OES_vertex_array_object",
+    "WEBGL_depth_texture",
+    "WEBGL_draw_buffers",
+]);
+const TRANSFORM_FEEDBACK_TYPE_BYTES = new Map<GLenum, number>([
+    [WebGL2RenderingContext.FLOAT, 4],
+    [WebGL2RenderingContext.FLOAT_VEC2, 8],
+    [WebGL2RenderingContext.FLOAT_VEC3, 12],
+    [WebGL2RenderingContext.FLOAT_VEC4, 16],
+    [WebGL2RenderingContext.INT, 4],
+    [WebGL2RenderingContext.INT_VEC2, 8],
+    [WebGL2RenderingContext.INT_VEC3, 12],
+    [WebGL2RenderingContext.INT_VEC4, 16],
+    [WebGL2RenderingContext.UNSIGNED_INT, 4],
+    [WebGL2RenderingContext.UNSIGNED_INT_VEC2, 8],
+    [WebGL2RenderingContext.UNSIGNED_INT_VEC3, 12],
+    [WebGL2RenderingContext.UNSIGNED_INT_VEC4, 16],
+    [WebGL2RenderingContext.FLOAT_MAT2, 16],
+    [WebGL2RenderingContext.FLOAT_MAT3, 36],
+    [WebGL2RenderingContext.FLOAT_MAT4, 64],
+    [WebGL2RenderingContext.FLOAT_MAT2x3, 24],
+    [WebGL2RenderingContext.FLOAT_MAT2x4, 32],
+    [WebGL2RenderingContext.FLOAT_MAT3x2, 24],
+    [WebGL2RenderingContext.FLOAT_MAT3x4, 48],
+    [WebGL2RenderingContext.FLOAT_MAT4x2, 32],
+    [WebGL2RenderingContext.FLOAT_MAT4x3, 48],
+]);
 const SUPPORTED_EXTENSION_BY_LOWER_NAME = new Map(
     SUPPORTED_EXTENSION_NAMES.map((name) => [name.toLowerCase(), name]),
 );
@@ -211,6 +348,13 @@ function clampWebGlUnitFloat(value: number): number {
     return Math.min(1, Math.max(0, value));
 }
 
+function linearToSrgb(value: number): number {
+    const clamped = clampWebGlUnitFloat(value);
+    return clamped <= 0.0031308
+        ? clamped * 12.92
+        : 1.055 * Math.pow(clamped, 1 / 2.4) - 0.055;
+}
+
 function isWebGlIdentifierName(name: string, allowUniformPath: boolean = false): boolean {
     if (!allowUniformPath) return /^[A-Za-z_]\w*$/.test(name);
     return /^[A-Za-z_]\w*(?:(?:\[\d+\])|(?:\.[A-Za-z_]\w*))*$/.test(name);
@@ -243,6 +387,8 @@ function vertexComponentByteSize(type: GLenum): number {
             return 2;
         case WebGL2RenderingContext.INT:
         case WebGL2RenderingContext.UNSIGNED_INT:
+        case WebGL2RenderingContext.INT_2_10_10_10_REV:
+        case WebGL2RenderingContext.UNSIGNED_INT_2_10_10_10_REV:
         case WebGL2RenderingContext.FLOAT:
             return 4;
         default:
@@ -252,6 +398,8 @@ function vertexComponentByteSize(type: GLenum): number {
 
 function vertexFormatNeedsFloatConversion(type: GLenum, size: number, normalized: boolean): boolean {
     if (type === WebGL2RenderingContext.FLOAT) return false;
+    if (type === WebGL2RenderingContext.INT_2_10_10_10_REV ||
+        type === WebGL2RenderingContext.UNSIGNED_INT_2_10_10_10_REV) return true;
     if (type === WebGL2RenderingContext.HALF_FLOAT) return size !== 2 && size !== 4;
     if (type === WebGL2RenderingContext.INT || type === WebGL2RenderingContext.UNSIGNED_INT) return true;
     return !normalized || (size !== 2 && size !== 4);
@@ -336,16 +484,36 @@ export class HydWebGLStatic {
     private shaderTranslator: ShaderTranslator;
     private triangleFanIndexBuffers: Map<number, GPUBuffer> = new Map();
     private lineLoopIndexBuffers: Map<number, GPUBuffer> = new Map();
+    private lastProvokingVertexIndexBuffers: Map<string, { buffer: GPUBuffer, indexCount: number }> = new Map();
     private readonly hydTextureObjects: WeakMap<object, HydTexture> = new WeakMap();
     private readonly hydBufferObjects: WeakMap<object, HydBuffer> = new WeakMap();
     private readonly contextToken: object = {};
     private readonly maskedClearPipelines: Map<string, GPURenderPipeline> = new Map();
     private maskedClearUniformBuffer: GPUBuffer = null;
+    private readonly integerClearPipelines: Map<string, GPURenderPipeline> = new Map();
+    private integerClearUniformBuffer: GPUBuffer = null;
+    private readonly depthStencilClearPipelines: Map<string, GPURenderPipeline> = new Map();
+    private depthStencilClearUniformBuffer: GPUBuffer = null;
+    private readonly colorBlitPipelines: Map<string, GPURenderPipeline> = new Map();
+    private colorBlitUniformBuffer: GPUBuffer = null;
+    private colorBlitLinearSampler: GPUSampler = null;
+    private readonly depthBlitPipelines: Map<string, GPURenderPipeline> = new Map();
+    private readonly stencilCapturePipelines: Map<string, GPURenderPipeline> = new Map();
+    private readonly stencilWritePipelines: Map<string, GPURenderPipeline> = new Map();
+    private readonly stencilZeroPipelines: Map<string, GPURenderPipeline> = new Map();
+    private depthStencilBlitUniformBuffer: GPUBuffer = null;
     private samplerOriginStateVersion: number = 0;
     private gpuViewportDirty: boolean = true;
     private gpuScissorDirty: boolean = true;
     private lastDrawPbv: any = null;
     private pendingReadbacks: Promise<void>[] = [];
+    private framebufferWriteGeneration: number = 0;
+    private normalizedReadPixelsCache: {
+        stateToken: object;
+        writeGeneration: number;
+        key: string;
+        pixels: Uint8Array;
+    } | null = null;
     private activeUniformBuffers: ProgramUniformBuffer[] = [];
     private activeUniformSamplers: ProgramUniformSampler[] = [];
     private currentProgramValid: boolean = false;
@@ -355,13 +523,17 @@ export class HydWebGLStatic {
     private synchronousSnapshotContext: GPUCanvasContext = null;
     private snapshotRgbPipeline: GPURenderPipeline = null;
     private snapshotAlphaPipeline: GPURenderPipeline = null;
+    private readonly integerSnapshotPipelines: Map<string, GPURenderPipeline> = new Map();
+    private packedUnormSnapshotPipeline: GPURenderPipeline = null;
     private exactExternalReadCanvas: HTMLCanvasElement = null;
     private exactExternalReadContext: CanvasRenderingContext2D = null;
     private defaultFramebufferBackingTexture: GPUTexture = null;
     private defaultFramebufferBackingView: GPUTextureView = null;
+    private defaultFramebufferMultisampleTexture: GPUTexture = null;
     private useDefaultFramebufferBacking: boolean = true;
     private defaultFramebufferBackingNeedsPresentation: boolean = false;
     private defaultFramebufferNeedsImplicitClear: boolean = true;
+    private drawingBufferFormatOverride: GLenum | null = null;
     private canvasPresentationPipeline: GPURenderPipeline = null;
     private canvasPresentationBindGroup: GPUBindGroup = null;
     private readonly enabledExtensions: Set<string> = new Set();
@@ -372,10 +544,21 @@ export class HydWebGLStatic {
         instanceCapacity: number,
         hasActivePerVertexAttribute: boolean,
     }> = new WeakMap();
+    private readonly successfulDrawSemanticValidations: WeakMap<object, number> = new WeakMap();
+    private drawSemanticValidationGeneration: number = 0;
     private readonly indexedDrawCache: WeakMap<object, PreparedIndexedDraw[]> = new WeakMap();
     private readonly arrayDrawCache: WeakMap<object, PreparedArrayDraw[]> = new WeakMap();
     private lastIndexedDraw: PreparedIndexedDraw = null;
     private lastArrayDraw: PreparedArrayDraw = null;
+    private readonly uniformBufferBindings: Array<HydIndexedBufferBinding | null> = Array.from({ length: 72 }, () => null);
+    private readonly samplerBindings: Array<HydSampler | null> = Array.from({ length: 16 }, () => null);
+    private readonly defaultTransformFeedback: HydTransformFeedback = new HydTransformFeedback();
+    private readonly transformFeedbackObjects: Set<HydTransformFeedback> = new Set();
+    private transformFeedbackBinding: HydTransformFeedback;
+    private transformFeedbackExecutor: HydTransformFeedbackExecutor | null = null;
+    private readonly queryObjects: Set<HydQuery> = new Set();
+    private readonly activeQueries: Map<GLenum, HydQuery> = new Map();
+    private readonly syncObjects: Set<HydSync> = new Set();
 
     get unpackColorSpace(): "srgb" | "display-p3" {
         return this.hydGlobalState?.miscState.unpackColorSpace || "srgb";
@@ -496,6 +679,216 @@ fn fragmentAlpha(@builtin(position) position : vec4f) -> @location(0) vec4f {
         return canvas.transferToImageBitmap();
     }
 
+    private getIntegerSnapshotPipeline(signed: boolean): GPURenderPipeline {
+        const key = signed ? "sint" : "uint";
+        let pipeline = this.integerSnapshotPipelines.get(key);
+        if (pipeline) return pipeline;
+        const scalar = signed ? "i32" : "u32";
+        const word = signed ? "bitcast<u32>(value[component])" : "value[component]";
+        const module = this.hydDevice.createShaderModule({
+            label: `lossless ${key} texture snapshot shader`,
+            code: `
+@group(0) @binding(0) var source : texture_2d<${scalar}>;
+
+@vertex
+fn vertexMain(@builtin(vertex_index) index : u32) -> @builtin(position) vec4f {
+  let positions = array<vec2f, 3>(
+    vec2f(-1.0, -1.0),
+    vec2f(3.0, -1.0),
+    vec2f(-1.0, 3.0)
+  );
+  return vec4f(positions[index], 0.0, 1.0);
+}
+
+@fragment
+fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
+  let encodedX = u32(position.x);
+  let component = (encodedX / 2u) % 4u;
+  let sourceCoord = vec2i(i32(encodedX / 8u), i32(position.y));
+  let value = textureLoad(source, sourceCoord, 0);
+  let bits = ${word};
+  if ((encodedX & 1u) == 0u) {
+    return vec4f(
+      f32(bits & 255u),
+      f32((bits >> 8u) & 255u),
+      f32((bits >> 16u) & 255u),
+      255.0
+    ) / 255.0;
+  }
+  return vec4f(f32((bits >> 24u) & 255u), 0.0, 0.0, 255.0) / 255.0;
+}
+`,
+        });
+        pipeline = this.hydDevice.createRenderPipeline({
+            label: `lossless ${key} texture snapshot pipeline`,
+            layout: "auto",
+            vertex: { module, entryPoint: "vertexMain" },
+            fragment: { module, entryPoint: "fragmentMain", targets: [{ format: "bgra8unorm" }] },
+            primitive: { topology: "triangle-list" },
+        });
+        this.integerSnapshotPipelines.set(key, pipeline);
+        return pipeline;
+    }
+
+    private snapshotIntegerTexture(
+        texture: GPUTexture,
+        width: number,
+        height: number,
+        signed: boolean,
+        mipLevel: number = 0,
+        layer: number = 0,
+    ): ImageBitmap | null {
+        if (typeof OffscreenCanvas === "undefined") return null;
+        const encodedWidth = width * 8;
+        if (!this.synchronousSnapshotCanvas) {
+            this.synchronousSnapshotCanvas = new OffscreenCanvas(encodedWidth, height);
+            this.synchronousSnapshotContext = this.synchronousSnapshotCanvas.getContext("webgpu") as GPUCanvasContext;
+        }
+        const canvas = this.synchronousSnapshotCanvas;
+        const context = this.synchronousSnapshotContext;
+        if (!context) return null;
+        if (canvas.width !== encodedWidth || canvas.height !== height) {
+            canvas.width = encodedWidth;
+            canvas.height = height;
+        }
+        context.configure({
+            device: this.hydDevice,
+            format: "bgra8unorm",
+            alphaMode: "opaque",
+            usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+        const pipeline = this.getIntegerSnapshotPipeline(signed);
+        const sourceView = texture.createView({
+            dimension: "2d",
+            baseMipLevel: mipLevel,
+            mipLevelCount: 1,
+            baseArrayLayer: layer,
+            arrayLayerCount: 1,
+        });
+        const bindGroup = this.hydDevice.createBindGroup({
+            label: `lossless ${signed ? "sint" : "uint"} texture snapshot bind group`,
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [{ binding: 0, resource: sourceView }],
+        });
+        const encoder = this.hydDevice.createCommandEncoder({ label: "synchronous integer texture snapshot" });
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [{
+                view: context.getCurrentTexture().createView(),
+                loadOp: "clear",
+                storeOp: "store",
+                clearValue: [0, 0, 0, 1],
+            }],
+        });
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.draw(3);
+        pass.end();
+        this.hydDevice.queue.submit([encoder.finish()]);
+        return canvas.transferToImageBitmap();
+    }
+
+    private getPackedUnormSnapshotPipeline(): GPURenderPipeline {
+        if (this.packedUnormSnapshotPipeline) return this.packedUnormSnapshotPipeline;
+        const module = this.hydDevice.createShaderModule({
+            label: "lossless rgb10a2unorm snapshot shader",
+            code: `
+@group(0) @binding(0) var source : texture_2d<f32>;
+
+@vertex
+fn vertexMain(@builtin(vertex_index) index : u32) -> @builtin(position) vec4f {
+  let positions = array<vec2f, 3>(
+    vec2f(-1.0, -1.0),
+    vec2f(3.0, -1.0),
+    vec2f(-1.0, 3.0)
+  );
+  return vec4f(positions[index], 0.0, 1.0);
+}
+
+@fragment
+fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
+  let encodedX = u32(position.x);
+  let sourceCoord = vec2i(i32(encodedX / 2u), i32(position.y));
+  let color = clamp(textureLoad(source, sourceCoord, 0), vec4f(0.0), vec4f(1.0));
+  let value = vec4u(round(color * vec4f(1023.0, 1023.0, 1023.0, 3.0)));
+  let bits = value.r | (value.g << 10u) | (value.b << 20u) | (value.a << 30u);
+  if ((encodedX & 1u) == 0u) {
+    return vec4f(
+      f32(bits & 255u),
+      f32((bits >> 8u) & 255u),
+      f32((bits >> 16u) & 255u),
+      255.0
+    ) / 255.0;
+  }
+  return vec4f(f32((bits >> 24u) & 255u), 0.0, 0.0, 255.0) / 255.0;
+}
+`,
+        });
+        this.packedUnormSnapshotPipeline = this.hydDevice.createRenderPipeline({
+            label: "lossless rgb10a2unorm snapshot pipeline",
+            layout: "auto",
+            vertex: { module, entryPoint: "vertexMain" },
+            fragment: { module, entryPoint: "fragmentMain", targets: [{ format: "bgra8unorm" }] },
+            primitive: { topology: "triangle-list" },
+        });
+        return this.packedUnormSnapshotPipeline;
+    }
+
+    private snapshotPackedUnormTexture(
+        texture: GPUTexture,
+        width: number,
+        height: number,
+        mipLevel: number = 0,
+        layer: number = 0,
+    ): ImageBitmap | null {
+        if (typeof OffscreenCanvas === "undefined") return null;
+        const encodedWidth = width * 2;
+        if (!this.synchronousSnapshotCanvas) {
+            this.synchronousSnapshotCanvas = new OffscreenCanvas(encodedWidth, height);
+            this.synchronousSnapshotContext = this.synchronousSnapshotCanvas.getContext("webgpu") as GPUCanvasContext;
+        }
+        const canvas = this.synchronousSnapshotCanvas;
+        const context = this.synchronousSnapshotContext;
+        if (!context) return null;
+        if (canvas.width !== encodedWidth || canvas.height !== height) {
+            canvas.width = encodedWidth;
+            canvas.height = height;
+        }
+        context.configure({
+            device: this.hydDevice,
+            format: "bgra8unorm",
+            alphaMode: "opaque",
+            usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+        const pipeline = this.getPackedUnormSnapshotPipeline();
+        const sourceView = texture.createView({
+            dimension: "2d",
+            baseMipLevel: mipLevel,
+            mipLevelCount: 1,
+            baseArrayLayer: layer,
+            arrayLayerCount: 1,
+        });
+        const bindGroup = this.hydDevice.createBindGroup({
+            label: "lossless rgb10a2unorm snapshot bind group",
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [{ binding: 0, resource: sourceView }],
+        });
+        const encoder = this.hydDevice.createCommandEncoder({ label: "synchronous rgb10a2unorm snapshot" });
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [{
+                view: context.getCurrentTexture().createView(),
+                loadOp: "clear",
+                storeOp: "store",
+                clearValue: [0, 0, 0, 1],
+            }],
+        });
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.draw(3);
+        pass.end();
+        this.hydDevice.queue.submit([encoder.finish()]);
+        return canvas.transferToImageBitmap();
+    }
+
     increaseOk() {
         // // @ts-ignore
         // if (hydOk !== undefined) { console.log("Replay waited. increase hydOk:", hydOk); hydOk++; }
@@ -521,9 +914,48 @@ fn fragmentAlpha(@builtin(position) position : vec4f) -> @location(0) vec4f {
     }
 
     public get drawingBufferFormat(): GLenum {
+        if (this.drawingBufferFormatOverride !== null) {
+            return this.drawingBufferFormatOverride;
+        }
         return this.hydGlobalState.contextAttributes.alpha === false
             ? WebGL2RenderingContext.RGB8
             : WebGL2RenderingContext.RGBA8;
+    }
+
+    drawingBufferStorage(format: GLenum, width: GLsizei, height: GLsizei) {
+        if (this.hydGlobalState.contextAttributes.alpha === false) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const rgba8 = WebGL2RenderingContext.RGBA8;
+        const srgb8Alpha8 = WebGL2RenderingContext.SRGB8_ALPHA8 || GL_SRGB8_ALPHA8_EXT;
+        if (format === WebGL2RenderingContext.RGBA16F) {
+            if (!this.enabledExtensions.has("EXT_COLOR_BUFFER_FLOAT")) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                return;
+            }
+            // The advertised extension set currently excludes float default buffers.
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (format !== rgba8 && format !== srgb8Alpha8) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        const maxSize = Number(enumToConstant.get(WebGL2RenderingContext.MAX_RENDERBUFFER_SIZE)) || 4096;
+        if (width <= 0 || height <= 0 || width > maxSize || height > maxSize) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+
+        this.discardPendingCanvasCommands();
+        this.drawingBufferFormatOverride = format;
+        this.useDefaultFramebufferBacking = true;
+        this.hydCanvas.width = width;
+        this.hydCanvas.height = height;
+        this.canvasSizeDirty = true;
+        this.updateCanvasSize();
+        this.hydGlobalState.recordTransition("drawingBufferStorage", format, width, height);
     }
 
     private canvasExceedsDrawingBufferLimit(): boolean {
@@ -597,11 +1029,21 @@ fn fragmentAlpha(@builtin(position) position : vec4f) -> @location(0) vec4f {
             : WebGL2RenderingContext.INVALID_VALUE);
     }
 
-    regenerateDS(label: string, format: GPUTextureFormat, compareFunc: GPUCompareFunction, bindPoint: GLenum, width: number, height: number) {
+    regenerateDS(
+        label: string,
+        format: GPUTextureFormat,
+        internalFormat: GLenum,
+        compareFunc: GPUCompareFunction,
+        bindPoint: GLenum,
+        width: number,
+        height: number,
+        sampleCount: number = 1,
+    ) {
         const texture = new HydTexture(this.hydDevice);
         texture.label = label;
         texture.state.compare = compareFunc;
-        texture.renderbufferStorage(format, width, height);
+        texture.renderbufferInternalFormat = internalFormat;
+        texture.renderbufferStorage(format, width, height, sampleCount);
         texture.viewDimension = '2d';
         this.hydGlobalState.defaultFramebuffer.attachments.set(bindPoint, new FramebufferAttributes(bindPoint, undefined, undefined, texture, undefined, WebGL2RenderingContext.RENDERBUFFER));
         this.hydGlobalState.defaultFramebuffer.resetHash();
@@ -639,6 +1081,23 @@ fn fragmentAlpha(@builtin(position) position : vec4f) -> @location(0) vec4f {
         });
         this.defaultFramebufferBackingNeedsPresentation = false;
         this.canvasPresentationBindGroup = null;
+    }
+
+    private createDefaultFramebufferMultisampleTarget(width: number, height: number) {
+        this.defaultFramebufferMultisampleTexture?.destroy();
+        this.defaultFramebufferMultisampleTexture = null;
+        this.hydGlobalState.__canvasMultisampleView = null;
+        if (this.hydGlobalState.contextAttributes.antialias !== true || width <= 0 || height <= 0) return;
+        this.defaultFramebufferMultisampleTexture = this.hydDevice.createTexture({
+            label: `defaultFramebufferMSAA ${width}x${height}`,
+            size: { width, height, depthOrArrayLayers: 1 },
+            sampleCount: 4,
+            format: "bgra8unorm",
+            usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+        this.hydGlobalState.__canvasMultisampleView = this.defaultFramebufferMultisampleTexture.createView({
+            label: `defaultFramebufferMSAAView ${width}x${height}`,
+        });
     }
 
     private getCanvasPresentationPipeline(): GPURenderPipeline {
@@ -787,11 +1246,13 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
     private materializeImplicitDefaultFramebufferClear() {
         if (!this.defaultFramebufferNeedsImplicitClear || !this.defaultFramebufferBackingTexture) return;
         this.defaultFramebufferNeedsImplicitClear = false;
+        const savedDrawFramebuffer = this.hydGlobalState.commonState.drawFramebufferBinding;
         const clearState = this.hydGlobalState.clearState;
         const savedTarget = clearState.target;
         const savedColor = clearState.color;
         const savedDepth = clearState.depth;
         const savedStencil = clearState.stencil;
+        this.hydGlobalState.commonState.drawFramebufferBinding = this.hydGlobalState.defaultFramebuffer;
         clearState.target = WebGL2RenderingContext.COLOR_BUFFER_BIT |
             (this.hydGlobalState.contextAttributes.depth === false ? 0 : WebGL2RenderingContext.DEPTH_BUFFER_BIT) |
             (this.hydGlobalState.contextAttributes.stencil === true ? WebGL2RenderingContext.STENCIL_BUFFER_BIT : 0);
@@ -804,6 +1265,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         clearState.color = savedColor;
         clearState.depth = savedDepth;
         clearState.stencil = savedStencil;
+        this.hydGlobalState.commonState.drawFramebufferBinding = savedDrawFramebuffer;
     }
 
     updateCanvasSize() {
@@ -819,6 +1281,9 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             this.defaultFramebufferBackingTexture = null;
             this.defaultFramebufferBackingView = null;
             this.defaultFramebufferBackingNeedsPresentation = false;
+            this.defaultFramebufferMultisampleTexture?.destroy();
+            this.defaultFramebufferMultisampleTexture = null;
+            this.hydGlobalState.__canvasMultisampleView = null;
             this.canvasPresentationBindGroup = null;
             this.hydGlobalState.__canvasTexture = null;
             this.hydGlobalState.__canvasView = null;
@@ -853,12 +1318,41 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         this.defaultFramebufferBackingView = null;
         this.defaultFramebufferBackingNeedsPresentation = false;
         this.canvasPresentationBindGroup = null;
+        this.createDefaultFramebufferMultisampleTarget(width, height);
 
         this.hydLastCanvasSize = [width, height];
         this.canvasSizeDirty = false;
-        this.regenerateDS(`defaultDepthBuffer ${width} ${height}`, 'depth32float', this.hydGlobalState.depthState.func, WebGL2RenderingContext.DEPTH_ATTACHMENT, width, height);
-        this.regenerateDS(`defaultStencilBuffer ${width} ${height}`, 'stencil8', this.hydGlobalState.stencilState.frontFunc, WebGL2RenderingContext.STENCIL_ATTACHMENT, width, height);
-        this.regenerateDS(`defaultDepthStencilBuffer ${width} ${height}`, 'depth24plus-stencil8', this.hydGlobalState.depthState.func, WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT, width, height);
+        const defaultSampleCount = this.hydGlobalState.contextAttributes.antialias === true ? 4 : 1;
+        this.regenerateDS(
+            `defaultDepthBuffer ${width} ${height}`,
+            "depth32float",
+            WebGL2RenderingContext.DEPTH_COMPONENT24,
+            this.hydGlobalState.depthState.func,
+            WebGL2RenderingContext.DEPTH_ATTACHMENT,
+            width,
+            height,
+            defaultSampleCount,
+        );
+        this.regenerateDS(
+            `defaultStencilBuffer ${width} ${height}`,
+            "stencil8",
+            WebGL2RenderingContext.STENCIL_INDEX8,
+            this.hydGlobalState.stencilState.frontFunc,
+            WebGL2RenderingContext.STENCIL_ATTACHMENT,
+            width,
+            height,
+            defaultSampleCount,
+        );
+        this.regenerateDS(
+            `defaultDepthStencilBuffer ${width} ${height}`,
+            "depth24plus-stencil8",
+            WebGL2RenderingContext.DEPTH24_STENCIL8,
+            this.hydGlobalState.depthState.func,
+            WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT,
+            width,
+            height,
+            defaultSampleCount,
+        );
         if (this.shouldKeepDefaultFramebufferBackingAcrossResize()) {
             this.createDefaultFramebufferBacking();
             this.useDefaultFramebufferBacking = true;
@@ -920,6 +1414,10 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             _device,
             this.hydContextType === "webgl2" ? 2 : 1,
         );
+        this.hydGlobalState.samplerBindings = this.samplerBindings;
+        this.hydGlobalState.uniformBufferBindings = this.uniformBufferBindings;
+        this.transformFeedbackBinding = this.defaultTransformFeedback;
+        this.transformFeedbackObjects.add(this.defaultTransformFeedback);
         if (!this.shouldUseDefaultFramebufferBacking() && this.hydCanvas.width > 0 && this.hydCanvas.height > 0) {
             this.hydGlobalState.__canvasTexture = this.hydGpuctx.getCurrentTexture();
             this.hydGlobalState.__canvasView = this.hydGlobalState.__canvasTexture.createView({ label: 'initial canvasView' });
@@ -931,6 +1429,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
 
         // this.renderPassInfo = new HydRenderPassCache();
         this.hydRpCache = new HydRenderPassCache(this.hydDevice);
+        this.hydRpCache.setOcclusionQueryProvider(() => this.allocateActiveOcclusionQuery());
         this.updateCanvasSize();
         const publicOwnProperties = new Set(["canvas", "drawingBufferColorSpace", "drawingBufferFormat", "unpackColorSpace", ...Object.keys(hydWebGLConstants)]);
         for (const propertyName of Object.keys(this)) {
@@ -1019,6 +1518,12 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             this.setShaderProgramValidationError(program);
             return;
         }
+        index = Number(index) >>> 0;
+        const maxVertexAttribs = enumToConstant.get(WebGL2RenderingContext.MAX_VERTEX_ATTRIBS) || 0;
+        if (index >= maxVertexAttribs) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
         if (name.startsWith("gl_") || name.startsWith("webgl_") || name.startsWith("_webgl_")) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
@@ -1045,15 +1550,11 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
 
         switch (precisionType) {
             case WebGL2RenderingContext.LOW_FLOAT:
-                return brandHydWebGlObject({ rangeMin: 8, rangeMax: 8, precision: 8 }, "shader-precision-format");
             case WebGL2RenderingContext.MEDIUM_FLOAT:
-                return brandHydWebGlObject({ rangeMin: 14, rangeMax: 14, precision: 10 }, "shader-precision-format");
             case WebGL2RenderingContext.HIGH_FLOAT:
                 return brandHydWebGlObject({ rangeMin: 127, rangeMax: 127, precision: 23 }, "shader-precision-format");
             case WebGL2RenderingContext.LOW_INT:
-                return brandHydWebGlObject({ rangeMin: 8, rangeMax: 8, precision: 0 }, "shader-precision-format");
             case WebGL2RenderingContext.MEDIUM_INT:
-                return brandHydWebGlObject({ rangeMin: 16, rangeMax: 16, precision: 0 }, "shader-precision-format");
             case WebGL2RenderingContext.HIGH_INT:
                 return brandHydWebGlObject({ rangeMin: 31, rangeMax: 31, precision: 0 }, "shader-precision-format");
             default:
@@ -1249,6 +1750,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         }
         const hydBuffer = this.lookupBuffer(buffer);
         if (!hydBuffer) return;
+        if (hydBuffer.deleted) return;
         hydBuffer.deleted = true;
         this._der_flush();
         if (this.hydGlobalState.commonState.arrayBufferBinding === hydBuffer) {
@@ -1257,19 +1759,42 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         if (this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding === hydBuffer) {
             this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding = null;
         }
+        for (const attribute of this.hydGlobalState.commonState.vertexArrayBinding.attributes) {
+            if (attribute.buffer === hydBuffer) attribute.buffer = null;
+        }
         if (this.hydGlobalState.commonState.pixelPackBufferBinding === hydBuffer) {
             this.hydGlobalState.commonState.pixelPackBufferBinding = null;
         }
         if (this.hydGlobalState.commonState.pixelUnpackBufferBinding === hydBuffer) {
             this.hydGlobalState.commonState.pixelUnpackBufferBinding = null;
         }
-        for (const attribute of this.hydGlobalState.commonState.vertexArrayBinding.attributes) {
-            if (attribute.buffer === hydBuffer) {
-                attribute.buffer = null;
-                attribute.updateHash();
+        if (this.hydGlobalState.commonState.copyReadBufferBinding === hydBuffer) {
+            this.hydGlobalState.commonState.copyReadBufferBinding = null;
+        }
+        if (this.hydGlobalState.commonState.copyWriteBufferBinding === hydBuffer) {
+            this.hydGlobalState.commonState.copyWriteBufferBinding = null;
+        }
+        if (this.hydGlobalState.commonState.transformFeedbackBufferBinding === hydBuffer) {
+            this.hydGlobalState.commonState.transformFeedbackBufferBinding = null;
+        }
+        if (this.hydGlobalState.commonState.uniformBufferBinding === hydBuffer) {
+            this.hydGlobalState.commonState.uniformBufferBinding = null;
+        }
+        for (let index = 0; index < this.uniformBufferBindings.length; index++) {
+            if (this.uniformBufferBindings[index]?.buffer === hydBuffer) {
+                this.uniformBufferBindings[index] = null;
             }
         }
-        this.hydGlobalState.recordTransition("deleteBuffer", "buffer");
+        this.hydGlobalState.invalidateUniformBufferBindingHash();
+        for (let index = 0; index < this.transformFeedbackBinding.bufferBindings.length; index++) {
+            if (this.transformFeedbackBinding.bufferBindings[index]?.buffer === hydBuffer) {
+                this.transformFeedbackBinding.bufferBindings[index] = null;
+                this.transformFeedbackBinding.writeOffsets[index] = 0;
+            }
+        }
+        // Unbound vertex-array and transform-feedback objects retain their
+        // references until those container bindings are replaced.
+        this.hydGlobalState.recordTransition("deleteBuffer", hydBuffer.hash);
     }
 
     getShaderInfoLog(shader: HydShader) {
@@ -1337,6 +1862,15 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
             return null;
         }
+        if (this.hydContextType === "webgl2") {
+            const maxDrawBuffers = Number(enumToConstant.get(WebGL2RenderingContext.MAX_DRAW_BUFFERS)) || 1;
+            if (pname >= WebGL2RenderingContext.DRAW_BUFFER0 &&
+                pname < WebGL2RenderingContext.DRAW_BUFFER0 + maxDrawBuffers) {
+                const index = pname - WebGL2RenderingContext.DRAW_BUFFER0;
+                return this.hydGlobalState.commonState.drawFramebufferBinding.drawBuffers[index] ??
+                    WebGL2RenderingContext.NONE;
+            }
+        }
         switch (pname) {
             case WebGL2RenderingContext.VERSION:
                 return this.hydContextType === "webgl2"
@@ -1352,6 +1886,19 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                 return "WebGPU";
             case WebGL2RenderingContext.MAX_VIEWPORT_DIMS:
                 return new Int32Array([this.maxDrawingBufferDimension, this.maxDrawingBufferDimension]);
+            case WebGL2RenderingContext.MAX_3D_TEXTURE_SIZE:
+            case WebGL2RenderingContext.MAX_ARRAY_TEXTURE_LAYERS:
+                return this.textureLimit(pname);
+            case WebGL2RenderingContext.COMPRESSED_TEXTURE_FORMATS: {
+                const formats: number[] = [];
+                if (this.enabledExtensions.has("WEBGL_COMPRESSED_TEXTURE_ETC")) {
+                    formats.push(...ETC2_COMPRESSED_FORMATS.keys());
+                }
+                if (this.enabledExtensions.has("WEBGL_COMPRESSED_TEXTURE_ETC1")) {
+                    formats.push(GL_COMPRESSED_RGB_ETC1_WEBGL);
+                }
+                return new Uint32Array(formats);
+            }
         }
         if (enumToConstant.has(pname)) {
             const value = enumToConstant.get(pname);
@@ -1362,6 +1909,33 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                     return this.hydGlobalState.commonState.activeTextureUnit + WebGL2RenderingContext.TEXTURE0;
                 case WebGL2RenderingContext.ARRAY_BUFFER_BINDING:
                     return this.hydGlobalState.commonState.arrayBufferBinding;
+                case WebGL2RenderingContext.COPY_READ_BUFFER_BINDING:
+                    if (this.hydContextType === "webgl2") return this.hydGlobalState.commonState.copyReadBufferBinding;
+                    break;
+                case WebGL2RenderingContext.COPY_WRITE_BUFFER_BINDING:
+                    if (this.hydContextType === "webgl2") return this.hydGlobalState.commonState.copyWriteBufferBinding;
+                    break;
+                case WebGL2RenderingContext.PIXEL_PACK_BUFFER_BINDING:
+                    if (this.hydContextType === "webgl2") return this.hydGlobalState.commonState.pixelPackBufferBinding;
+                    break;
+                case WebGL2RenderingContext.PIXEL_UNPACK_BUFFER_BINDING:
+                    if (this.hydContextType === "webgl2") return this.hydGlobalState.commonState.pixelUnpackBufferBinding;
+                    break;
+                case WebGL2RenderingContext.READ_BUFFER:
+                    if (this.hydContextType === "webgl2") {
+                        return this.hydGlobalState.commonState.readFramebufferBinding.readBuffer;
+                    }
+                    break;
+                case WebGL2RenderingContext.IMPLEMENTATION_COLOR_READ_FORMAT:
+                    return this.implementationColorReadParameters().format;
+                case WebGL2RenderingContext.IMPLEMENTATION_COLOR_READ_TYPE:
+                    return this.implementationColorReadParameters().type;
+                case WebGL2RenderingContext.TRANSFORM_FEEDBACK_BUFFER_BINDING:
+                    if (this.hydContextType === "webgl2") return this.hydGlobalState.commonState.transformFeedbackBufferBinding;
+                    break;
+                case WebGL2RenderingContext.UNIFORM_BUFFER_BINDING:
+                    if (this.hydContextType === "webgl2") return this.hydGlobalState.commonState.uniformBufferBinding;
+                    break;
                 case WebGL2RenderingContext.BLEND:
                     return this.hydGlobalState.blendState.enabled;
                 case WebGL2RenderingContext.BLEND_COLOR:
@@ -1402,10 +1976,29 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                     return this.hydGlobalState.miscState.dither;
                 case WebGL2RenderingContext.CURRENT_PROGRAM:
                     return this.hydGlobalState.commonState.currentProgram;
+                case WebGL2RenderingContext.RASTERIZER_DISCARD:
+                    if (this.hydContextType === "webgl2") return this.hydGlobalState.miscState.rasterizerDiscard;
+                    break;
+                case WebGL2RenderingContext.TRANSFORM_FEEDBACK_BINDING:
+                    if (this.hydContextType === "webgl2") {
+                        return this.transformFeedbackBinding === this.defaultTransformFeedback ? null : this.transformFeedbackBinding;
+                    }
+                    break;
+                case WebGL2RenderingContext.TRANSFORM_FEEDBACK_ACTIVE:
+                    if (this.hydContextType === "webgl2") return this.transformFeedbackBinding.active;
+                    break;
+                case WebGL2RenderingContext.TRANSFORM_FEEDBACK_PAUSED:
+                    if (this.hydContextType === "webgl2") return this.transformFeedbackBinding.paused;
+                    break;
                 case WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER_BINDING:
                     return this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding;
                 case WebGL2RenderingContext.GENERATE_MIPMAP_HINT:
                     return this.hydGlobalState.miscState.generateMipmapHint;
+                case WebGL2RenderingContext.FRAGMENT_SHADER_DERIVATIVE_HINT:
+                    if (this.hydContextType === "webgl2") {
+                        return this.hydGlobalState.miscState.fragmentShaderDerivativeHint;
+                    }
+                    break;
                 case WebGL2RenderingContext.LINE_WIDTH:
                     return this.hydGlobalState.miscState.lineWidth;
                 case WebGL2RenderingContext.POLYGON_OFFSET_FACTOR:
@@ -1432,6 +2025,30 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                     return this.hydGlobalState.miscState.unpackAlignment;
                 case WebGL2RenderingContext.PACK_ALIGNMENT:
                     return this.hydGlobalState.miscState.packAlignment;
+                case WebGL2RenderingContext.UNPACK_ROW_LENGTH:
+                    if (this.hydContextType === "webgl2") return this.hydGlobalState.miscState.unpackRowLength;
+                    break;
+                case WebGL2RenderingContext.UNPACK_IMAGE_HEIGHT:
+                    if (this.hydContextType === "webgl2") return this.hydGlobalState.miscState.unpackImageHeight;
+                    break;
+                case WebGL2RenderingContext.UNPACK_SKIP_PIXELS:
+                    if (this.hydContextType === "webgl2") return this.hydGlobalState.miscState.unpackSkipPixels;
+                    break;
+                case WebGL2RenderingContext.UNPACK_SKIP_ROWS:
+                    if (this.hydContextType === "webgl2") return this.hydGlobalState.miscState.unpackSkipRows;
+                    break;
+                case WebGL2RenderingContext.UNPACK_SKIP_IMAGES:
+                    if (this.hydContextType === "webgl2") return this.hydGlobalState.miscState.unpackSkipImages;
+                    break;
+                case WebGL2RenderingContext.PACK_ROW_LENGTH:
+                    if (this.hydContextType === "webgl2") return this.hydGlobalState.miscState.packRowLength;
+                    break;
+                case WebGL2RenderingContext.PACK_SKIP_PIXELS:
+                    if (this.hydContextType === "webgl2") return this.hydGlobalState.miscState.packSkipPixels;
+                    break;
+                case WebGL2RenderingContext.PACK_SKIP_ROWS:
+                    if (this.hydContextType === "webgl2") return this.hydGlobalState.miscState.packSkipRows;
+                    break;
                 case WebGL2RenderingContext.STENCIL_TEST:
                     return this.hydGlobalState.stencilState.enabled;
                 case WebGL2RenderingContext.STENCIL_WRITEMASK:
@@ -1478,14 +2095,38 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                     return this.hydGlobalState.getTextureUnitBinding(this.hydGlobalState.commonState.activeTextureUnit, "2d");
                 case WebGL2RenderingContext.TEXTURE_BINDING_CUBE_MAP:
                     return this.hydGlobalState.getTextureUnitBinding(this.hydGlobalState.commonState.activeTextureUnit, "cube");
+                case WebGL2RenderingContext.TEXTURE_BINDING_3D:
+                    if (this.hydContextType === "webgl2") {
+                        return this.hydGlobalState.getTextureUnitBinding(this.hydGlobalState.commonState.activeTextureUnit, "3d");
+                    }
+                    break;
+                case WebGL2RenderingContext.TEXTURE_BINDING_2D_ARRAY:
+                    if (this.hydContextType === "webgl2") {
+                        return this.hydGlobalState.getTextureUnitBinding(this.hydGlobalState.commonState.activeTextureUnit, "2d-array");
+                    }
+                    break;
+                case WebGL2RenderingContext.VERTEX_ARRAY_BINDING:
+                    if (this.hydContextType === "webgl2") {
+                        const vertexArray = this.hydGlobalState.commonState.vertexArrayBinding;
+                        return vertexArray === this.hydGlobalState.defaultVertexArrayBinding ? null : vertexArray;
+                    }
+                    break;
+                case WebGL2RenderingContext.SAMPLER_BINDING:
+                    if (this.hydContextType === "webgl2") {
+                        return this.samplerBindings[this.hydGlobalState.commonState.activeTextureUnit];
+                    }
+                    break;
                 case WebGL2RenderingContext.UNPACK_PREMULTIPLY_ALPHA_WEBGL:
                     return this.hydGlobalState.miscState.unpackPremultiplyAlphaWebGL;
                 case WebGL2RenderingContext.UNPACK_COLORSPACE_CONVERSION_WEBGL:
                     return this.hydGlobalState.miscState.unpackColorSpaceConversionWebGL;
                 case WebGL2RenderingContext.SAMPLE_BUFFERS:
-                    return this.hydGlobalState.contextAttributes.antialias ? 1 : 0;
+                    return this.hydGlobalState.getFramebufferSampleCount() > 1 ? 1 : 0;
                 case WebGL2RenderingContext.SAMPLES:
-                    return this.hydGlobalState.contextAttributes.antialias ? 4 : 0;
+                    {
+                        const sampleCount = this.hydGlobalState.getFramebufferSampleCount();
+                        return sampleCount > 1 ? sampleCount : 0;
+                    }
                 case WebGL2RenderingContext.DEPTH_BITS:
                     return this.currentFramebufferBits(pname);
                 case WebGL2RenderingContext.RED_BITS:
@@ -1543,12 +2184,23 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             case WebGL2RenderingContext.ATTACHED_SHADERS:
                 return program.getAttachedShaders().length;
             case WebGL2RenderingContext.ACTIVE_ATTRIBUTES:
-                return program.hydAttributes.length;
+                return program.hydAttributes.length + program.activeBuiltInAttributes.length;
             case WebGL2RenderingContext.ACTIVE_UNIFORMS:
+                if (this.hydContextType === "webgl2" && program.uniformReflection.length > 0) {
+                    return program.uniformReflection.length;
+                }
                 return program.hydUniforms.filter(isVisibleActiveUniform).length +
                     program.hydSamplers.filter((sampler) => sampler.arrayIndex === undefined || sampler.arrayIndex === 0).length;
             case WebGL2RenderingContext.ACTIVE_UNIFORM_BLOCKS:
-                if (this.hydContextType === "webgl2") return 0;
+                if (this.hydContextType === "webgl2") return program.hydUniformBlocks.length;
+                break;
+            case WebGL2RenderingContext.TRANSFORM_FEEDBACK_VARYINGS:
+                if (this.hydContextType === "webgl2") return program.transformFeedbackVaryingNames.length;
+                break;
+            case WebGL2RenderingContext.TRANSFORM_FEEDBACK_BUFFER_MODE:
+                if (this.hydContextType === "webgl2") {
+                    return program.transformFeedbackBufferMode || WebGL2RenderingContext.INTERLEAVED_ATTRIBS;
+                }
                 break;
         }
         this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
@@ -1556,14 +2208,25 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
     }
 
     getSupportedExtensions(): string[] {
-        return [...SUPPORTED_EXTENSION_NAMES];
+        const extensions = this.hydContextType === "webgl2"
+            ? SUPPORTED_EXTENSION_NAMES.filter((name) => !WEBGL2_PROMOTED_EXTENSION_NAMES.has(name))
+            : [...SUPPORTED_EXTENSION_NAMES];
+        return extensions.filter((name) => this.isExtensionAvailable(name));
+    }
+
+    private isExtensionAvailable(name: string): boolean {
+        if (name === "WEBGL_compressed_texture_etc" || name === "WEBGL_compressed_texture_etc1") {
+            return this.hydDevice.features.has("texture-compression-etc2");
+        }
+        return true;
     }
 
     getExtension(extensionName: string) {
         const canonicalName = typeof extensionName === "string"
             ? SUPPORTED_EXTENSION_BY_LOWER_NAME.get(extensionName.toLowerCase())
             : undefined;
-        if (!canonicalName) {
+        if (!canonicalName || !this.isExtensionAvailable(canonicalName) ||
+            (this.hydContextType === "webgl2" && WEBGL2_PROMOTED_EXTENSION_NAMES.has(canonicalName))) {
             return null;
         }
         this.enabledExtensions.add(canonicalName.toUpperCase());
@@ -1586,26 +2249,32 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                 SRGB8_ALPHA8_EXT: GL_SRGB8_ALPHA8_EXT,
                 FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING_EXT: GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING_EXT,
             };
+        } else if (canonicalName === 'WEBGL_compressed_texture_etc') {
+            extension = Object.create({
+                COMPRESSED_R11_EAC: 0x9270,
+                COMPRESSED_SIGNED_R11_EAC: 0x9271,
+                COMPRESSED_RG11_EAC: 0x9272,
+                COMPRESSED_SIGNED_RG11_EAC: 0x9273,
+                COMPRESSED_RGB8_ETC2: 0x9274,
+                COMPRESSED_SRGB8_ETC2: 0x9275,
+                COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2: 0x9276,
+                COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2: 0x9277,
+                COMPRESSED_RGBA8_ETC2_EAC: 0x9278,
+                COMPRESSED_SRGB8_ALPHA8_ETC2_EAC: 0x9279,
+            });
+        } else if (canonicalName === 'WEBGL_compressed_texture_etc1') {
+            extension = Object.create({ COMPRESSED_RGB_ETC1_WEBGL: GL_COMPRESSED_RGB_ETC1_WEBGL });
         }
         if (extension) this.extensionObjects.set(canonicalName, extension);
         return extension;
     }
 
     getBufferParameter(target: GLenum, pname: GLenum) {
-        let buffer: HydBuffer = null;
-        switch (target) {
-            case WebGL2RenderingContext.ARRAY_BUFFER:
-                buffer = this.hydGlobalState.commonState.arrayBufferBinding;
-                break;
-            case WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER:
-                buffer = this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding;
-                break;
-            default:
-                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
-                return null;
-        }
+        const buffer = this.getBoundBufferForTarget(target);
         if (!buffer) {
-            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            if (this.hydGlobalState.glError === WebGL2RenderingContext.NO_ERROR) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            }
             return null;
         }
         switch (pname) {
@@ -1629,7 +2298,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             return null;
         }
         const renderbuffer = this.hydGlobalState.commonState.renderbufferBinding;
-        const format = renderbuffer.format || "";
+        const format = renderbuffer.gpuFormat || "";
         switch (pname) {
             case WebGL2RenderingContext.RENDERBUFFER_WIDTH:
                 return renderbuffer.width;
@@ -1658,6 +2327,25 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         return null;
     }
 
+    getInternalformatParameter(target: GLenum, internalFormat: GLenum, pname: GLenum) {
+        if (this.hydContextType !== "webgl2" || target !== WebGL2RenderingContext.RENDERBUFFER ||
+            pname !== WebGL2RenderingContext.SAMPLES) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return null;
+        }
+        if (!VALID_WEBGL2_RENDERBUFFER_INTERNAL_FORMATS.has(internalFormat)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return null;
+        }
+        if (INTEGER_WEBGL2_RENDERBUFFER_INTERNAL_FORMATS.has(internalFormat) ||
+            !this.renderbufferGpuFormat(internalFormat) ||
+            internalFormat === WebGL2RenderingContext.DEPTH_STENCIL) {
+            return new Int32Array(0);
+        }
+        const maxSamples = Number(enumToConstant.get(WebGL2RenderingContext.MAX_SAMPLES)) || 4;
+        return new Int32Array([maxSamples]);
+    }
+
     getFramebufferAttachmentParameter(target: GLenum, attachment: GLenum, pname: GLenum) {
         const webgl2Target = this.hydContextType === "webgl2" &&
             (target === WebGL2RenderingContext.DRAW_FRAMEBUFFER || target === WebGL2RenderingContext.READ_FRAMEBUFFER);
@@ -1665,7 +2353,48 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
             return null;
         }
-        const maxColorAttachments = this.hydContextType === "webgl2" ? 16 : 1;
+        const framebuffer = this.getFramebufferForTarget(target);
+        if (framebuffer === this.hydGlobalState.defaultFramebuffer) {
+            const isBack = attachment === WebGL2RenderingContext.BACK;
+            const isDepth = this.hydContextType === "webgl2" && attachment === WebGL2RenderingContext.DEPTH;
+            const isStencil = this.hydContextType === "webgl2" && attachment === WebGL2RenderingContext.STENCIL;
+            if (!isBack && !isDepth && !isStencil) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                return null;
+            }
+            const present = isBack ||
+                (isDepth && this.hydGlobalState.contextAttributes.depth !== false) ||
+                (isStencil && this.hydGlobalState.contextAttributes.stencil === true);
+            if (pname === WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE) {
+                return present ? WebGL2RenderingContext.FRAMEBUFFER_DEFAULT : WebGL2RenderingContext.NONE;
+            }
+            if (!present) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return null;
+            }
+            switch (pname) {
+                case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
+                    return WebGL2RenderingContext.LINEAR;
+                case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
+                    return isStencil ? WebGL2RenderingContext.UNSIGNED_INT : WebGL2RenderingContext.UNSIGNED_NORMALIZED;
+                case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_RED_SIZE:
+                case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
+                case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
+                    return isBack ? 8 : 0;
+                case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
+                    return isBack && this.hydGlobalState.contextAttributes.alpha !== false ? 8 : 0;
+                case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
+                    return isDepth ? 24 : 0;
+                case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
+                    return isStencil ? 8 : 0;
+                default:
+                    this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                    return null;
+            }
+        }
+        const maxColorAttachments = this.hydContextType === "webgl2"
+            ? Number(enumToConstant.get(WebGL2RenderingContext.MAX_COLOR_ATTACHMENTS)) || 16
+            : 1;
         const colorAttachment = attachment >= WebGL2RenderingContext.COLOR_ATTACHMENT0 &&
             attachment < WebGL2RenderingContext.COLOR_ATTACHMENT0 + maxColorAttachments;
         if (!colorAttachment &&
@@ -1675,39 +2404,78 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
             return null;
         }
-        const framebuffer = this.getFramebufferForTarget(target);
-        if (framebuffer === this.hydGlobalState.defaultFramebuffer) {
-            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
-            return null;
-        }
-        const attrib = framebuffer.attachments.get(attachment);
+        const attrib = this.framebufferAttachment(framebuffer, attachment);
         if (!attrib) {
             if (pname === WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE) {
                 return WebGL2RenderingContext.NONE;
             }
-            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            if (pname === WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME) {
+                const hasDepthOrStencil = this.framebufferAttachment(
+                    framebuffer, WebGL2RenderingContext.DEPTH_ATTACHMENT) ||
+                    this.framebufferAttachment(framebuffer, WebGL2RenderingContext.STENCIL_ATTACHMENT);
+                if (attachment !== WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT || !hasDepthOrStencil) {
+                    return null;
+                }
+            }
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return null;
+        }
+        if (attachment === WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT &&
+            pname === WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return null;
         }
         switch (pname) {
-            case GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING_EXT:
-                if (!this.enabledExtensions.has("EXT_SRGB")) {
+            case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
+                if (this.hydContextType !== "webgl2" && !this.enabledExtensions.has("EXT_SRGB")) {
                     this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
                     return null;
                 }
                 return attrib.format?.endsWith("-srgb")
-                    ? GL_SRGB_EXT
+                    ? WebGL2RenderingContext.SRGB
                     : WebGL2RenderingContext.LINEAR;
             case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
                 return attrib.objectType;
             case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
                 return attrib.attachment;
+            case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
+                if (attrib.format.endsWith("sint")) return WebGL2RenderingContext.INT;
+                if (attrib.format.endsWith("uint")) return WebGL2RenderingContext.UNSIGNED_INT;
+                if (attrib.format.includes("float")) return WebGL2RenderingContext.FLOAT;
+                return WebGL2RenderingContext.UNSIGNED_NORMALIZED;
+            case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_RED_SIZE:
+                return attrib.colorBits[0];
+            case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
+                return attrib.colorBits[1];
+            case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
+                return attrib.colorBits[2];
+            case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
+                return attrib.colorBits[3];
+            case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
+                return attrib.depthBits;
+            case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
+                return attrib.stencilBits;
             case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
+                if (attrib.objectType !== WebGL2RenderingContext.TEXTURE) {
+                    this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                    return null;
+                }
                 return attrib.level || 0;
             case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
+                if (attrib.objectType !== WebGL2RenderingContext.TEXTURE) {
+                    this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                    return null;
+                }
                 return attrib.face >= WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X &&
                     attrib.face <= WebGL2RenderingContext.TEXTURE_CUBE_MAP_NEGATIVE_Z
                     ? attrib.face
                     : WebGL2RenderingContext.NONE;
+            case WebGL2RenderingContext.FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
+                if (attrib.objectType !== WebGL2RenderingContext.TEXTURE) {
+                    this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                    return null;
+                }
+                return attrib.layer || 0;
             default:
                 this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
                 return null;
@@ -1735,6 +2503,23 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         }
         const attrib = program.hydAttributes.find((item) => item.name === attribName);
         return attrib ? attrib.location : -1;
+    }
+
+    getFragDataLocation(program: HydProgram, name: string) {
+        if (!this.isProgram(program)) {
+            this.setShaderProgramValidationError(program);
+            return -1;
+        }
+        if (!program.linked) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return -1;
+        }
+        if (name.length > 1024 || /[^\x00-\x7f]/.test(name) || !isWebGlIdentifierName(name, true)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return -1;
+        }
+        if (name.startsWith("gl_")) return -1;
+        return program.fragmentOutputLocations.get(name) ?? -1;
     }
 
     getUniformLocation(program: HydProgram, uniformName: string) {
@@ -1801,11 +2586,13 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         location.writeFloat32View = null;
         location.writeInt32View = null;
         location.writeUint32View = null;
+        this.setFloatScalarSetterViews(location, false);
         program.uniformBufferLocations.push(location);
         if (this.currentProgramValid && this.hydGlobalState.commonState.currentProgram === program) {
             location.writeFloat32View = location.float32View;
             location.writeInt32View = location.int32View;
             location.writeUint32View = location.uint32View;
+            this.setFloatScalarSetterViews(location, true);
         }
         return location;
     }
@@ -1865,6 +2652,8 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
     }
 
     getVertexAttrib(index: GLuint, pname: GLenum) {
+        index = Number(index) >>> 0;
+        pname = Number(pname) >>> 0;
         const attributes = this.hydGlobalState.commonState.vertexArrayBinding.attributes;
         if (index < 0 || index >= attributes.length) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
@@ -1873,7 +2662,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         const attribute = attributes[index];
         switch (pname) {
             case WebGL2RenderingContext.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING:
-                return attribute.buffer && !attribute.buffer.deleted ? attribute.buffer : null;
+                return attribute.buffer || null;
             case WebGL2RenderingContext.VERTEX_ATTRIB_ARRAY_ENABLED:
                 return attribute.enabled;
             case WebGL2RenderingContext.VERTEX_ATTRIB_ARRAY_SIZE:
@@ -1885,6 +2674,11 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             case WebGL2RenderingContext.VERTEX_ATTRIB_ARRAY_NORMALIZED:
                 return attribute.normalized;
             case WebGL2RenderingContext.CURRENT_VERTEX_ATTRIB:
+                if (this.hydContextType === "webgl2") {
+                    const valueType = this.hydGlobalState.currentVertexAttribValueTypes[index];
+                    if (valueType === "int") return new Int32Array(this.hydGlobalState.currentVertexAttribValues[index]);
+                    if (valueType === "uint") return new Uint32Array(this.hydGlobalState.currentVertexAttribValues[index]);
+                }
                 return new Float32Array(this.hydGlobalState.currentVertexAttribValues[index]);
             case WebGL2RenderingContext.VERTEX_ATTRIB_ARRAY_DIVISOR:
                 if (this.hydContextType === "webgl2" || this.enabledExtensions.has("ANGLE_INSTANCED_ARRAYS")) {
@@ -1900,6 +2694,8 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
     }
 
     getVertexAttribOffset(index: GLuint, pname: GLenum) {
+        index = Number(index) >>> 0;
+        pname = Number(pname) >>> 0;
         const attributes = this.hydGlobalState.commonState.vertexArrayBinding.attributes;
         if (index < 0 || index >= attributes.length) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
@@ -1939,7 +2735,26 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
     }
 
     isVertexArray(vertexArray: HydVertexArray) {
-        return vertexArray instanceof HydVertexArray && vertexArray.ownerToken === this.contextToken;
+        return vertexArray instanceof HydVertexArray && vertexArray.ownerToken === this.contextToken &&
+            vertexArray.initialized && !vertexArray.deleted;
+    }
+
+    isSampler(sampler: HydSampler) {
+        return sampler instanceof HydSampler && sampler.ownerToken === this.contextToken && !sampler.deleted;
+    }
+
+    isQuery(query: HydQuery | null) {
+        return query instanceof HydQuery && query.ownerToken === this.contextToken &&
+            query.initialized && !query.deleted;
+    }
+
+    isTransformFeedback(transformFeedback: HydTransformFeedback) {
+        return this.isTransformFeedbackObject(transformFeedback) && transformFeedback.initialized;
+    }
+
+    private isTransformFeedbackObject(transformFeedback: HydTransformFeedback | null): transformFeedback is HydTransformFeedback {
+        return transformFeedback instanceof HydTransformFeedback &&
+            transformFeedback.ownerToken === this.contextToken && !transformFeedback.deleted;
     }
 
     polygonOffset(x: number, y: number) {
@@ -1958,7 +2773,9 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
     }
 
     hint(target: GLenum, mode: GLenum) {
-        if (target !== WebGL2RenderingContext.GENERATE_MIPMAP_HINT) {
+        const derivativeHint = this.hydContextType === "webgl2" &&
+            target === WebGL2RenderingContext.FRAGMENT_SHADER_DERIVATIVE_HINT;
+        if (target !== WebGL2RenderingContext.GENERATE_MIPMAP_HINT && !derivativeHint) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
             return;
         }
@@ -1968,7 +2785,8 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
             return;
         }
-        this.hydGlobalState.miscState.generateMipmapHint = mode;
+        if (derivativeHint) this.hydGlobalState.miscState.fragmentShaderDerivativeHint = mode;
+        else this.hydGlobalState.miscState.generateMipmapHint = mode;
         this.hydGlobalState.recordTransition("hint", target, mode);
     }
 
@@ -1984,7 +2802,9 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             return;
         }
         shader.sourceLength = source.length;
-        shader.glsl_shader = source.trim();
+        // WebGL preserves the source exactly. Trimming changes both
+        // getShaderSource() and GLSL ES 3's first-line #version rule.
+        shader.glsl_shader = source;
     }
 
     getShaderSource(shader: HydShader) {
@@ -2000,6 +2820,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             uniform.writeFloat32View = null;
             uniform.writeInt32View = null;
             uniform.writeUint32View = null;
+            this.setFloatScalarSetterViews(uniform, false);
         }
         for (const sampler of this.activeUniformSamplers) {
             sampler.activeForUniformUpdates = false;
@@ -2010,56 +2831,116 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             uniform.writeFloat32View = uniform.float32View;
             uniform.writeInt32View = uniform.int32View;
             uniform.writeUint32View = uniform.uint32View;
+            this.setFloatScalarSetterViews(uniform, true);
         }
         for (const sampler of this.activeUniformSamplers) {
             sampler.activeForUniformUpdates = true;
         }
     }
 
-    uniform1f(pub: ProgramUniformBuffer, x0: number) {
-        if (pub === null) return;
-        const a = pub.writeFloat32View;
-        if (!a) {
-            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
-            return;
-        }
-        a[pub.wordOffset] = x0;
+    private setFloatScalarSetterViews(uniform: ProgramUniformBuffer, active: boolean) {
+        uniform.writeUniform1fFloatView = active && uniform.webgl_type === WebGL2RenderingContext.FLOAT
+            ? uniform.float32View : null;
+        uniform.writeUniform2fFloatView = active && uniform.webgl_type === WebGL2RenderingContext.FLOAT_VEC2
+            ? uniform.float32View : null;
+        uniform.writeUniform3fFloatView = active && uniform.webgl_type === WebGL2RenderingContext.FLOAT_VEC3
+            ? uniform.float32View : null;
+        uniform.writeUniform4fFloatView = active && uniform.webgl_type === WebGL2RenderingContext.FLOAT_VEC4
+            ? uniform.float32View : null;
+        uniform.writeUniform1fBooleanView = active && uniform.webgl_type === WebGL2RenderingContext.BOOL
+            ? uniform.int32View : null;
+        uniform.writeUniform2fBooleanView = active && uniform.webgl_type === WebGL2RenderingContext.BOOL_VEC2
+            ? uniform.int32View : null;
+        uniform.writeUniform3fBooleanView = active && uniform.webgl_type === WebGL2RenderingContext.BOOL_VEC3
+            ? uniform.int32View : null;
+        uniform.writeUniform4fBooleanView = active && uniform.webgl_type === WebGL2RenderingContext.BOOL_VEC4
+            ? uniform.int32View : null;
     }
-    uniform2f(pub: ProgramUniformBuffer, x0: number, x1: number) {
-        if (pub === null) return;
-        const a = pub.writeFloat32View;
-        if (!a) {
+
+    private validateScalarUniformType(
+        uniform: ProgramUniformBuffer | ProgramUniformSampler,
+        expectedType: GLenum,
+        booleanType: GLenum | null,
+    ): uniform is ProgramUniformBuffer {
+        if (!(uniform instanceof ProgramUniformBuffer) ||
+            (uniform.webgl_type !== expectedType && uniform.webgl_type !== booleanType)) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
-            return;
+            return false;
         }
-        const offset = pub.wordOffset;
-        a[offset] = x0;
-        a[offset + 1] = x1;
+        return true;
     }
-    uniform3f(pub: ProgramUniformBuffer, x0: number, x1: number, x2: number) {
-        if (pub === null) return;
-        const a = pub.writeFloat32View;
-        if (!a) {
+
+    private writeBooleanFromFloatScalars(
+        buffer: ProgramUniformBuffer,
+        components: 1 | 2 | 3 | 4,
+        x0: number,
+        x1: number = 0,
+        x2: number = 0,
+        x3: number = 0,
+    ) {
+        const target = components === 1 ? buffer.writeUniform1fBooleanView
+            : components === 2 ? buffer.writeUniform2fBooleanView
+                : components === 3 ? buffer.writeUniform3fBooleanView
+                    : buffer.writeUniform4fBooleanView;
+        if (!target) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
-        const offset = pub.wordOffset;
-        a[offset] = x0;
-        a[offset + 1] = x1;
-        a[offset + 2] = x2;
+        const offset = buffer.wordOffset;
+        target[offset] = x0 !== 0 ? 1 : 0;
+        if (components > 1) target[offset + 1] = x1 !== 0 ? 1 : 0;
+        if (components > 2) target[offset + 2] = x2 !== 0 ? 1 : 0;
+        if (components > 3) target[offset + 3] = x3 !== 0 ? 1 : 0;
     }
-    uniform4f(pub: ProgramUniformBuffer, x0: number, x1: number, x2: number, x3: number) {
+
+    uniform1f(pub: ProgramUniformBuffer | ProgramUniformSampler, x0: number) {
         if (pub === null) return;
-        const a = pub.writeFloat32View;
-        if (!a) {
-            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+        const buffer = pub as ProgramUniformBuffer;
+        const target = buffer.writeUniform1fFloatView;
+        if (target) {
+            target[buffer.wordOffset] = x0;
             return;
         }
-        const offset = pub.wordOffset;
-        a[offset] = x0;
-        a[offset + 1] = x1;
-        a[offset + 2] = x2;
-        a[offset + 3] = x3;
+        this.writeBooleanFromFloatScalars(buffer, 1, x0);
+    }
+    uniform2f(pub: ProgramUniformBuffer | ProgramUniformSampler, x0: number, x1: number) {
+        if (pub === null) return;
+        const buffer = pub as ProgramUniformBuffer;
+        const offset = buffer.wordOffset;
+        const target = buffer.writeUniform2fFloatView;
+        if (target) {
+            target[offset] = x0;
+            target[offset + 1] = x1;
+            return;
+        }
+        this.writeBooleanFromFloatScalars(buffer, 2, x0, x1);
+    }
+    uniform3f(pub: ProgramUniformBuffer | ProgramUniformSampler, x0: number, x1: number, x2: number) {
+        if (pub === null) return;
+        const buffer = pub as ProgramUniformBuffer;
+        const offset = buffer.wordOffset;
+        const target = buffer.writeUniform3fFloatView;
+        if (target) {
+            target[offset] = x0;
+            target[offset + 1] = x1;
+            target[offset + 2] = x2;
+            return;
+        }
+        this.writeBooleanFromFloatScalars(buffer, 3, x0, x1, x2);
+    }
+    uniform4f(pub: ProgramUniformBuffer | ProgramUniformSampler, x0: number, x1: number, x2: number, x3: number) {
+        if (pub === null) return;
+        const buffer = pub as ProgramUniformBuffer;
+        const offset = buffer.wordOffset;
+        const target = buffer.writeUniform4fFloatView;
+        if (target) {
+            target[offset] = x0;
+            target[offset + 1] = x1;
+            target[offset + 2] = x2;
+            target[offset + 3] = x3;
+            return;
+        }
+        this.writeBooleanFromFloatScalars(buffer, 4, x0, x1, x2, x3);
     }
     uniform1i(uniform: ProgramUniformBuffer | ProgramUniformSampler, x0: number) {
         if (uniform === null) return;
@@ -2081,6 +2962,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             }
             return;
         }
+        if (!this.validateScalarUniformType(uniform, WebGL2RenderingContext.INT, WebGL2RenderingContext.BOOL)) return;
         const a = uniform.writeInt32View;
         if (!a) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
@@ -2089,8 +2971,9 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         const offset = uniform.wordOffset;
         a[offset] = x0;
     }
-    uniform2i(pub: ProgramUniformBuffer, x0: number, x1: number) {
+    uniform2i(pub: ProgramUniformBuffer | ProgramUniformSampler, x0: number, x1: number) {
         if (pub === null) return;
+        if (!this.validateScalarUniformType(pub, WebGL2RenderingContext.INT_VEC2, WebGL2RenderingContext.BOOL_VEC2)) return;
         const a = pub.writeInt32View;
         if (!a) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
@@ -2100,8 +2983,9 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         a[offset] = x0;
         a[offset + 1] = x1;
     }
-    uniform3i(pub: ProgramUniformBuffer, x0: number, x1: number, x2: number) {
+    uniform3i(pub: ProgramUniformBuffer | ProgramUniformSampler, x0: number, x1: number, x2: number) {
         if (pub === null) return;
+        if (!this.validateScalarUniformType(pub, WebGL2RenderingContext.INT_VEC3, WebGL2RenderingContext.BOOL_VEC3)) return;
         const a = pub.writeInt32View;
         if (!a) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
@@ -2112,8 +2996,9 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         a[offset + 1] = x1;
         a[offset + 2] = x2;
     }
-    uniform4i(pub: ProgramUniformBuffer, x0: number, x1: number, x2: number, x3: number) {
+    uniform4i(pub: ProgramUniformBuffer | ProgramUniformSampler, x0: number, x1: number, x2: number, x3: number) {
         if (pub === null) return;
+        if (!this.validateScalarUniformType(pub, WebGL2RenderingContext.INT_VEC4, WebGL2RenderingContext.BOOL_VEC4)) return;
         const a = pub.writeInt32View;
         if (!a) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
@@ -2125,50 +3010,58 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         a[offset + 2] = x2;
         a[offset + 3] = x3;
     }
-    uniform1ui(pub: ProgramUniformBuffer, x0: number) {
+    uniform1ui(pub: ProgramUniformBuffer | ProgramUniformSampler, x0: number) {
         if (pub === null) return;
-        const a = pub.writeUint32View;
+        if (!this.validateScalarUniformType(pub, WebGL2RenderingContext.UNSIGNED_INT, WebGL2RenderingContext.BOOL)) return;
+        const writesBoolean = pub.webgl_type === WebGL2RenderingContext.BOOL;
+        const a = writesBoolean ? pub.writeInt32View : pub.writeUint32View;
         if (!a) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
-        a[pub.wordOffset] = x0 >>> 0;
+        a[pub.wordOffset] = writesBoolean ? Number(x0) !== 0 ? 1 : 0 : x0 >>> 0;
     }
-    uniform2ui(pub: ProgramUniformBuffer, x0: number, x1: number) {
+    uniform2ui(pub: ProgramUniformBuffer | ProgramUniformSampler, x0: number, x1: number) {
         if (pub === null) return;
-        const a = pub.writeUint32View;
+        if (!this.validateScalarUniformType(pub, WebGL2RenderingContext.UNSIGNED_INT_VEC2, WebGL2RenderingContext.BOOL_VEC2)) return;
+        const writesBoolean = pub.webgl_type === WebGL2RenderingContext.BOOL_VEC2;
+        const a = writesBoolean ? pub.writeInt32View : pub.writeUint32View;
         if (!a) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
         const offset = pub.wordOffset;
-        a[offset] = x0 >>> 0;
-        a[offset + 1] = x1 >>> 0;
+        a[offset] = writesBoolean ? Number(x0) !== 0 ? 1 : 0 : x0 >>> 0;
+        a[offset + 1] = writesBoolean ? Number(x1) !== 0 ? 1 : 0 : x1 >>> 0;
     }
-    uniform3ui(pub: ProgramUniformBuffer, x0: number, x1: number, x2: number) {
+    uniform3ui(pub: ProgramUniformBuffer | ProgramUniformSampler, x0: number, x1: number, x2: number) {
         if (pub === null) return;
-        const a = pub.writeUint32View;
+        if (!this.validateScalarUniformType(pub, WebGL2RenderingContext.UNSIGNED_INT_VEC3, WebGL2RenderingContext.BOOL_VEC3)) return;
+        const writesBoolean = pub.webgl_type === WebGL2RenderingContext.BOOL_VEC3;
+        const a = writesBoolean ? pub.writeInt32View : pub.writeUint32View;
         if (!a) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
         const offset = pub.wordOffset;
-        a[offset] = x0 >>> 0;
-        a[offset + 1] = x1 >>> 0;
-        a[offset + 2] = x2 >>> 0;
+        a[offset] = writesBoolean ? Number(x0) !== 0 ? 1 : 0 : x0 >>> 0;
+        a[offset + 1] = writesBoolean ? Number(x1) !== 0 ? 1 : 0 : x1 >>> 0;
+        a[offset + 2] = writesBoolean ? Number(x2) !== 0 ? 1 : 0 : x2 >>> 0;
     }
-    uniform4ui(pub: ProgramUniformBuffer, x0: number, x1: number, x2: number, x3: number) {
+    uniform4ui(pub: ProgramUniformBuffer | ProgramUniformSampler, x0: number, x1: number, x2: number, x3: number) {
         if (pub === null) return;
-        const a = pub.writeUint32View;
+        if (!this.validateScalarUniformType(pub, WebGL2RenderingContext.UNSIGNED_INT_VEC4, WebGL2RenderingContext.BOOL_VEC4)) return;
+        const writesBoolean = pub.webgl_type === WebGL2RenderingContext.BOOL_VEC4;
+        const a = writesBoolean ? pub.writeInt32View : pub.writeUint32View;
         if (!a) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
         const offset = pub.wordOffset;
-        a[offset] = x0 >>> 0;
-        a[offset + 1] = x1 >>> 0;
-        a[offset + 2] = x2 >>> 0;
-        a[offset + 3] = x3 >>> 0;
+        a[offset] = writesBoolean ? Number(x0) !== 0 ? 1 : 0 : x0 >>> 0;
+        a[offset + 1] = writesBoolean ? Number(x1) !== 0 ? 1 : 0 : x1 >>> 0;
+        a[offset + 2] = writesBoolean ? Number(x2) !== 0 ? 1 : 0 : x2 >>> 0;
+        a[offset + 3] = writesBoolean ? Number(x3) !== 0 ? 1 : 0 : x3 >>> 0;
     }
 
     private uniformArrayLength(value: ArrayLike<number>): number {
@@ -2178,14 +3071,47 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         return Number((value as any).length);
     }
 
-    private writeFloatUniformArray(pub: ProgramUniformBuffer, value: ArrayLike<number>, components: number, expectedType: GLenum) {
-        const length = this.uniformArrayLength(value);
-        const target = pub.writeFloat32View;
+    private uniformSourceSubrange(
+        value: ArrayLike<number>,
+        srcOffset: GLuint = 0,
+        srcLength: GLuint = 0,
+    ): ArrayLike<number> | null {
+        const totalLength = this.uniformArrayLength(value);
+        const offset = Number(srcOffset) >>> 0;
+        const requestedLength = Number(srcLength) >>> 0;
+        const length = requestedLength === 0 ? totalLength - offset : requestedLength;
+        if (offset > totalLength || length < 0 || length > totalLength - offset) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return null;
+        }
+        if (offset === 0 && length === totalLength) return value;
+        if (ArrayBuffer.isView(value) && typeof (value as any).subarray === "function") {
+            return (value as any).subarray(offset, offset + length);
+        }
+        return Array.prototype.slice.call(value, offset, offset + length);
+    }
+
+    private writeFloatUniformArray(
+        pub: ProgramUniformBuffer,
+        value: ArrayLike<number>,
+        components: number,
+        expectedType: GLenum,
+        srcOffset: GLuint = 0,
+        srcLength: GLuint = 0,
+    ) {
+        const source = this.uniformSourceSubrange(value, srcOffset, srcLength);
+        if (!source) return;
+        const length = this.uniformArrayLength(source);
+        const boolType = components === 1
+            ? WebGL2RenderingContext.BOOL
+            : WebGL2RenderingContext.BOOL_VEC2 + components - 2;
+        const writesBoolean = pub.webgl_type === boolType;
+        const target = writesBoolean ? pub.writeInt32View : pub.writeFloat32View;
         if (!target) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
-        if (pub.webgl_type !== expectedType) {
+        if (pub.webgl_type !== expectedType && !writesBoolean) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
@@ -2203,27 +3129,40 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         const valueCount = elements * components;
         if (elements === 1) {
             const offset = pub.wordOffset;
-            target[offset] = value[0];
-            if (components > 1) target[offset + 1] = value[1];
-            if (components > 2) target[offset + 2] = value[2];
-            if (components > 3) target[offset + 3] = value[3];
+            target[offset] = writesBoolean ? Number(source[0]) !== 0 ? 1 : 0 : source[0];
+            if (components > 1) target[offset + 1] = writesBoolean ? Number(source[1]) !== 0 ? 1 : 0 : source[1];
+            if (components > 2) target[offset + 2] = writesBoolean ? Number(source[2]) !== 0 ? 1 : 0 : source[2];
+            if (components > 3) target[offset + 3] = writesBoolean ? Number(source[3]) !== 0 ? 1 : 0 : source[3];
             return;
         }
-        if (stride === components && valueCount === length && ArrayBuffer.isView(value)) {
-            target.set(value, pub.wordOffset);
+        if (!writesBoolean && stride === components && valueCount === length && ArrayBuffer.isView(source)) {
+            target.set(source, pub.wordOffset);
             return;
         }
         for (let element = 0; element < elements; element++) {
             const sourceOffset = element * components;
             const targetOffset = pub.wordOffset + element * stride;
             for (let component = 0; component < components; component++) {
-                target[targetOffset + component] = value[sourceOffset + component];
+                const sourceValue = source[sourceOffset + component];
+                target[targetOffset + component] = writesBoolean
+                    ? Number(sourceValue) !== 0 ? 1 : 0
+                    : sourceValue;
             }
         }
     }
 
-    private writeIntUniformArray(pub: ProgramUniformBuffer, value: ArrayLike<number>, components: number, expectedType: GLenum, boolType: GLenum) {
-        const length = this.uniformArrayLength(value);
+    private writeIntUniformArray(
+        pub: ProgramUniformBuffer,
+        value: ArrayLike<number>,
+        components: number,
+        expectedType: GLenum,
+        boolType: GLenum,
+        srcOffset: GLuint = 0,
+        srcLength: GLuint = 0,
+    ) {
+        const source = this.uniformSourceSubrange(value, srcOffset, srcLength);
+        if (!source) return;
+        const length = this.uniformArrayLength(source);
         const target = pub.writeInt32View;
         if (!target) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
@@ -2247,27 +3186,37 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         const valueCount = elements * components;
         if (elements === 1) {
             const offset = pub.wordOffset;
-            target[offset] = value[0];
-            if (components > 1) target[offset + 1] = value[1];
-            if (components > 2) target[offset + 2] = value[2];
-            if (components > 3) target[offset + 3] = value[3];
+            target[offset] = source[0];
+            if (components > 1) target[offset + 1] = source[1];
+            if (components > 2) target[offset + 2] = source[2];
+            if (components > 3) target[offset + 3] = source[3];
             return;
         }
-        if (stride === components && valueCount === length && ArrayBuffer.isView(value)) {
-            target.set(value, pub.wordOffset);
+        if (stride === components && valueCount === length && ArrayBuffer.isView(source)) {
+            target.set(source, pub.wordOffset);
             return;
         }
         for (let element = 0; element < elements; element++) {
             const sourceOffset = element * components;
             const targetOffset = pub.wordOffset + element * stride;
             for (let component = 0; component < components; component++) {
-                target[targetOffset + component] = value[sourceOffset + component];
+                target[targetOffset + component] = source[sourceOffset + component];
             }
         }
     }
 
-    private writeUintUniformArray(pub: ProgramUniformBuffer, value: ArrayLike<number>, components: number, expectedType: GLenum, boolType: GLenum) {
-        const length = this.uniformArrayLength(value);
+    private writeUintUniformArray(
+        pub: ProgramUniformBuffer,
+        value: ArrayLike<number>,
+        components: number,
+        expectedType: GLenum,
+        boolType: GLenum,
+        srcOffset: GLuint = 0,
+        srcLength: GLuint = 0,
+    ) {
+        const source = this.uniformSourceSubrange(value, srcOffset, srcLength);
+        if (!source) return;
+        const length = this.uniformArrayLength(source);
         const target = pub.writeUint32View;
         if (!target) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
@@ -2291,59 +3240,57 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         const valueCount = elements * components;
         if (elements === 1) {
             const offset = pub.wordOffset;
-            target[offset] = value[0] >>> 0;
-            if (components > 1) target[offset + 1] = value[1] >>> 0;
-            if (components > 2) target[offset + 2] = value[2] >>> 0;
-            if (components > 3) target[offset + 3] = value[3] >>> 0;
+            target[offset] = source[0] >>> 0;
+            if (components > 1) target[offset + 1] = source[1] >>> 0;
+            if (components > 2) target[offset + 2] = source[2] >>> 0;
+            if (components > 3) target[offset + 3] = source[3] >>> 0;
             return;
         }
-        if (stride === components && valueCount === length && ArrayBuffer.isView(value)) {
-            target.set(value, pub.wordOffset);
+        if (stride === components && valueCount === length && ArrayBuffer.isView(source)) {
+            target.set(source, pub.wordOffset);
             return;
         }
         for (let element = 0; element < elements; element++) {
             const sourceOffset = element * components;
             const targetOffset = pub.wordOffset + element * stride;
             for (let component = 0; component < components; component++) {
-                target[targetOffset + component] = value[sourceOffset + component] >>> 0;
+                target[targetOffset + component] = source[sourceOffset + component] >>> 0;
             }
         }
     }
 
-    uniform1fv(pub: ProgramUniformBuffer, v: ArrayLike<number>) {
+    uniform1fv(pub: ProgramUniformBuffer, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
         if (pub === null) return;
-        this.writeFloatUniformArray(pub, v, 1, WebGL2RenderingContext.FLOAT);
+        this.writeFloatUniformArray(pub, v, 1, WebGL2RenderingContext.FLOAT, srcOffset, srcLength);
     }
-    uniform2fv(pub: ProgramUniformBuffer, v: ArrayLike<number>) {
+    uniform2fv(pub: ProgramUniformBuffer, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
         if (pub === null) return;
-        this.writeFloatUniformArray(pub, v, 2, WebGL2RenderingContext.FLOAT_VEC2);
+        this.writeFloatUniformArray(pub, v, 2, WebGL2RenderingContext.FLOAT_VEC2, srcOffset, srcLength);
     }
-    uniform3fv(pub: ProgramUniformBuffer, v: ArrayLike<number>) {
+    uniform3fv(pub: ProgramUniformBuffer, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
         if (pub === null) return;
-        const target = pub.writeFloat32View;
-        if (target && pub.webgl_type === WebGL2RenderingContext.FLOAT_VEC3 &&
-            v !== null && (typeof v === "object" || typeof v === "function") && v.length === 3) {
-            const offset = pub.wordOffset;
-            target[offset] = v[0];
-            target[offset + 1] = v[1];
-            target[offset + 2] = v[2];
-            return;
-        }
-        this.writeFloatUniformArray(pub, v, 3, WebGL2RenderingContext.FLOAT_VEC3);
+        this.writeFloatUniformArray(pub, v, 3, WebGL2RenderingContext.FLOAT_VEC3, srcOffset, srcLength);
     }
-    uniform4fv(pub: ProgramUniformBuffer, v: ArrayLike<number>) {
+    uniform4fv(pub: ProgramUniformBuffer, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
         if (pub === null) return;
-        this.writeFloatUniformArray(pub, v, 4, WebGL2RenderingContext.FLOAT_VEC4);
+        this.writeFloatUniformArray(pub, v, 4, WebGL2RenderingContext.FLOAT_VEC4, srcOffset, srcLength);
     }
 
-    uniform1iv(pub: ProgramUniformBuffer | ProgramUniformSampler, v: ArrayLike<number>) {
+    uniform1iv(
+        pub: ProgramUniformBuffer | ProgramUniformSampler,
+        v: ArrayLike<number>,
+        srcOffset: GLuint = 0,
+        srcLength: GLuint = 0,
+    ) {
         if (pub === null) return;
-        const length = this.uniformArrayLength(v);
-        if (length < 1) {
-            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
-            return;
-        }
         if (pub instanceof ProgramUniformSampler) {
+            const source = this.uniformSourceSubrange(v, srcOffset, srcLength);
+            if (!source) return;
+            const length = this.uniformArrayLength(source);
+            if (length < 1) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+                return;
+            }
             if (!pub.activeForUniformUpdates) {
                 this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
                 return;
@@ -2356,7 +3303,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             const count = Math.min(length, elements.length);
             const maxTextureUnits = enumToConstant.get(WebGL2RenderingContext.MAX_COMBINED_TEXTURE_IMAGE_UNITS) || 0;
             for (let i = 0; i < count; i++) {
-                const unit = Number(v[i]);
+                const unit = Number(source[i]);
                 if (!Number.isInteger(unit) || unit < 0 || unit >= maxTextureUnits) {
                     this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
                     return;
@@ -2364,7 +3311,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             }
             for (let i = 0; i < count; i++) {
                 const sampler = elements[i];
-                const unit = Number(v[i]);
+                const unit = Number(source[i]);
                 if (sampler.textureUnit !== unit) {
                     sampler.textureUnit = unit;
                     this.samplerOriginStateVersion++;
@@ -2373,35 +3320,43 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             }
             return;
         }
-        this.writeIntUniformArray(pub, v, 1, WebGL2RenderingContext.INT, WebGL2RenderingContext.BOOL);
+        this.writeIntUniformArray(
+            pub, v, 1, WebGL2RenderingContext.INT, WebGL2RenderingContext.BOOL, srcOffset, srcLength);
     }
-    uniform2iv(pub: ProgramUniformBuffer, v: ArrayLike<number>) {
+    uniform2iv(pub: ProgramUniformBuffer, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
         if (pub === null) return;
-        this.writeIntUniformArray(pub, v, 2, WebGL2RenderingContext.INT_VEC2, WebGL2RenderingContext.BOOL_VEC2);
+        this.writeIntUniformArray(
+            pub, v, 2, WebGL2RenderingContext.INT_VEC2, WebGL2RenderingContext.BOOL_VEC2, srcOffset, srcLength);
     }
-    uniform3iv(pub: ProgramUniformBuffer, v: ArrayLike<number>) {
+    uniform3iv(pub: ProgramUniformBuffer, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
         if (pub === null) return;
-        this.writeIntUniformArray(pub, v, 3, WebGL2RenderingContext.INT_VEC3, WebGL2RenderingContext.BOOL_VEC3);
+        this.writeIntUniformArray(
+            pub, v, 3, WebGL2RenderingContext.INT_VEC3, WebGL2RenderingContext.BOOL_VEC3, srcOffset, srcLength);
     }
-    uniform4iv(pub: ProgramUniformBuffer, v: ArrayLike<number>) {
+    uniform4iv(pub: ProgramUniformBuffer, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
         if (pub === null) return;
-        this.writeIntUniformArray(pub, v, 4, WebGL2RenderingContext.INT_VEC4, WebGL2RenderingContext.BOOL_VEC4);
+        this.writeIntUniformArray(
+            pub, v, 4, WebGL2RenderingContext.INT_VEC4, WebGL2RenderingContext.BOOL_VEC4, srcOffset, srcLength);
     }
-    uniform1uiv(pub: ProgramUniformBuffer, v: ArrayLike<number>) {
+    uniform1uiv(pub: ProgramUniformBuffer, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
         if (pub === null) return;
-        this.writeUintUniformArray(pub, v, 1, WebGL2RenderingContext.UNSIGNED_INT, WebGL2RenderingContext.BOOL);
+        this.writeUintUniformArray(
+            pub, v, 1, WebGL2RenderingContext.UNSIGNED_INT, WebGL2RenderingContext.BOOL, srcOffset, srcLength);
     }
-    uniform2uiv(pub: ProgramUniformBuffer, v: ArrayLike<number>) {
+    uniform2uiv(pub: ProgramUniformBuffer, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
         if (pub === null) return;
-        this.writeUintUniformArray(pub, v, 2, WebGL2RenderingContext.UNSIGNED_INT_VEC2, WebGL2RenderingContext.BOOL_VEC2);
+        this.writeUintUniformArray(
+            pub, v, 2, WebGL2RenderingContext.UNSIGNED_INT_VEC2, WebGL2RenderingContext.BOOL_VEC2, srcOffset, srcLength);
     }
-    uniform3uiv(pub: ProgramUniformBuffer, v: ArrayLike<number>) {
+    uniform3uiv(pub: ProgramUniformBuffer, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
         if (pub === null) return;
-        this.writeUintUniformArray(pub, v, 3, WebGL2RenderingContext.UNSIGNED_INT_VEC3, WebGL2RenderingContext.BOOL_VEC3);
+        this.writeUintUniformArray(
+            pub, v, 3, WebGL2RenderingContext.UNSIGNED_INT_VEC3, WebGL2RenderingContext.BOOL_VEC3, srcOffset, srcLength);
     }
-    uniform4uiv(pub: ProgramUniformBuffer, v: ArrayLike<number>) {
+    uniform4uiv(pub: ProgramUniformBuffer, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
         if (pub === null) return;
-        this.writeUintUniformArray(pub, v, 4, WebGL2RenderingContext.UNSIGNED_INT_VEC4, WebGL2RenderingContext.BOOL_VEC4);
+        this.writeUintUniformArray(
+            pub, v, 4, WebGL2RenderingContext.UNSIGNED_INT_VEC4, WebGL2RenderingContext.BOOL_VEC4, srcOffset, srcLength);
     }
 
     private writeFloatUniformMatrix(
@@ -2411,6 +3366,8 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         columns: number,
         rows: number,
         expectedType: GLenum,
+        srcOffset: GLuint = 0,
+        srcLength: GLuint = 0,
     ) {
         const target = pub.writeFloat32View;
         if (!target) {
@@ -2421,12 +3378,14 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
-        if (transpose) {
+        if (transpose && this.hydContextType !== "webgl2") {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
             return;
         }
         const matrixValues = columns * rows;
-        const length = this.uniformArrayLength(value);
+        const source = this.uniformSourceSubrange(value, srcOffset, srcLength);
+        if (!source) return;
+        const length = this.uniformArrayLength(source);
         if (length < matrixValues || length % matrixValues !== 0) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
             return;
@@ -2447,23 +3406,47 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                     const sourceIndex = transpose
                         ? sourceBase + row * columns + column
                         : sourceBase + column * rows + row;
-                    target[targetBase + column * columnStride + row] = value[sourceIndex];
+                    target[targetBase + column * columnStride + row] = source[sourceIndex];
                 }
             }
         }
     }
 
-    uniformMatrix2fv(pub: ProgramUniformBuffer, transpose: boolean, v: ArrayLike<number>) {
+    uniformMatrix2fv(pub: ProgramUniformBuffer, transpose: boolean, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
         if (pub === null) return;
-        this.writeFloatUniformMatrix(pub, transpose, v, 2, 2, WebGL2RenderingContext.FLOAT_MAT2);
+        this.writeFloatUniformMatrix(pub, transpose, v, 2, 2, WebGL2RenderingContext.FLOAT_MAT2, srcOffset, srcLength);
     }
-    uniformMatrix3fv(pub: ProgramUniformBuffer, transpose: boolean, v: ArrayLike<number>) {
+    uniformMatrix3fv(pub: ProgramUniformBuffer, transpose: boolean, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
         if (pub === null) return;
-        this.writeFloatUniformMatrix(pub, transpose, v, 3, 3, WebGL2RenderingContext.FLOAT_MAT3);
+        this.writeFloatUniformMatrix(pub, transpose, v, 3, 3, WebGL2RenderingContext.FLOAT_MAT3, srcOffset, srcLength);
     }
-    uniformMatrix4fv(pub: ProgramUniformBuffer, transpose: boolean, v: ArrayLike<number>) {
+    uniformMatrix4fv(pub: ProgramUniformBuffer, transpose: boolean, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
         if (pub === null) return;
-        this.writeFloatUniformMatrix(pub, transpose, v, 4, 4, WebGL2RenderingContext.FLOAT_MAT4);
+        this.writeFloatUniformMatrix(pub, transpose, v, 4, 4, WebGL2RenderingContext.FLOAT_MAT4, srcOffset, srcLength);
+    }
+    uniformMatrix2x3fv(pub: ProgramUniformBuffer, transpose: boolean, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
+        if (pub === null) return;
+        this.writeFloatUniformMatrix(pub, transpose, v, 2, 3, WebGL2RenderingContext.FLOAT_MAT2x3, srcOffset, srcLength);
+    }
+    uniformMatrix2x4fv(pub: ProgramUniformBuffer, transpose: boolean, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
+        if (pub === null) return;
+        this.writeFloatUniformMatrix(pub, transpose, v, 2, 4, WebGL2RenderingContext.FLOAT_MAT2x4, srcOffset, srcLength);
+    }
+    uniformMatrix3x2fv(pub: ProgramUniformBuffer, transpose: boolean, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
+        if (pub === null) return;
+        this.writeFloatUniformMatrix(pub, transpose, v, 3, 2, WebGL2RenderingContext.FLOAT_MAT3x2, srcOffset, srcLength);
+    }
+    uniformMatrix3x4fv(pub: ProgramUniformBuffer, transpose: boolean, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
+        if (pub === null) return;
+        this.writeFloatUniformMatrix(pub, transpose, v, 3, 4, WebGL2RenderingContext.FLOAT_MAT3x4, srcOffset, srcLength);
+    }
+    uniformMatrix4x2fv(pub: ProgramUniformBuffer, transpose: boolean, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
+        if (pub === null) return;
+        this.writeFloatUniformMatrix(pub, transpose, v, 4, 2, WebGL2RenderingContext.FLOAT_MAT4x2, srcOffset, srcLength);
+    }
+    uniformMatrix4x3fv(pub: ProgramUniformBuffer, transpose: boolean, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
+        if (pub === null) return;
+        this.writeFloatUniformMatrix(pub, transpose, v, 4, 3, WebGL2RenderingContext.FLOAT_MAT4x3, srcOffset, srcLength);
     }
 
     createProgram() {
@@ -2507,6 +3490,25 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         return brandHydWebGlObject(new HydVertexArray(this.contextToken), "vertex-array");
     }
 
+    createSampler() {
+        if (this.hydContextType !== "webgl2") return null;
+        return brandHydWebGlObject(new HydSampler(this.hydDevice, this.contextToken), "sampler");
+    }
+
+    createTransformFeedback() {
+        if (this.hydContextType !== "webgl2") return null;
+        const feedback = new HydTransformFeedback(this.contextToken);
+        this.transformFeedbackObjects.add(feedback);
+        return brandHydWebGlObject(feedback, "transform-feedback");
+    }
+
+    createQuery() {
+        if (this.hydContextType !== "webgl2") return null;
+        const query = new HydQuery(this.contextToken);
+        this.queryObjects.add(query);
+        return brandHydWebGlObject(query, "query");
+    }
+
     private currentTexture(target: GLenum): HydTexture {
         const viewDimension = enumToViewDimension.get(target);
         const texture = viewDimension
@@ -2546,9 +3548,65 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         return !invalid;
     }
 
+    private textureLimit(pname: GLenum): number {
+        if (pname === WebGL2RenderingContext.MAX_3D_TEXTURE_SIZE) {
+            return Number(this.hydDevice.limits.maxTextureDimension3D) ||
+                Number(enumToConstant.get(pname)) || 256;
+        }
+        if (pname === WebGL2RenderingContext.MAX_ARRAY_TEXTURE_LAYERS) {
+            return Number(this.hydDevice.limits.maxTextureArrayLayers) ||
+                Number(enumToConstant.get(pname)) || 256;
+        }
+        return Number(enumToConstant.get(pname)) || 0;
+    }
+
+    private validateTexImage3DDimensions(
+        target: GLenum,
+        level: number,
+        width: number,
+        height: number,
+        depth: number,
+    ): boolean {
+        const maxSize = this.textureLimit(
+            target === WebGL2RenderingContext.TEXTURE_3D
+                ? WebGL2RenderingContext.MAX_3D_TEXTURE_SIZE
+                : WebGL2RenderingContext.MAX_TEXTURE_SIZE);
+        const maxDepth = target === WebGL2RenderingContext.TEXTURE_3D
+            ? maxSize
+            : this.textureLimit(WebGL2RenderingContext.MAX_ARRAY_TEXTURE_LAYERS);
+        const maxLevel = Math.floor(Math.log2(maxSize));
+        const levelLimit = level <= maxLevel ? Math.max(1, maxSize >> level) : 0;
+        const depthLimit = target === WebGL2RenderingContext.TEXTURE_3D ? levelLimit : maxDepth;
+        const invalid = level < 0 || level > maxLevel || width < 0 || height < 0 || depth < 0 ||
+            width > levelLimit || height > levelLimit || depth > depthLimit;
+        if (invalid) this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+        return !invalid;
+    }
+
     private resolveTexImageSourceExtent(source: any): { width: number, height: number } | null {
         if (!source) return null;
         if (typeof HTMLVideoElement !== "undefined" && source instanceof HTMLVideoElement) {
+            const cached = videoDisplayExtents.get(source);
+            if (cached && cached.reportedWidth === source.videoWidth && cached.reportedHeight === source.videoHeight) {
+                return { width: cached.width, height: cached.height };
+            }
+            if (typeof VideoFrame !== "undefined" && source.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+                try {
+                    const frame = new VideoFrame(source, { timestamp: Math.round(source.currentTime * 1_000_000) });
+                    const extent = externalVideoFrameDisplayExtent(frame);
+                    frame.close();
+                    if (extent) {
+                        videoDisplayExtents.set(source, {
+                            reportedWidth: source.videoWidth,
+                            reportedHeight: source.videoHeight,
+                            width: extent.width,
+                            height: extent.height,
+                        });
+                        return extent;
+                    }
+                } catch (_) {
+                }
+            }
             return { width: source.videoWidth, height: source.videoHeight };
         }
         if (typeof HTMLImageElement !== "undefined" && source instanceof HTMLImageElement) {
@@ -2587,7 +3645,18 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                 format === WebGL2RenderingContext.RG ||
                 format === WebGL2RenderingContext.RED_INTEGER ||
                 format === WebGL2RenderingContext.RG_INTEGER ||
+                format === WebGL2RenderingContext.RGB_INTEGER ||
                 format === WebGL2RenderingContext.RGBA_INTEGER));
+    }
+
+    private isKnownTextureInternalFormat(internalformat: GLenum): boolean {
+        if (this.isKnownTextureFormat(internalformat)) return true;
+        try {
+            this.textureStorageUploadFormat(internalformat);
+            return true;
+        } catch (_) {
+            return false;
+        }
     }
 
     private isKnownTextureType(type: GLenum): boolean {
@@ -2603,8 +3672,12 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                 type === WebGL2RenderingContext.UNSIGNED_SHORT ||
                 type === WebGL2RenderingContext.INT ||
                 type === WebGL2RenderingContext.UNSIGNED_INT ||
+                type === WebGL2RenderingContext.UNSIGNED_INT_2_10_10_10_REV ||
+                type === WebGL2RenderingContext.UNSIGNED_INT_10F_11F_11F_REV ||
+                type === WebGL2RenderingContext.UNSIGNED_INT_5_9_9_9_REV ||
                 type === WebGL2RenderingContext.HALF_FLOAT ||
-                type === WebGL2RenderingContext.UNSIGNED_INT_24_8));
+                type === WebGL2RenderingContext.UNSIGNED_INT_24_8 ||
+                type === WebGL2RenderingContext.FLOAT_32_UNSIGNED_INT_24_8_REV));
     }
 
     private validateTextureUploadView(
@@ -2613,6 +3686,8 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         height: number,
         format: GLenum,
         type: GLenum,
+        depth: number = 1,
+        layered: boolean = false,
     ): boolean {
         if (pixels === null || !ArrayBuffer.isView(pixels)) return true;
         const compatible = type === WebGL2RenderingContext.UNSIGNED_BYTE
@@ -2626,7 +3701,11 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                 : type === WebGL2RenderingContext.FLOAT
                     ? pixels instanceof Float32Array
                     : type === WebGL2RenderingContext.UNSIGNED_INT ||
-                        type === WebGL2RenderingContext.UNSIGNED_INT_24_8
+                type === WebGL2RenderingContext.UNSIGNED_INT_10F_11F_11F_REV ||
+                type === WebGL2RenderingContext.UNSIGNED_INT_5_9_9_9_REV ||
+                type === WebGL2RenderingContext.UNSIGNED_INT_2_10_10_10_REV ||
+                type === WebGL2RenderingContext.UNSIGNED_INT_24_8 ||
+                type === WebGL2RenderingContext.FLOAT_32_UNSIGNED_INT_24_8_REV
                         ? pixels instanceof Uint32Array
                         : type === WebGL2RenderingContext.INT
                             ? pixels instanceof Int32Array
@@ -2641,13 +3720,30 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         }
         try {
             const bytesPerPixel = textureUploadBytesPerPixel(format, type);
-            const required = packedPixelLayout(
-                width,
-                height,
-                bytesPerPixel,
-                this.hydGlobalState.miscState.unpackAlignment,
-            ).requiredBytes;
-            if (pixels.byteLength < required) {
+            const unpack = this.hydGlobalState.miscState.unpackState;
+            const effectiveRowLength = unpack.rowLength || width;
+            if (effectiveRowLength < width + (unpack.skipPixels || 0)) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return false;
+            }
+            if (layered) {
+                const effectiveImageHeight = unpack.imageHeight || height;
+                if (effectiveImageHeight < height + (unpack.skipRows || 0)) {
+                    this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                    return false;
+                }
+            }
+            const requiredBytes = layered
+                ? packedPixelLayout3D(
+                    width, height, depth, bytesPerPixel, unpack.alignment,
+                    unpack.rowLength || 0, unpack.imageHeight || 0,
+                    unpack.skipPixels || 0, unpack.skipRows || 0, unpack.skipImages || 0,
+                ).requiredBytes
+                : packedPixelLayout(
+                    width, height, bytesPerPixel, unpack.alignment,
+                    unpack.rowLength || 0, unpack.skipPixels || 0, unpack.skipRows || 0,
+                ).requiredBytes;
+            if (pixels.byteLength < requiredBytes) {
                 this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
                 return false;
             }
@@ -2658,18 +3754,109 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         return true;
     }
 
+    private textureUploadViewFromElementOffset(pixels: ArrayBufferView, sourceOffset: number): TypedArray | null {
+        const offset = Number(sourceOffset);
+        const length = Number((pixels as any).length);
+        const subarray = (pixels as any).subarray;
+        if (!Number.isFinite(offset) || Math.trunc(offset) !== offset || offset < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return null;
+        }
+        if (!Number.isFinite(length) || typeof subarray !== "function") {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return null;
+        }
+        return subarray.call(pixels, Math.min(offset, length)) as TypedArray;
+    }
+
+    private compressedTextureViewBytes(
+        source: ArrayBufferView,
+        sourceOffset: number,
+        sourceLengthOverride: number | undefined,
+        expectedBytes: number,
+    ): Uint8Array | null {
+        const bytesPerElement = Number((source as any).BYTES_PER_ELEMENT) || 1;
+        const elementLength = Number((source as any).length ?? source.byteLength);
+        const offset = Number(sourceOffset);
+        const length = sourceLengthOverride === undefined
+            ? elementLength - offset
+            : Number(sourceLengthOverride);
+        if (!Number.isFinite(offset) || Math.trunc(offset) !== offset || offset < 0 ||
+            !Number.isFinite(length) || Math.trunc(length) !== length || length < 0 ||
+            offset > elementLength || offset + length > elementLength ||
+            length * bytesPerElement !== expectedBytes) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return null;
+        }
+        return new Uint8Array(
+            source.buffer,
+            source.byteOffset + offset * bytesPerElement,
+            length * bytesPerElement,
+        );
+    }
+
     private isSupportedTextureUploadFormat(internalformat: GLenum, format: GLenum, type: GLenum): boolean {
-        return ((internalformat === WebGL2RenderingContext.RGBA || internalformat === WebGL2RenderingContext.RGBA8) && format === WebGL2RenderingContext.RGBA && (type === WebGL2RenderingContext.UNSIGNED_BYTE || type === WebGL2RenderingContext.FLOAT))
+        return (internalformat === WebGL2RenderingContext.RGBA && format === WebGL2RenderingContext.RGBA &&
+                (type === WebGL2RenderingContext.UNSIGNED_BYTE ||
+                    (this.hydContextType !== "webgl2" && type === WebGL2RenderingContext.FLOAT &&
+                        this.enabledExtensions.has("OES_TEXTURE_FLOAT"))))
+            || (internalformat === WebGL2RenderingContext.RGBA8 && format === WebGL2RenderingContext.RGBA &&
+                type === WebGL2RenderingContext.UNSIGNED_BYTE)
             || (internalformat === WebGL2RenderingContext.RGBA8UI && format === WebGL2RenderingContext.RGBA_INTEGER && type === WebGL2RenderingContext.UNSIGNED_BYTE)
+            || (internalformat === WebGL2RenderingContext.RGBA8I && format === WebGL2RenderingContext.RGBA_INTEGER && type === WebGL2RenderingContext.BYTE)
             || (internalformat === WebGL2RenderingContext.RGBA16UI && format === WebGL2RenderingContext.RGBA_INTEGER && type === WebGL2RenderingContext.UNSIGNED_SHORT)
+            || (internalformat === WebGL2RenderingContext.RGBA16I && format === WebGL2RenderingContext.RGBA_INTEGER && type === WebGL2RenderingContext.SHORT)
             || (internalformat === WebGL2RenderingContext.RGBA32UI && format === WebGL2RenderingContext.RGBA_INTEGER && type === WebGL2RenderingContext.UNSIGNED_INT)
             || (internalformat === WebGL2RenderingContext.RGBA32I && format === WebGL2RenderingContext.RGBA_INTEGER && type === WebGL2RenderingContext.INT)
+            || (internalformat === WebGL2RenderingContext.R8 && format === WebGL2RenderingContext.RED && type === WebGL2RenderingContext.UNSIGNED_BYTE)
+            || (internalformat === WebGL2RenderingContext.R8UI && format === WebGL2RenderingContext.RED_INTEGER && type === WebGL2RenderingContext.UNSIGNED_BYTE)
+            || (internalformat === WebGL2RenderingContext.R8I && format === WebGL2RenderingContext.RED_INTEGER && type === WebGL2RenderingContext.BYTE)
+            || (internalformat === WebGL2RenderingContext.R16UI && format === WebGL2RenderingContext.RED_INTEGER && type === WebGL2RenderingContext.UNSIGNED_SHORT)
+            || (internalformat === WebGL2RenderingContext.R16I && format === WebGL2RenderingContext.RED_INTEGER && type === WebGL2RenderingContext.SHORT)
+            || (internalformat === WebGL2RenderingContext.R32I && format === WebGL2RenderingContext.RED_INTEGER && type === WebGL2RenderingContext.INT)
+            || (internalformat === WebGL2RenderingContext.RG8 && format === WebGL2RenderingContext.RG && type === WebGL2RenderingContext.UNSIGNED_BYTE)
+            || (internalformat === WebGL2RenderingContext.RG8UI && format === WebGL2RenderingContext.RG_INTEGER && type === WebGL2RenderingContext.UNSIGNED_BYTE)
+            || (internalformat === WebGL2RenderingContext.RG8I && format === WebGL2RenderingContext.RG_INTEGER && type === WebGL2RenderingContext.BYTE)
+            || (internalformat === WebGL2RenderingContext.RG16UI && format === WebGL2RenderingContext.RG_INTEGER && type === WebGL2RenderingContext.UNSIGNED_SHORT)
+            || (internalformat === WebGL2RenderingContext.RG16I && format === WebGL2RenderingContext.RG_INTEGER && type === WebGL2RenderingContext.SHORT)
+            || (internalformat === WebGL2RenderingContext.RG32I && format === WebGL2RenderingContext.RG_INTEGER && type === WebGL2RenderingContext.INT)
+            || (internalformat === WebGL2RenderingContext.RGB10_A2UI && format === WebGL2RenderingContext.RGBA_INTEGER && type === WebGL2RenderingContext.UNSIGNED_INT_2_10_10_10_REV)
+            || (internalformat === WebGL2RenderingContext.RGB10_A2 && format === WebGL2RenderingContext.RGBA && type === WebGL2RenderingContext.UNSIGNED_INT_2_10_10_10_REV)
             || (internalformat === WebGL2RenderingContext.RGBA32F && format === WebGL2RenderingContext.RGBA && type === WebGL2RenderingContext.FLOAT)
+            || (internalformat === WebGL2RenderingContext.RGB32F && format === WebGL2RenderingContext.RGB && type === WebGL2RenderingContext.FLOAT)
+            || (internalformat === WebGL2RenderingContext.RGB8UI && format === WebGL2RenderingContext.RGB_INTEGER && type === WebGL2RenderingContext.UNSIGNED_BYTE)
+            || (internalformat === WebGL2RenderingContext.RGB8I && format === WebGL2RenderingContext.RGB_INTEGER && type === WebGL2RenderingContext.BYTE)
+            || (internalformat === WebGL2RenderingContext.RGB16UI && format === WebGL2RenderingContext.RGB_INTEGER && type === WebGL2RenderingContext.UNSIGNED_SHORT)
+            || (internalformat === WebGL2RenderingContext.RGB16I && format === WebGL2RenderingContext.RGB_INTEGER && type === WebGL2RenderingContext.SHORT)
+            || (internalformat === WebGL2RenderingContext.RGB32UI && format === WebGL2RenderingContext.RGB_INTEGER && type === WebGL2RenderingContext.UNSIGNED_INT)
+            || (internalformat === WebGL2RenderingContext.RGB32I && format === WebGL2RenderingContext.RGB_INTEGER && type === WebGL2RenderingContext.INT)
             || (internalformat === WebGL2RenderingContext.RG32UI && format === WebGL2RenderingContext.RG_INTEGER && type === WebGL2RenderingContext.UNSIGNED_INT)
             || (internalformat === WebGL2RenderingContext.R32UI && format === WebGL2RenderingContext.RED_INTEGER && type === WebGL2RenderingContext.UNSIGNED_INT)
             || (internalformat === WebGL2RenderingContext.RG32F && format === WebGL2RenderingContext.RG && type === WebGL2RenderingContext.FLOAT)
             || (internalformat === WebGL2RenderingContext.R32F && format === WebGL2RenderingContext.RED && type === WebGL2RenderingContext.FLOAT)
+            || ((internalformat === WebGL2RenderingContext.R16F && format === WebGL2RenderingContext.RED) ||
+                (internalformat === WebGL2RenderingContext.RG16F && format === WebGL2RenderingContext.RG) ||
+                (internalformat === WebGL2RenderingContext.RGB16F && format === WebGL2RenderingContext.RGB) ||
+                (internalformat === WebGL2RenderingContext.RGBA16F && format === WebGL2RenderingContext.RGBA)) &&
+                (type === WebGL2RenderingContext.FLOAT || type === WebGL2RenderingContext.HALF_FLOAT)
+            || (internalformat === WebGL2RenderingContext.R11F_G11F_B10F && format === WebGL2RenderingContext.RGB &&
+                (type === WebGL2RenderingContext.FLOAT ||
+                    type === WebGL2RenderingContext.HALF_FLOAT ||
+                    type === WebGL2RenderingContext.UNSIGNED_INT_10F_11F_11F_REV))
+            || (internalformat === WebGL2RenderingContext.RGB9_E5 && format === WebGL2RenderingContext.RGB &&
+                (type === WebGL2RenderingContext.FLOAT || type === WebGL2RenderingContext.HALF_FLOAT ||
+                    type === WebGL2RenderingContext.UNSIGNED_INT_5_9_9_9_REV))
+            || (internalformat === WebGL2RenderingContext.R8_SNORM && format === WebGL2RenderingContext.RED && type === WebGL2RenderingContext.BYTE)
+            || (internalformat === WebGL2RenderingContext.RG8_SNORM && format === WebGL2RenderingContext.RG && type === WebGL2RenderingContext.BYTE)
+            || (internalformat === WebGL2RenderingContext.RGB8_SNORM && format === WebGL2RenderingContext.RGB && type === WebGL2RenderingContext.BYTE)
+            || (internalformat === WebGL2RenderingContext.RGBA8_SNORM && format === WebGL2RenderingContext.RGBA && type === WebGL2RenderingContext.BYTE)
             || (internalformat === WebGL2RenderingContext.DEPTH_COMPONENT32F && format === WebGL2RenderingContext.DEPTH_COMPONENT && type === WebGL2RenderingContext.FLOAT)
+            || (internalformat === WebGL2RenderingContext.DEPTH24_STENCIL8 &&
+                format === WebGL2RenderingContext.DEPTH_STENCIL &&
+                type === WebGL2RenderingContext.UNSIGNED_INT_24_8)
+            || (internalformat === WebGL2RenderingContext.DEPTH32F_STENCIL8 &&
+                format === WebGL2RenderingContext.DEPTH_STENCIL &&
+                type === WebGL2RenderingContext.FLOAT_32_UNSIGNED_INT_24_8_REV)
             || ((internalformat === WebGL2RenderingContext.DEPTH_COMPONENT ||
                 internalformat === WebGL2RenderingContext.DEPTH_COMPONENT16 ||
                 internalformat === WebGL2RenderingContext.DEPTH_COMPONENT24) &&
@@ -2687,6 +3874,15 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                 type === WebGL2RenderingContext.UNSIGNED_BYTE)
             || (internalformat === WebGL2RenderingContext.RGB && format === WebGL2RenderingContext.RGB &&
                 (type === WebGL2RenderingContext.UNSIGNED_BYTE || type === WebGL2RenderingContext.UNSIGNED_SHORT_5_6_5))
+            || (internalformat === WebGL2RenderingContext.RGB8 && format === WebGL2RenderingContext.RGB && type === WebGL2RenderingContext.UNSIGNED_BYTE)
+            || (internalformat === WebGL2RenderingContext.RGB565 && format === WebGL2RenderingContext.RGB &&
+                (type === WebGL2RenderingContext.UNSIGNED_BYTE || type === WebGL2RenderingContext.UNSIGNED_SHORT_5_6_5))
+            || (internalformat === WebGL2RenderingContext.RGB5_A1 && format === WebGL2RenderingContext.RGBA &&
+                (type === WebGL2RenderingContext.UNSIGNED_BYTE ||
+                    type === WebGL2RenderingContext.UNSIGNED_SHORT_5_5_5_1 ||
+                    type === WebGL2RenderingContext.UNSIGNED_INT_2_10_10_10_REV))
+            || (internalformat === WebGL2RenderingContext.RGBA4 && format === WebGL2RenderingContext.RGBA &&
+                (type === WebGL2RenderingContext.UNSIGNED_BYTE || type === WebGL2RenderingContext.UNSIGNED_SHORT_4_4_4_4))
             || (internalformat === WebGL2RenderingContext.RGBA && format === WebGL2RenderingContext.RGBA &&
                 (type === WebGL2RenderingContext.UNSIGNED_SHORT_4_4_4_4 ||
                     type === WebGL2RenderingContext.UNSIGNED_SHORT_5_5_5_1));
@@ -2712,14 +3908,18 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         return this.isSupportedTextureUploadFormat(format, format, type)
             || (format === WebGL2RenderingContext.RGBA_INTEGER &&
                 (type === WebGL2RenderingContext.UNSIGNED_BYTE ||
+                    type === WebGL2RenderingContext.BYTE ||
                     type === WebGL2RenderingContext.UNSIGNED_SHORT ||
+                    type === WebGL2RenderingContext.SHORT ||
                     type === WebGL2RenderingContext.UNSIGNED_INT ||
                     type === WebGL2RenderingContext.INT))
             || (format === WebGL2RenderingContext.RG_INTEGER && type === WebGL2RenderingContext.UNSIGNED_INT)
             || (format === WebGL2RenderingContext.RED_INTEGER && type === WebGL2RenderingContext.UNSIGNED_INT)
             || (format === WebGL2RenderingContext.RGBA && (type === WebGL2RenderingContext.UNSIGNED_BYTE || type === WebGL2RenderingContext.FLOAT))
-            || (format === WebGL2RenderingContext.RG && type === WebGL2RenderingContext.FLOAT)
-            || (format === WebGL2RenderingContext.RED && type === WebGL2RenderingContext.FLOAT)
+            || (format === WebGL2RenderingContext.RGBA && (type === WebGL2RenderingContext.HALF_FLOAT || type === WebGL2RenderingContext.BYTE))
+            || (format === WebGL2RenderingContext.RG && (type === WebGL2RenderingContext.FLOAT || type === WebGL2RenderingContext.HALF_FLOAT || type === WebGL2RenderingContext.BYTE))
+            || (format === WebGL2RenderingContext.RED && (type === WebGL2RenderingContext.FLOAT || type === WebGL2RenderingContext.HALF_FLOAT || type === WebGL2RenderingContext.BYTE))
+            || (format === WebGL2RenderingContext.RGB && (type === WebGL2RenderingContext.FLOAT || type === WebGL2RenderingContext.HALF_FLOAT || type === WebGL2RenderingContext.BYTE || type === WebGL2RenderingContext.UNSIGNED_INT_5_9_9_9_REV))
             || (format === WebGL2RenderingContext.RGB && type === WebGL2RenderingContext.UNSIGNED_BYTE)
             || (format === WebGL2RenderingContext.LUMINANCE && type === WebGL2RenderingContext.UNSIGNED_BYTE)
             || (format === WebGL2RenderingContext.ALPHA && type === WebGL2RenderingContext.UNSIGNED_BYTE)
@@ -2733,52 +3933,207 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
 
     private textureStorageUploadFormat(internalformat: GLenum): { format: GLenum, type: GLenum } {
         switch (internalformat) {
-            case WebGL2RenderingContext.RGBA:
             case WebGL2RenderingContext.RGBA8:
                 return { format: WebGL2RenderingContext.RGBA, type: WebGL2RenderingContext.UNSIGNED_BYTE };
+            case WebGL2RenderingContext.RGB8:
+            case WebGL2RenderingContext.SRGB8:
+                return { format: WebGL2RenderingContext.RGB, type: WebGL2RenderingContext.UNSIGNED_BYTE };
+            case WebGL2RenderingContext.SRGB8_ALPHA8:
+                return { format: WebGL2RenderingContext.RGBA, type: WebGL2RenderingContext.UNSIGNED_BYTE };
+            case WebGL2RenderingContext.RGB565:
+                return { format: WebGL2RenderingContext.RGB, type: WebGL2RenderingContext.UNSIGNED_SHORT_5_6_5 };
+            case WebGL2RenderingContext.RGBA4:
+                return { format: WebGL2RenderingContext.RGBA, type: WebGL2RenderingContext.UNSIGNED_SHORT_4_4_4_4 };
+            case WebGL2RenderingContext.RGB5_A1:
+                return { format: WebGL2RenderingContext.RGBA, type: WebGL2RenderingContext.UNSIGNED_SHORT_5_5_5_1 };
+            case WebGL2RenderingContext.RGB10_A2:
+                return { format: WebGL2RenderingContext.RGBA, type: WebGL2RenderingContext.UNSIGNED_INT_2_10_10_10_REV };
+            case WebGL2RenderingContext.RGB10_A2UI:
+                return { format: WebGL2RenderingContext.RGBA_INTEGER, type: WebGL2RenderingContext.UNSIGNED_INT_2_10_10_10_REV };
             case WebGL2RenderingContext.RGBA8UI:
                 return { format: WebGL2RenderingContext.RGBA_INTEGER, type: WebGL2RenderingContext.UNSIGNED_BYTE };
+            case WebGL2RenderingContext.RGBA8I:
+                return { format: WebGL2RenderingContext.RGBA_INTEGER, type: WebGL2RenderingContext.BYTE };
             case WebGL2RenderingContext.RGBA16UI:
                 return { format: WebGL2RenderingContext.RGBA_INTEGER, type: WebGL2RenderingContext.UNSIGNED_SHORT };
+            case WebGL2RenderingContext.RGBA16I:
+                return { format: WebGL2RenderingContext.RGBA_INTEGER, type: WebGL2RenderingContext.SHORT };
             case WebGL2RenderingContext.RGBA32UI:
                 return { format: WebGL2RenderingContext.RGBA_INTEGER, type: WebGL2RenderingContext.UNSIGNED_INT };
             case WebGL2RenderingContext.RGBA32I:
                 return { format: WebGL2RenderingContext.RGBA_INTEGER, type: WebGL2RenderingContext.INT };
             case WebGL2RenderingContext.RGBA32F:
                 return { format: WebGL2RenderingContext.RGBA, type: WebGL2RenderingContext.FLOAT };
+            case WebGL2RenderingContext.RGBA16F:
+                return { format: WebGL2RenderingContext.RGBA, type: WebGL2RenderingContext.HALF_FLOAT };
             case WebGL2RenderingContext.RG32UI:
                 return { format: WebGL2RenderingContext.RG_INTEGER, type: WebGL2RenderingContext.UNSIGNED_INT };
+            case WebGL2RenderingContext.RG32I:
+                return { format: WebGL2RenderingContext.RG_INTEGER, type: WebGL2RenderingContext.INT };
             case WebGL2RenderingContext.R32UI:
                 return { format: WebGL2RenderingContext.RED_INTEGER, type: WebGL2RenderingContext.UNSIGNED_INT };
+            case WebGL2RenderingContext.R32I:
+                return { format: WebGL2RenderingContext.RED_INTEGER, type: WebGL2RenderingContext.INT };
+            case WebGL2RenderingContext.R8:
+                return { format: WebGL2RenderingContext.RED, type: WebGL2RenderingContext.UNSIGNED_BYTE };
+            case WebGL2RenderingContext.R8UI:
+                return { format: WebGL2RenderingContext.RED_INTEGER, type: WebGL2RenderingContext.UNSIGNED_BYTE };
+            case WebGL2RenderingContext.R8I:
+                return { format: WebGL2RenderingContext.RED_INTEGER, type: WebGL2RenderingContext.BYTE };
+            case WebGL2RenderingContext.R16UI:
+                return { format: WebGL2RenderingContext.RED_INTEGER, type: WebGL2RenderingContext.UNSIGNED_SHORT };
+            case WebGL2RenderingContext.R16I:
+                return { format: WebGL2RenderingContext.RED_INTEGER, type: WebGL2RenderingContext.SHORT };
+            case WebGL2RenderingContext.RG8:
+                return { format: WebGL2RenderingContext.RG, type: WebGL2RenderingContext.UNSIGNED_BYTE };
+            case WebGL2RenderingContext.RG8UI:
+                return { format: WebGL2RenderingContext.RG_INTEGER, type: WebGL2RenderingContext.UNSIGNED_BYTE };
+            case WebGL2RenderingContext.RG8I:
+                return { format: WebGL2RenderingContext.RG_INTEGER, type: WebGL2RenderingContext.BYTE };
+            case WebGL2RenderingContext.RG16UI:
+                return { format: WebGL2RenderingContext.RG_INTEGER, type: WebGL2RenderingContext.UNSIGNED_SHORT };
+            case WebGL2RenderingContext.RG16I:
+                return { format: WebGL2RenderingContext.RG_INTEGER, type: WebGL2RenderingContext.SHORT };
             case WebGL2RenderingContext.RG32F:
                 return { format: WebGL2RenderingContext.RG, type: WebGL2RenderingContext.FLOAT };
+            case WebGL2RenderingContext.RG16F:
+                return { format: WebGL2RenderingContext.RG, type: WebGL2RenderingContext.HALF_FLOAT };
             case WebGL2RenderingContext.R32F:
                 return { format: WebGL2RenderingContext.RED, type: WebGL2RenderingContext.FLOAT };
+            case WebGL2RenderingContext.R16F:
+                return { format: WebGL2RenderingContext.RED, type: WebGL2RenderingContext.HALF_FLOAT };
+            case WebGL2RenderingContext.RGB32F:
+                return { format: WebGL2RenderingContext.RGB, type: WebGL2RenderingContext.FLOAT };
+            case WebGL2RenderingContext.RGB16F:
+                return { format: WebGL2RenderingContext.RGB, type: WebGL2RenderingContext.HALF_FLOAT };
+            case WebGL2RenderingContext.R11F_G11F_B10F:
+                return { format: WebGL2RenderingContext.RGB, type: WebGL2RenderingContext.FLOAT };
+            case WebGL2RenderingContext.RGB9_E5:
+                return { format: WebGL2RenderingContext.RGB, type: WebGL2RenderingContext.UNSIGNED_INT_5_9_9_9_REV };
+            case WebGL2RenderingContext.R8_SNORM:
+                return { format: WebGL2RenderingContext.RED, type: WebGL2RenderingContext.BYTE };
+            case WebGL2RenderingContext.RG8_SNORM:
+                return { format: WebGL2RenderingContext.RG, type: WebGL2RenderingContext.BYTE };
+            case WebGL2RenderingContext.RGB8_SNORM:
+                return { format: WebGL2RenderingContext.RGB, type: WebGL2RenderingContext.BYTE };
+            case WebGL2RenderingContext.RGBA8_SNORM:
+                return { format: WebGL2RenderingContext.RGBA, type: WebGL2RenderingContext.BYTE };
+            case WebGL2RenderingContext.RGB8UI:
+                return { format: WebGL2RenderingContext.RGB_INTEGER, type: WebGL2RenderingContext.UNSIGNED_BYTE };
+            case WebGL2RenderingContext.RGB8I:
+                return { format: WebGL2RenderingContext.RGB_INTEGER, type: WebGL2RenderingContext.BYTE };
+            case WebGL2RenderingContext.RGB16UI:
+                return { format: WebGL2RenderingContext.RGB_INTEGER, type: WebGL2RenderingContext.UNSIGNED_SHORT };
+            case WebGL2RenderingContext.RGB16I:
+                return { format: WebGL2RenderingContext.RGB_INTEGER, type: WebGL2RenderingContext.SHORT };
+            case WebGL2RenderingContext.RGB32UI:
+                return { format: WebGL2RenderingContext.RGB_INTEGER, type: WebGL2RenderingContext.UNSIGNED_INT };
+            case WebGL2RenderingContext.RGB32I:
+                return { format: WebGL2RenderingContext.RGB_INTEGER, type: WebGL2RenderingContext.INT };
             case WebGL2RenderingContext.DEPTH_COMPONENT16:
             case WebGL2RenderingContext.DEPTH_COMPONENT24:
-            case WebGL2RenderingContext.DEPTH_COMPONENT:
                 return { format: WebGL2RenderingContext.DEPTH_COMPONENT, type: WebGL2RenderingContext.UNSIGNED_INT };
             case WebGL2RenderingContext.DEPTH_COMPONENT32F:
                 return { format: WebGL2RenderingContext.DEPTH_COMPONENT, type: WebGL2RenderingContext.FLOAT };
+            case WebGL2RenderingContext.DEPTH24_STENCIL8:
+                return { format: WebGL2RenderingContext.DEPTH_STENCIL, type: WebGL2RenderingContext.UNSIGNED_INT_24_8 };
+            case WebGL2RenderingContext.DEPTH32F_STENCIL8:
+                return { format: WebGL2RenderingContext.DEPTH_STENCIL, type: WebGL2RenderingContext.FLOAT_32_UNSIGNED_INT_24_8_REV };
             default:
                 throw new Error("unsupported texStorage internalformat: " + internalformat);
         }
     }
 
-    private pixelUnpackBufferSlice(byteOffset: number, width: number, height: number, depth: number, format: GLenum, type: GLenum): Uint8Array {
+    private pixelUnpackBufferSlice(
+        byteOffset: number,
+        width: number,
+        height: number,
+        depth: number,
+        format: GLenum,
+        type: GLenum,
+        layered: boolean = false,
+    ): TypedArray | null {
         const buffer = this.hydGlobalState.commonState.pixelUnpackBufferBinding;
         if (!buffer) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
-            throw new Error("texture upload offset requires PIXEL_UNPACK_BUFFER binding");
+            return null;
         }
-        const bytesPerRow = width * textureUploadBytesPerPixel(format, type);
-        const byteLength = bytesPerRow * height * depth;
-        const end = byteOffset + byteLength;
-        if (end > buffer.shadowData.byteLength) {
+        if (this.bufferOperationConflictsWithTransformFeedback(buffer, WebGL2RenderingContext.PIXEL_UNPACK_BUFFER)) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
-            throw new Error(`PIXEL_UNPACK_BUFFER upload exceeds buffer size: ${byteOffset}+${byteLength}/${buffer.shadowData.byteLength}`);
+            return null;
         }
-        return buffer.shadowData.subarray(byteOffset, end);
+        if (!Number.isInteger(byteOffset) || byteOffset < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return null;
+        }
+        const elementBytes = type === WebGL2RenderingContext.BYTE ||
+            type === WebGL2RenderingContext.UNSIGNED_BYTE
+            ? 1
+            : type === WebGL2RenderingContext.SHORT ||
+                type === WebGL2RenderingContext.UNSIGNED_SHORT ||
+                type === WebGL2RenderingContext.HALF_FLOAT || type === 0x8D61 ||
+                type === WebGL2RenderingContext.UNSIGNED_SHORT_5_6_5 ||
+                type === WebGL2RenderingContext.UNSIGNED_SHORT_4_4_4_4 ||
+                type === WebGL2RenderingContext.UNSIGNED_SHORT_5_5_5_1
+                ? 2
+                : 4;
+        if (byteOffset % elementBytes !== 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return null;
+        }
+        const bytesPerPixel = textureUploadBytesPerPixel(format, type);
+        const unpack = this.hydGlobalState.miscState.unpackState;
+        if (unpack.flipY || unpack.premultiplyAlpha) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return null;
+        }
+        const effectiveRowLength = unpack.rowLength || width;
+        const effectiveImageHeight = unpack.imageHeight || height;
+        if (effectiveRowLength < width + (unpack.skipPixels || 0) ||
+            (layered && effectiveImageHeight < height + (unpack.skipRows || 0))) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return null;
+        }
+        const byteLength = layered
+            ? packedPixelLayout3D(
+                width, height, depth, bytesPerPixel, unpack.alignment,
+                unpack.rowLength || 0, unpack.imageHeight || 0,
+                unpack.skipPixels || 0, unpack.skipRows || 0, unpack.skipImages || 0,
+            ).requiredBytes
+            : packedPixelLayout(
+                width, height, bytesPerPixel, unpack.alignment,
+                unpack.rowLength || 0, unpack.skipPixels || 0, unpack.skipRows || 0,
+            ).requiredBytes;
+        const end = byteOffset + byteLength;
+        if (end > buffer.webglSize) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return null;
+        }
+        const bytes = buffer.shadowData.subarray(byteOffset, end);
+        const length = bytes.byteLength / elementBytes;
+        if (!Number.isInteger(length)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return null;
+        }
+        if (type === WebGL2RenderingContext.BYTE) {
+            return new Int8Array(bytes.buffer, bytes.byteOffset, length);
+        }
+        if (type === WebGL2RenderingContext.SHORT) {
+            return new Int16Array(bytes.buffer, bytes.byteOffset, length);
+        }
+        if (type === WebGL2RenderingContext.INT) {
+            return new Int32Array(bytes.buffer, bytes.byteOffset, length);
+        }
+        if (type === WebGL2RenderingContext.FLOAT) {
+            return new Float32Array(bytes.buffer, bytes.byteOffset, length);
+        }
+        if (elementBytes === 2) {
+            return new Uint16Array(bytes.buffer, bytes.byteOffset, length);
+        }
+        if (elementBytes === 4) {
+            return new Uint32Array(bytes.buffer, bytes.byteOffset, length);
+        }
+        return bytes;
     }
 
     private alignReadbackBytesPerRow(bytesPerRow: number): number {
@@ -2791,7 +4146,30 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         if (attachmentPoint === WebGL2RenderingContext.BACK) {
             attachmentPoint = WebGL2RenderingContext.COLOR_ATTACHMENT0;
         }
-        return framebuffer.attachments.get(attachmentPoint) || framebuffer.attachments.get(WebGL2RenderingContext.COLOR_ATTACHMENT0) || null;
+        return framebuffer.attachments.get(attachmentPoint) || null;
+    }
+
+    private implementationColorReadParameters(): { format: GLenum, type: GLenum } {
+        const framebuffer = this.hydGlobalState.commonState.readFramebufferBinding;
+        const attachment = framebuffer === this.hydGlobalState.defaultFramebuffer
+            ? null
+            : this.getReadColorAttachment();
+        if (attachment?.format.endsWith("sint")) {
+            return {
+                format: WebGL2RenderingContext.RGBA_INTEGER,
+                type: WebGL2RenderingContext.INT,
+            };
+        }
+        if (attachment?.format.endsWith("uint")) {
+            return {
+                format: WebGL2RenderingContext.RGBA_INTEGER,
+                type: WebGL2RenderingContext.UNSIGNED_INT,
+            };
+        }
+        return {
+            format: WebGL2RenderingContext.RGBA,
+            type: WebGL2RenderingContext.UNSIGNED_BYTE,
+        };
     }
 
     private getFramebufferForTarget(target: GLenum): HydFramebuffer {
@@ -2802,6 +4180,77 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             return this.hydGlobalState.commonState.readFramebufferBinding;
         }
         throw new Error("unsupported framebuffer target: " + target);
+    }
+
+    private sameFramebufferImage(a: FramebufferAttributes | null, b: FramebufferAttributes | null): boolean {
+        return !!a && !!b &&
+            a.attachment === b.attachment &&
+            (a.level || 0) === (b.level || 0) &&
+            (a.layer ?? -1) === (b.layer ?? -1) &&
+            (a.face || 0) === (b.face || 0);
+    }
+
+    private sameFramebufferObject(a: FramebufferAttributes | null, b: FramebufferAttributes | null): boolean {
+        return !!a && !!b && a.attachment === b.attachment && a.objectType === b.objectType;
+    }
+
+    private framebufferAttachment(
+        framebuffer: HydFramebuffer,
+        attachment: GLenum,
+    ): FramebufferAttributes | null {
+        const combined = framebuffer.attachments.get(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT) || null;
+        if (framebuffer === this.hydGlobalState.defaultFramebuffer &&
+            this.hydGlobalState.contextAttributes.depth !== false &&
+            this.hydGlobalState.contextAttributes.stencil === true &&
+            combined &&
+            (attachment === WebGL2RenderingContext.DEPTH_ATTACHMENT ||
+                attachment === WebGL2RenderingContext.STENCIL_ATTACHMENT ||
+                attachment === WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT)) {
+            return combined;
+        }
+        if (attachment === WebGL2RenderingContext.DEPTH_ATTACHMENT) {
+            return framebuffer.attachments.get(attachment) || combined;
+        }
+        if (attachment === WebGL2RenderingContext.STENCIL_ATTACHMENT) {
+            return framebuffer.attachments.get(attachment) || combined;
+        }
+        if (attachment === WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT) {
+            const depth = framebuffer.attachments.get(WebGL2RenderingContext.DEPTH_ATTACHMENT) || combined;
+            const stencil = framebuffer.attachments.get(WebGL2RenderingContext.STENCIL_ATTACHMENT) || combined;
+            return this.sameFramebufferObject(depth, stencil) ? depth : null;
+        }
+        return framebuffer.attachments.get(attachment) || null;
+    }
+
+    private setFramebufferAttachment(
+        framebuffer: HydFramebuffer,
+        attachment: GLenum,
+        value: FramebufferAttributes | null,
+    ) {
+        const combinedPoint = WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT;
+        const depthPoint = WebGL2RenderingContext.DEPTH_ATTACHMENT;
+        const stencilPoint = WebGL2RenderingContext.STENCIL_ATTACHMENT;
+        if (attachment === combinedPoint) {
+            framebuffer.attachments.delete(combinedPoint);
+            framebuffer.attachments.delete(depthPoint);
+            framebuffer.attachments.delete(stencilPoint);
+            if (value) framebuffer.attachments.set(combinedPoint, value);
+            return;
+        }
+        if ((attachment === depthPoint || attachment === stencilPoint) &&
+            framebuffer.attachments.has(combinedPoint)) {
+            const combined = framebuffer.attachments.get(combinedPoint);
+            framebuffer.attachments.delete(combinedPoint);
+            framebuffer.attachments.set(
+                attachment === depthPoint ? stencilPoint : depthPoint,
+                combined,
+            );
+        }
+        if (value) {
+            framebuffer.attachments.set(attachment, value);
+        } else {
+            framebuffer.attachments.delete(attachment);
+        }
     }
 
     private validateFramebufferTarget(target: GLenum): boolean {
@@ -2889,9 +4338,16 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         return !!texture && (texture.sourceOrigin === "render-target" || texture.sourceOrigin === "copy");
     }
 
+    private markFramebufferContentChanged() {
+        this.framebufferWriteGeneration++;
+        this.normalizedReadPixelsCache = null;
+    }
+
     private markDrawFramebufferAttachmentsAsRenderTargets(mask: GLbitfield) {
         const framebuffer = this.hydGlobalState.commonState.drawFramebufferBinding;
-        if (framebuffer === this.hydGlobalState.defaultFramebuffer || mask === 0) return;
+        if (mask === 0) return;
+        this.markFramebufferContentChanged();
+        if (framebuffer === this.hydGlobalState.defaultFramebuffer) return;
 
         let changed = false;
         for (const [point, attachment] of framebuffer.attachments) {
@@ -2905,6 +4361,8 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                 (isDepth && Boolean(mask & WebGL2RenderingContext.DEPTH_BUFFER_BIT)) ||
                 (isStencil && Boolean(mask & WebGL2RenderingContext.STENCIL_BUFFER_BIT));
             if (isWritten) {
+                if (isDepth) attachment.attachment.uniformDepthValue = null;
+                if (isStencil) attachment.attachment.uniformStencilValue = null;
                 changed = attachment.attachment.markFramebufferRenderTarget() || changed;
             }
         }
@@ -2936,29 +4394,46 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         }, 0);
     }
 
-    private getMaskedClearTargets(): Array<{ view: GPUTextureView, format: GPUTextureFormat, writeMask: GPUColorWriteFlags }> {
+    private getMaskedClearTargets(): Array<{
+        view: GPUTextureView,
+        depthSlice?: number,
+        format: GPUTextureFormat,
+        writeMask: GPUColorWriteFlags,
+        sampleCount: number,
+    }> {
         return this.hydGlobalState.commonState.drawFramebufferBinding.drawBuffers.flatMap((value) => {
             if (value === WebGL2RenderingContext.BACK) {
                 return this.hydGlobalState.__canvasView ? [{
                     view: this.hydGlobalState.__canvasView,
                     format: "bgra8unorm" as GPUTextureFormat,
                     writeMask: this.colorWriteMaskForAttachment(),
+                    sampleCount: 1,
                 }] : [];
             }
             if (WebGL2RenderingContext.COLOR_ATTACHMENT0 <= value && value <= WebGL2RenderingContext.COLOR_ATTACHMENT15) {
                 const attachment = this.hydGlobalState.commonState.drawFramebufferBinding.attachments.get(value);
                 return attachment ? [{
                     view: attachment.view,
+                    depthSlice: attachment.depthSlice,
                     format: attachment.format,
                     writeMask: this.colorWriteMaskForAttachment(attachment),
+                    sampleCount: attachment.sampleCount,
                 }] : [];
             }
             return [];
         });
     }
 
-    private getMaskedClearPipeline(targets: Array<{ view: GPUTextureView, format: GPUTextureFormat, writeMask: GPUColorWriteFlags }>): GPURenderPipeline {
-        const key = targets.map((target) => `${target.format}:${target.writeMask}`).join(",");
+    private getMaskedClearPipeline(targets: Array<{
+        view: GPUTextureView,
+        depthSlice?: number,
+        format: GPUTextureFormat,
+        writeMask: GPUColorWriteFlags,
+        sampleCount: number,
+    }>): GPURenderPipeline {
+        const sampleCount = targets[0]?.sampleCount || 1;
+        const key = targets.map((target) => `${target.format}:${target.writeMask}`).join(",") +
+            `:samples=${sampleCount}`;
         let pipeline = this.maskedClearPipelines.get(key);
         if (!pipeline) {
             const outputs = targets.map((_, index) => `    @location(${index}) color${index}: vec4<f32>,`).join("\n");
@@ -3000,6 +4475,7 @@ ${assignments}
                     targets: targets.map((target) => ({ format: target.format, writeMask: target.writeMask })),
                 },
                 primitive: { topology: "triangle-list" },
+                multisample: { count: sampleCount },
             });
             this.maskedClearPipelines.set(key, pipeline);
         }
@@ -3022,15 +4498,23 @@ ${assignments}
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.UNIFORM,
             });
         }
+        let clearColor = this.hydGlobalState.clearState.color;
+        if (this.hydGlobalState.commonState.drawFramebufferBinding === this.hydGlobalState.defaultFramebuffer) {
+            if (this.drawingBufferFormat === WebGL2RenderingContext.SRGB8_ALPHA8) {
+                clearColor = [
+                    linearToSrgb(clearColor[0]),
+                    linearToSrgb(clearColor[1]),
+                    linearToSrgb(clearColor[2]),
+                    clearColor[3],
+                ];
+            } else if (this.hydGlobalState.contextAttributes.alpha === false) {
+                clearColor = [clearColor[0], clearColor[1], clearColor[2], 1];
+            }
+        }
         this.hydDevice.queue.writeBuffer(
             this.maskedClearUniformBuffer,
             0,
-            new Float32Array(
-                this.hydGlobalState.commonState.drawFramebufferBinding === this.hydGlobalState.defaultFramebuffer &&
-                this.hydGlobalState.contextAttributes.alpha === false
-                    ? [...this.hydGlobalState.clearState.color.slice(0, 3), 1]
-                    : this.hydGlobalState.clearState.color,
-            ),
+            new Float32Array(clearColor),
         );
         const pipeline = this.getMaskedClearPipeline(targets);
         const bindGroup = this.hydDevice.createBindGroup({
@@ -3042,6 +4526,7 @@ ${assignments}
         const renderPass = commandEncoder.beginRenderPass({
             colorAttachments: targets.map((target) => ({
                 view: target.view,
+                depthSlice: target.depthSlice,
                 loadOp: "load",
                 storeOp: "store",
             })),
@@ -3054,6 +4539,129 @@ ${assignments}
         renderPass.draw(3);
         renderPass.end();
         this.hydDevice.queue.submit([commandEncoder.finish()]);
+    }
+
+    private getDepthStencilClearPipeline(
+        format: GPUTextureFormat,
+        clearDepth: boolean,
+        clearStencil: boolean,
+        stencilWriteMask: number,
+        sampleCount: number,
+    ): GPURenderPipeline {
+        const key = `${format}:depth=${clearDepth ? 1 : 0}:stencil=${clearStencil ? 1 : 0}:` +
+            `mask=${stencilWriteMask}:samples=${sampleCount}`;
+        const cached = this.depthStencilClearPipelines.get(key);
+        if (cached) return cached;
+        const module = this.hydDevice.createShaderModule({
+            label: `depth/stencil clear shader ${key}`,
+            code: `
+struct ClearDepth { value: f32 };
+@group(0) @binding(0) var<uniform> clearDepthValue : ClearDepth;
+
+@vertex
+fn vertexMain(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
+  let positions = array<vec2f, 3>(
+    vec2f(-1.0, -1.0),
+    vec2f(3.0, -1.0),
+    vec2f(-1.0, 3.0)
+  );
+  return vec4f(positions[index], clearDepthValue.value, 1.0);
+}
+
+@fragment
+fn fragmentMain() {}
+`,
+        });
+        const hasDepth = format.includes("depth");
+        const hasStencil = format.includes("stencil");
+        const depthStencil: GPUDepthStencilState = { format };
+        if (hasDepth) {
+            depthStencil.depthWriteEnabled = clearDepth;
+            depthStencil.depthCompare = "always";
+        }
+        if (hasStencil) {
+            const stencilFace: GPUStencilFaceState = {
+                compare: "always",
+                failOp: "keep",
+                depthFailOp: "keep",
+                passOp: clearStencil ? "replace" : "keep",
+            };
+            depthStencil.stencilFront = stencilFace;
+            depthStencil.stencilBack = stencilFace;
+            depthStencil.stencilReadMask = 0xff;
+            depthStencil.stencilWriteMask = clearStencil ? stencilWriteMask & 0xff : 0;
+        }
+        const pipeline = this.hydDevice.createRenderPipeline({
+            label: `depth/stencil clear pipeline ${key}`,
+            layout: "auto",
+            vertex: { module, entryPoint: "vertexMain" },
+            fragment: { module, entryPoint: "fragmentMain", targets: [] },
+            primitive: { topology: "triangle-list" },
+            depthStencil,
+            multisample: { count: sampleCount },
+        });
+        this.depthStencilClearPipelines.set(key, pipeline);
+        return pipeline;
+    }
+
+    private clearDepthStencilWithMask(mask: GLbitfield) {
+        const clearDepth = Boolean(mask & WebGL2RenderingContext.DEPTH_BUFFER_BIT);
+        const clearStencil = Boolean(mask & WebGL2RenderingContext.STENCIL_BUFFER_BIT);
+        if (!clearDepth && !clearStencil) return;
+        const framebuffer = this.hydGlobalState.commonState.drawFramebufferBinding;
+        const depth = clearDepth
+            ? this.framebufferAttachment(framebuffer, WebGL2RenderingContext.DEPTH_ATTACHMENT)
+            : null;
+        const stencil = clearStencil
+            ? this.framebufferAttachment(framebuffer, WebGL2RenderingContext.STENCIL_ATTACHMENT)
+            : null;
+        const attachment = depth || stencil;
+        if (!attachment || (depth && stencil && !this.sameFramebufferImage(depth, stencil))) return;
+        const stencilWriteMask = this.hydGlobalState.stencilState.frontWriteMask & 0xff;
+        const pipeline = this.getDepthStencilClearPipeline(
+            attachment.format,
+            clearDepth,
+            clearStencil,
+            stencilWriteMask,
+            attachment.sampleCount,
+        );
+        if (!this.depthStencilClearUniformBuffer) {
+            this.depthStencilClearUniformBuffer = this.hydDevice.createBuffer({
+                label: "depth/stencil clear uniforms",
+                size: 16,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.UNIFORM,
+            });
+        }
+        this.hydDevice.queue.writeBuffer(
+            this.depthStencilClearUniformBuffer,
+            0,
+            new Float32Array([this.hydGlobalState.clearState.depth, 0, 0, 0]),
+        );
+        const bindGroup = this.hydDevice.createBindGroup({
+            label: "depth/stencil clear bind group",
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [{ binding: 0, resource: { buffer: this.depthStencilClearUniformBuffer } }],
+        });
+        const depthStencilAttachment: GPURenderPassDepthStencilAttachment = { view: attachment.view };
+        if (attachment.format.includes("depth")) {
+            depthStencilAttachment.depthLoadOp = "load";
+            depthStencilAttachment.depthStoreOp = "store";
+        }
+        if (attachment.format.includes("stencil")) {
+            depthStencilAttachment.stencilLoadOp = "load";
+            depthStencilAttachment.stencilStoreOp = "store";
+        }
+        const encoder = this.hydDevice.createCommandEncoder({ label: "depth/stencil masked clear" });
+        const pass = encoder.beginRenderPass({ colorAttachments: [], depthStencilAttachment });
+        if (this.hydGlobalState.miscState.scissorTest) {
+            pass.setScissorRect(...this.toGpuScissorRect());
+        }
+        if (clearStencil) pass.setStencilReference(this.hydGlobalState.clearState.stencil & 0xff);
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.draw(3);
+        pass.end();
+        this.hydDevice.queue.submit([encoder.finish()]);
     }
 
     bindRenderbuffer(target: GLenum, renderbuffer: HydTexture | null) {
@@ -3075,6 +4683,127 @@ ${assignments}
         this.hydGlobalState.recordTransition("bindRenderbuffer", target, renderbuffer ? renderbuffer.hash : "null");
     }
 
+    private renderbufferGpuFormat(internalFormat: GLenum): GPUTextureFormat | null {
+        const halfFloatColorFormat = internalFormat === WebGL2RenderingContext.R16F ||
+            internalFormat === WebGL2RenderingContext.RG16F ||
+            internalFormat === WebGL2RenderingContext.RGBA16F;
+        const fullFloatColorFormat = internalFormat === WebGL2RenderingContext.R32F ||
+            internalFormat === WebGL2RenderingContext.RG32F ||
+            internalFormat === WebGL2RenderingContext.RGBA32F ||
+            internalFormat === WebGL2RenderingContext.R11F_G11F_B10F;
+        if (halfFloatColorFormat &&
+            !this.enabledExtensions.has("EXT_COLOR_BUFFER_FLOAT") &&
+            !this.enabledExtensions.has("EXT_COLOR_BUFFER_HALF_FLOAT")) {
+            return null;
+        }
+        if (fullFloatColorFormat && !this.enabledExtensions.has("EXT_COLOR_BUFFER_FLOAT")) {
+            return null;
+        }
+        switch (internalFormat) {
+            case GL_SRGB8_ALPHA8_EXT:
+                if (this.hydContextType !== "webgl2" && !this.enabledExtensions.has("EXT_SRGB")) return null;
+                return "rgba8unorm-srgb";
+            case WebGL2RenderingContext.DEPTH_COMPONENT16:
+                return "depth16unorm";
+            case WebGL2RenderingContext.DEPTH_COMPONENT24:
+                return "depth24plus";
+            case WebGL2RenderingContext.DEPTH24_STENCIL8:
+            case WebGL2RenderingContext.DEPTH_STENCIL:
+                return "depth24plus-stencil8";
+            case WebGL2RenderingContext.DEPTH32F_STENCIL8:
+                return "depth32float-stencil8";
+            case WebGL2RenderingContext.DEPTH_COMPONENT32F:
+                return "depth32float";
+            case WebGL2RenderingContext.STENCIL_INDEX8:
+                return "stencil8";
+            case WebGL2RenderingContext.RGBA4:
+            case WebGL2RenderingContext.RGB565:
+            case WebGL2RenderingContext.RGB5_A1:
+            case WebGL2RenderingContext.RGB8:
+            case WebGL2RenderingContext.RGBA8:
+                return "rgba8unorm";
+            case WebGL2RenderingContext.R8:
+                return "r8unorm";
+            case WebGL2RenderingContext.RG8:
+                return "rg8unorm";
+            case WebGL2RenderingContext.R8UI:
+                return "r8uint";
+            case WebGL2RenderingContext.R8I:
+                return "r8sint";
+            case WebGL2RenderingContext.R16UI:
+                return "r16uint";
+            case WebGL2RenderingContext.R16I:
+                return "r16sint";
+            case WebGL2RenderingContext.R32UI:
+                return "r32uint";
+            case WebGL2RenderingContext.R32I:
+                return "r32sint";
+            case WebGL2RenderingContext.RG8UI:
+                return "rg8uint";
+            case WebGL2RenderingContext.RG8I:
+                return "rg8sint";
+            case WebGL2RenderingContext.RG16UI:
+                return "rg16uint";
+            case WebGL2RenderingContext.RG16I:
+                return "rg16sint";
+            case WebGL2RenderingContext.RG32UI:
+                return "rg32uint";
+            case WebGL2RenderingContext.RG32I:
+                return "rg32sint";
+            case WebGL2RenderingContext.RGB10_A2:
+                return "rgb10a2unorm";
+            case WebGL2RenderingContext.RGB10_A2UI:
+                return "rgb10a2uint";
+            case WebGL2RenderingContext.RGBA8UI:
+                return "rgba8uint";
+            case WebGL2RenderingContext.RGBA8I:
+                return "rgba8sint";
+            case WebGL2RenderingContext.RGBA16UI:
+                return "rgba16uint";
+            case WebGL2RenderingContext.RGBA16I:
+                return "rgba16sint";
+            case WebGL2RenderingContext.RGBA32UI:
+                return "rgba32uint";
+            case WebGL2RenderingContext.RGBA32I:
+                return "rgba32sint";
+            case WebGL2RenderingContext.R16F:
+                return "r16float";
+            case WebGL2RenderingContext.RG16F:
+                return "rg16float";
+            case WebGL2RenderingContext.RGBA16F:
+                return "rgba16float";
+            case WebGL2RenderingContext.R32F:
+                return "r32float";
+            case WebGL2RenderingContext.RG32F:
+                return "rg32float";
+            case WebGL2RenderingContext.RGBA32F:
+                return "rgba32float";
+            default:
+                return null;
+        }
+    }
+
+    private allocateRenderbufferStorage(
+        renderbuffer: HydTexture,
+        internalFormat: GLenum,
+        width: GLsizei,
+        height: GLsizei,
+        requestedSamples: number,
+    ): boolean {
+        const format = this.renderbufferGpuFormat(internalFormat);
+        if (!format) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return false;
+        }
+        const actualSamples = requestedSamples > 0
+            ? Number(enumToConstant.get(WebGL2RenderingContext.MAX_SAMPLES)) || 4
+            : 1;
+        renderbuffer.renderbufferInternalFormat = internalFormat;
+        renderbuffer.renderbufferSamples = requestedSamples > 0 ? actualSamples : 0;
+        renderbuffer.renderbufferStorage(format, width, height, actualSamples);
+        return true;
+    }
+
     renderbufferStorage(target: GLenum, internalFormat: GLenum, width: GLsizei, height: GLsizei) {
         if (target !== WebGL2RenderingContext.RENDERBUFFER) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
@@ -3085,53 +4814,56 @@ ${assignments}
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
             return;
         }
-        if (target === WebGL2RenderingContext.RENDERBUFFER) {
-            const renderbuffer = this.hydGlobalState.commonState.renderbufferBinding;
-            if (!renderbuffer) {
-                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
-                return;
-            }
-            this._der_flush();
-            renderbuffer.renderbufferInternalFormat = internalFormat;
-            renderbuffer.renderbufferSamples = 0;
-            switch (internalFormat) {
-                case GL_SRGB8_ALPHA8_EXT:
-                    if (this.hydContextType !== "webgl2" && !this.enabledExtensions.has("EXT_SRGB")) {
-                        this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
-                        return;
-                    }
-                    renderbuffer.renderbufferStorage('rgba8unorm-srgb', width, height);
-                    break;
-                case WebGL2RenderingContext.DEPTH_COMPONENT16:
-                    renderbuffer.renderbufferStorage('depth16unorm', width, height);
-                    break;
-                case WebGL2RenderingContext.DEPTH_COMPONENT24:
-                    renderbuffer.renderbufferStorage('depth24plus', width, height);
-                    break;
-                case WebGL2RenderingContext.DEPTH24_STENCIL8:
-                case WebGL2RenderingContext.DEPTH_STENCIL:
-                    renderbuffer.renderbufferStorage('depth24plus-stencil8', width, height);
-                    break;
-                case WebGL2RenderingContext.DEPTH_COMPONENT32F:
-                    renderbuffer.renderbufferStorage('depth32float', width, height);
-                    break;
-                case WebGL2RenderingContext.STENCIL_INDEX8:
-                    renderbuffer.renderbufferStorage('stencil8', width, height);
-                    break;
-                case WebGL2RenderingContext.RGBA32F:
-                    renderbuffer.renderbufferStorage('rgba32float', width, height);
-                    break;
-                case WebGL2RenderingContext.RGBA4:
-                case WebGL2RenderingContext.RGB565:
-                case WebGL2RenderingContext.RGB5_A1:
-                    renderbuffer.renderbufferStorage('rgba8unorm', width, height);
-                    break;
-                default:
-                    this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
-                    return;
-            }
+        const renderbuffer = this.hydGlobalState.commonState.renderbufferBinding;
+        if (!renderbuffer) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
         }
+        this._der_flush();
+        if (!this.allocateRenderbufferStorage(renderbuffer, internalFormat, width, height, 0)) return;
         this.hydGlobalState.recordTransition("renderbufferStorage", target, internalFormat, width, height);
+    }
+
+    renderbufferStorageMultisample(
+        target: GLenum,
+        samples: GLsizei,
+        internalFormat: GLenum,
+        width: GLsizei,
+        height: GLsizei,
+    ) {
+        if (this.hydContextType !== "webgl2" || target !== WebGL2RenderingContext.RENDERBUFFER) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        const maxSamples = Number(enumToConstant.get(WebGL2RenderingContext.MAX_SAMPLES)) || 4;
+        const maxSize = Number(enumToConstant.get(WebGL2RenderingContext.MAX_RENDERBUFFER_SIZE)) || 4096;
+        if (samples < 0 || width < 0 || height < 0 || width > maxSize || height > maxSize) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const renderbuffer = this.hydGlobalState.commonState.renderbufferBinding;
+        if (!renderbuffer) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (internalFormat === WebGL2RenderingContext.DEPTH_STENCIL && samples > 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (samples > maxSamples) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        this._der_flush();
+        if (!this.allocateRenderbufferStorage(renderbuffer, internalFormat, width, height, samples)) return;
+        this.hydGlobalState.recordTransition(
+            "renderbufferStorageMultisample",
+            target,
+            samples,
+            internalFormat,
+            width,
+            height,
+        );
     }
 
     enableVertexAttribArray(index: number) {
@@ -3144,6 +4876,7 @@ ${assignments}
         if (!attribute.enabled) {
             attribute.enabled = true;
             attribute.updateHash();
+            this.hydGlobalState.invalidateCurrentVertexAttribHash();
             this.hydGlobalState.recordTransition("enableVertexAttribArray", index);
         }
     }
@@ -3158,25 +4891,36 @@ ${assignments}
         if (attribute.enabled) {
             attribute.enabled = false;
             attribute.updateHash();
+            this.hydGlobalState.invalidateCurrentVertexAttribHash();
             this.hydGlobalState.recordTransition("disableVertexAttribArray", index);
         }
     }
 
-    private setCurrentVertexAttrib(index: number, x: number, y: number, z: number, w: number) {
+    private setCurrentVertexAttrib(
+        index: number,
+        x: number,
+        y: number,
+        z: number,
+        w: number,
+        valueType: "float" | "int" | "uint" = "float",
+    ) {
         index = Number(index) >>> 0;
         const values = this.hydGlobalState.currentVertexAttribValues[index];
         if (!values) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
             return;
         }
-        if (values[0] === x && values[1] === y && values[2] === z && values[3] === w) return;
+        if (values[0] === x && values[1] === y && values[2] === z && values[3] === w &&
+            this.hydGlobalState.currentVertexAttribValueTypes[index] === valueType) return;
         this._der_flush();
         values[0] = x;
         values[1] = y;
         values[2] = z;
         values[3] = w;
+        this.hydGlobalState.currentVertexAttribValueTypes[index] = valueType;
         this.hydGlobalState.updateCurrentVertexAttribBuffer(index);
-        this.hydGlobalState.recordTransition("vertexAttrib", index, x, y, z, w);
+        this.hydGlobalState.invalidateCurrentVertexAttribHash();
+        this.hydGlobalState.recordTransition("vertexAttrib", index, valueType, x, y, z, w);
     }
 
     vertexAttrib1f(index: number, x: number) {
@@ -3227,6 +4971,30 @@ ${assignments}
         this.vertexAttrib4f(index, values[0], values[1], values[2], values[3]);
     }
 
+    vertexAttribI4i(index: GLuint, x: GLint, y: GLint, z: GLint, w: GLint) {
+        this.setCurrentVertexAttrib(index, x | 0, y | 0, z | 0, w | 0, "int");
+    }
+
+    vertexAttribI4ui(index: GLuint, x: GLuint, y: GLuint, z: GLuint, w: GLuint) {
+        this.setCurrentVertexAttrib(index, x >>> 0, y >>> 0, z >>> 0, w >>> 0, "uint");
+    }
+
+    vertexAttribI4iv(index: GLuint, values: Int32List) {
+        if (!values || values.length < 4) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        this.vertexAttribI4i(index, values[0], values[1], values[2], values[3]);
+    }
+
+    vertexAttribI4uiv(index: GLuint, values: Uint32List) {
+        if (!values || values.length < 4) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        this.vertexAttribI4ui(index, values[0], values[1], values[2], values[3]);
+    }
+
     clearColor(r: number, g: number, b: number, a: number) {
         r = clampWebGlUnitFloat(r);
         g = clampWebGlUnitFloat(g);
@@ -3234,6 +5002,7 @@ ${assignments}
         a = clampWebGlUnitFloat(a);
         const [r1, g1, b1, a1] = this.hydGlobalState.clearState.color;
         if (r !== r1 || g !== g1 || b !== b1 || a !== a1) {
+            if (this.hydGlobalState.clearState.target !== 0) this._der_flush();
             this.hydGlobalState.clearState.color = [r, g, b, a];
             this.hydGlobalState.recordTransition("clearColor", r, g, b, a);
         }
@@ -3242,6 +5011,7 @@ ${assignments}
     clearDepth(depth: number) {
         depth = clampWebGlUnitFloat(depth);
         if (this.hydGlobalState.clearState.depth !== depth) {
+            if (this.hydGlobalState.clearState.target !== 0) this._der_flush();
             this.hydGlobalState.clearState.depth = depth;
             this.hydGlobalState.recordTransition("clearDepth", depth);
         }
@@ -3249,6 +5019,7 @@ ${assignments}
 
     clearStencil(stencil: number) {
         if (this.hydGlobalState.clearState.stencil !== stencil) {
+            if (this.hydGlobalState.clearState.target !== 0) this._der_flush();
             this.hydGlobalState.clearState.stencil = stencil;
             this.hydGlobalState.recordTransition("clearStencil", stencil);
         }
@@ -3266,6 +5037,18 @@ ${assignments}
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_FRAMEBUFFER_OPERATION);
             return;
         }
+        const drawFramebuffer = this.hydGlobalState.commonState.drawFramebufferBinding;
+        if ((mask & WebGL2RenderingContext.COLOR_BUFFER_BIT) &&
+            drawFramebuffer !== this.hydGlobalState.defaultFramebuffer &&
+            drawFramebuffer.drawBuffers.some((drawBuffer) => {
+                if (drawBuffer === WebGL2RenderingContext.NONE) return false;
+                const attachment = drawFramebuffer.attachments.get(drawBuffer);
+                return !!attachment && (attachment.format.endsWith("sint") || attachment.format.endsWith("uint"));
+            })) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (this.hydGlobalState.miscState.rasterizerDiscard) return;
         ensureAutoFrame();
         if (this.canvasSizeDirty) {
             this.updateCanvasSize();
@@ -3277,13 +5060,23 @@ ${assignments}
             this._der_flush();
         }
         let effectiveMask = mask;
+        const hasDepthBuffer = drawFramebuffer === this.hydGlobalState.defaultFramebuffer
+            ? this.hydGlobalState.contextAttributes.depth !== false
+            : Boolean(this.framebufferAttachment(drawFramebuffer, WebGL2RenderingContext.DEPTH_ATTACHMENT)?.depthBits);
+        const hasStencilBuffer = drawFramebuffer === this.hydGlobalState.defaultFramebuffer
+            ? this.hydGlobalState.contextAttributes.stencil === true
+            : Boolean(this.framebufferAttachment(drawFramebuffer, WebGL2RenderingContext.STENCIL_ATTACHMENT)?.stencilBits);
+        if (!hasDepthBuffer) effectiveMask &= ~WebGL2RenderingContext.DEPTH_BUFFER_BIT;
+        if (!hasStencilBuffer) effectiveMask &= ~WebGL2RenderingContext.STENCIL_BUFFER_BIT;
         let needsMaskedColorClear = false;
         if (mask & WebGL2RenderingContext.COLOR_BUFFER_BIT) {
             const writeMask = this.getColorWriteMask();
             const fullWriteMask = GPUColorWrite.RED | GPUColorWrite.GREEN | GPUColorWrite.BLUE | GPUColorWrite.ALPHA;
             if (writeMask === 0) {
                 effectiveMask &= ~WebGL2RenderingContext.COLOR_BUFFER_BIT;
-            } else if (writeMask !== fullWriteMask || this.hydGlobalState.miscState.scissorTest) {
+            } else if (writeMask !== fullWriteMask || this.hydGlobalState.miscState.scissorTest ||
+                (this.hydGlobalState.commonState.drawFramebufferBinding === this.hydGlobalState.defaultFramebuffer &&
+                    this.drawingBufferFormat === WebGL2RenderingContext.SRGB8_ALPHA8)) {
                 effectiveMask &= ~WebGL2RenderingContext.COLOR_BUFFER_BIT;
                 needsMaskedColorClear = true;
             }
@@ -3291,9 +5084,34 @@ ${assignments}
         if ((mask & WebGL2RenderingContext.DEPTH_BUFFER_BIT) && !this.hydGlobalState.depthState.writeMask) {
             effectiveMask &= ~WebGL2RenderingContext.DEPTH_BUFFER_BIT;
         }
+        const stencilWriteMask = this.hydGlobalState.stencilState.frontWriteMask & 0xff;
+        if ((effectiveMask & WebGL2RenderingContext.STENCIL_BUFFER_BIT) && stencilWriteMask === 0) {
+            effectiveMask &= ~WebGL2RenderingContext.STENCIL_BUFFER_BIT;
+        }
+        const depthStencilBits = WebGL2RenderingContext.DEPTH_BUFFER_BIT |
+            WebGL2RenderingContext.STENCIL_BUFFER_BIT;
+        const needsMaskedDepthStencilClear = this.hydGlobalState.miscState.scissorTest ||
+            (Boolean(effectiveMask & WebGL2RenderingContext.STENCIL_BUFFER_BIT) && stencilWriteMask !== 0xff);
+        const maskedDepthStencilClear = needsMaskedDepthStencilClear
+            ? effectiveMask & depthStencilBits
+            : 0;
         this.markDrawFramebufferAttachmentsAsRenderTargets(
             effectiveMask | (needsMaskedColorClear ? WebGL2RenderingContext.COLOR_BUFFER_BIT : 0),
         );
+        if (!this.hydGlobalState.miscState.scissorTest &&
+            drawFramebuffer !== this.hydGlobalState.defaultFramebuffer) {
+            if (effectiveMask & WebGL2RenderingContext.DEPTH_BUFFER_BIT) {
+                const attachment = this.framebufferAttachment(
+                    drawFramebuffer, WebGL2RenderingContext.DEPTH_ATTACHMENT);
+                if (attachment) attachment.attachment.uniformDepthValue = this.hydGlobalState.clearState.depth;
+            }
+            if (effectiveMask & WebGL2RenderingContext.STENCIL_BUFFER_BIT) {
+                const attachment = this.framebufferAttachment(
+                    drawFramebuffer, WebGL2RenderingContext.STENCIL_ATTACHMENT);
+                if (attachment) attachment.attachment.uniformStencilValue = this.hydGlobalState.clearState.stencil & 0xff;
+            }
+        }
+        effectiveMask &= ~maskedDepthStencilClear;
         if ((effectiveMask & WebGL2RenderingContext.COLOR_BUFFER_BIT || needsMaskedColorClear) &&
             this.hydGlobalState.commonState.drawFramebufferBinding === this.hydGlobalState.defaultFramebuffer &&
             this.hydGlobalState.__canvasTexture === this.defaultFramebufferBackingTexture) {
@@ -3316,11 +5134,11 @@ ${assignments}
         if (needsMaskedColorClear) {
             this.clearColorWithMask();
         }
-        if (effectiveMask === 0) {
-            return;
+        if (maskedDepthStencilClear) {
+            this.clearDepthStencilWithMask(maskedDepthStencilClear);
         }
-        if (this.hydGlobalState.miscState.scissorTest) {
-            this.hydGlobalState.recordTransition("clear", 0);
+        if (effectiveMask === 0) {
+            this.hydGlobalState.recordTransition("clearMaterialized", mask, 0);
             return;
         }
         const previousTarget = this.hydGlobalState.clearState.target;
@@ -3331,6 +5149,330 @@ ${assignments}
         // share a transition with the deferred loadOp clear, which keeps the
         // clear mask in state until the next draw.
         this.hydGlobalState.recordTransition("clearMaterialized", effectiveMask, previousTarget);
+    }
+
+    clearBufferfv(buffer: GLenum, drawbuffer: GLint, values: ArrayLike<number>, srcOffset: GLuint = 0) {
+        const length = this.uniformArrayLength(values);
+        if (!Number.isInteger(srcOffset) || srcOffset < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (buffer === WebGL2RenderingContext.COLOR) {
+            if (srcOffset + 4 > length) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+                return;
+            }
+            this.clearFloatColorBuffer(drawbuffer, [
+                Number(values[srcOffset]),
+                Number(values[srcOffset + 1]),
+                Number(values[srcOffset + 2]),
+                Number(values[srcOffset + 3]),
+            ]);
+            return;
+        }
+        if (buffer === WebGL2RenderingContext.DEPTH) {
+            if (drawbuffer !== 0 || srcOffset >= length) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+                return;
+            }
+            const savedDepth = this.hydGlobalState.clearState.depth;
+            const savedWriteMask = this.hydGlobalState.depthState.writeMask;
+            this.hydGlobalState.clearState.depth = clampWebGlUnitFloat(Number(values[srcOffset]));
+            this.hydGlobalState.depthState.writeMask = true;
+            this.clear(WebGL2RenderingContext.DEPTH_BUFFER_BIT);
+            this._der_flush();
+            this.hydGlobalState.clearState.depth = savedDepth;
+            this.hydGlobalState.depthState.writeMask = savedWriteMask;
+            return;
+        }
+        this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+    }
+
+    clearBufferiv(buffer: GLenum, drawbuffer: GLint, values: ArrayLike<number>, srcOffset: GLuint = 0) {
+        const length = this.uniformArrayLength(values);
+        if (!Number.isInteger(srcOffset) || srcOffset < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (buffer === WebGL2RenderingContext.STENCIL) {
+            if (drawbuffer !== 0 || srcOffset >= length) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+                return;
+            }
+            const savedStencil = this.hydGlobalState.clearState.stencil;
+            const savedFrontMask = this.hydGlobalState.stencilState.frontWriteMask;
+            const savedBackMask = this.hydGlobalState.stencilState.backWriteMask;
+            this.hydGlobalState.clearState.stencil = Number(values[srcOffset]) | 0;
+            this.hydGlobalState.stencilState.frontWriteMask = 0xffffffff;
+            this.hydGlobalState.stencilState.backWriteMask = 0xffffffff;
+            this.clear(WebGL2RenderingContext.STENCIL_BUFFER_BIT);
+            this._der_flush();
+            this.hydGlobalState.clearState.stencil = savedStencil;
+            this.hydGlobalState.stencilState.frontWriteMask = savedFrontMask;
+            this.hydGlobalState.stencilState.backWriteMask = savedBackMask;
+            return;
+        }
+        if (buffer === WebGL2RenderingContext.COLOR) {
+            if (srcOffset + 4 > length) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+                return;
+            }
+            this.clearIntegerColorBuffer(drawbuffer, [
+                Number(values[srcOffset]) | 0,
+                Number(values[srcOffset + 1]) | 0,
+                Number(values[srcOffset + 2]) | 0,
+                Number(values[srcOffset + 3]) | 0,
+            ], true);
+            return;
+        }
+        this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+    }
+
+    clearBufferuiv(buffer: GLenum, drawbuffer: GLint, values: ArrayLike<number>, srcOffset: GLuint = 0) {
+        const length = this.uniformArrayLength(values);
+        if (!Number.isInteger(srcOffset) || srcOffset < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (buffer === WebGL2RenderingContext.COLOR) {
+            if (srcOffset + 4 > length) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+                return;
+            }
+            this.clearIntegerColorBuffer(drawbuffer, [
+                Number(values[srcOffset]) >>> 0,
+                Number(values[srcOffset + 1]) >>> 0,
+                Number(values[srcOffset + 2]) >>> 0,
+                Number(values[srcOffset + 3]) >>> 0,
+            ], false);
+            return;
+        }
+        this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+    }
+
+    clearBufferfi(buffer: GLenum, drawbuffer: GLint, depth: GLfloat, stencil: GLint) {
+        if (buffer !== WebGL2RenderingContext.DEPTH_STENCIL) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (drawbuffer !== 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const clearState = this.hydGlobalState.clearState;
+        const savedDepth = clearState.depth;
+        const savedStencil = clearState.stencil;
+        const savedDepthMask = this.hydGlobalState.depthState.writeMask;
+        const savedFrontMask = this.hydGlobalState.stencilState.frontWriteMask;
+        const savedBackMask = this.hydGlobalState.stencilState.backWriteMask;
+        clearState.depth = clampWebGlUnitFloat(depth);
+        clearState.stencil = stencil | 0;
+        this.hydGlobalState.depthState.writeMask = true;
+        this.hydGlobalState.stencilState.frontWriteMask = 0xffffffff;
+        this.hydGlobalState.stencilState.backWriteMask = 0xffffffff;
+        this.clear(WebGL2RenderingContext.DEPTH_BUFFER_BIT | WebGL2RenderingContext.STENCIL_BUFFER_BIT);
+        this._der_flush();
+        clearState.depth = savedDepth;
+        clearState.stencil = savedStencil;
+        this.hydGlobalState.depthState.writeMask = savedDepthMask;
+        this.hydGlobalState.stencilState.frontWriteMask = savedFrontMask;
+        this.hydGlobalState.stencilState.backWriteMask = savedBackMask;
+    }
+
+    private clearFloatColorBuffer(drawbuffer: GLint, color: [number, number, number, number]) {
+        const maxDrawBuffers = Number(enumToConstant.get(WebGL2RenderingContext.MAX_DRAW_BUFFERS)) || 1;
+        if (!Number.isInteger(drawbuffer) || drawbuffer < 0 || drawbuffer >= maxDrawBuffers) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (this.framebufferStatus(this.hydGlobalState.commonState.drawFramebufferBinding) !== WebGL2RenderingContext.FRAMEBUFFER_COMPLETE) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_FRAMEBUFFER_OPERATION);
+            return;
+        }
+        ensureAutoFrame();
+        if (this.canvasSizeDirty) this.updateCanvasSize();
+        const framebuffer = this.hydGlobalState.commonState.drawFramebufferBinding;
+        let target: {
+            view: GPUTextureView,
+            depthSlice?: number,
+            format: GPUTextureFormat,
+            writeMask: GPUColorWriteFlags,
+            sampleCount: number,
+        } | null = null;
+        if (framebuffer === this.hydGlobalState.defaultFramebuffer) {
+            if (drawbuffer !== 0 || framebuffer.drawBuffers[0] === WebGL2RenderingContext.NONE) return;
+            this.ensureDefaultFramebufferRenderTarget();
+            target = {
+                view: this.hydGlobalState.__canvasView,
+                format: "bgra8unorm",
+                writeMask: GPUColorWrite.ALL,
+                sampleCount: 1,
+            };
+            if (this.drawingBufferFormat === WebGL2RenderingContext.SRGB8_ALPHA8) {
+                color = [linearToSrgb(color[0]), linearToSrgb(color[1]), linearToSrgb(color[2]), color[3]];
+            }
+            if (this.hydGlobalState.contextAttributes.alpha === false) color[3] = 1;
+        } else {
+            const drawBuffer = framebuffer.drawBuffers[drawbuffer] ?? WebGL2RenderingContext.NONE;
+            if (drawBuffer === WebGL2RenderingContext.NONE) return;
+            const attachment = framebuffer.attachments.get(drawBuffer);
+            if (!attachment) return;
+            if (/uint|sint/.test(attachment.format)) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            target = {
+                view: attachment.view,
+                depthSlice: attachment.depthSlice,
+                format: attachment.format,
+                writeMask: GPUColorWrite.ALL,
+                sampleCount: attachment.sampleCount,
+            };
+            attachment.attachment.markFramebufferRenderTarget();
+        }
+        if (this.hydGlobalState.miscState.rasterizerDiscard) return;
+        this._der_flush();
+        if (!this.maskedClearUniformBuffer) {
+            this.maskedClearUniformBuffer = this.hydDevice.createBuffer({
+                label: "masked-clear-uniforms",
+                size: 16,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.UNIFORM,
+            });
+        }
+        this.hydDevice.queue.writeBuffer(this.maskedClearUniformBuffer, 0, new Float32Array(color));
+        const pipeline = this.getMaskedClearPipeline([target]);
+        const bindGroup = this.hydDevice.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [{ binding: 0, resource: { buffer: this.maskedClearUniformBuffer } }],
+        });
+        const encoder = this.hydDevice.createCommandEncoder({ label: "clearBufferfv" });
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [{
+                view: target.view,
+                depthSlice: target.depthSlice,
+                loadOp: "load",
+                storeOp: "store",
+            }],
+        });
+        if (this.hydGlobalState.miscState.scissorTest) pass.setScissorRect(...this.toGpuScissorRect());
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.draw(3);
+        pass.end();
+        this.hydDevice.queue.submit([encoder.finish()]);
+        this.markFramebufferContentChanged();
+        if (framebuffer === this.hydGlobalState.defaultFramebuffer &&
+            this.hydGlobalState.__canvasTexture === this.defaultFramebufferBackingTexture) {
+            this.defaultFramebufferBackingNeedsPresentation = true;
+        }
+        this.hydGlobalState.recordTransition("clearBufferfv", drawbuffer, ...color);
+    }
+
+    private getIntegerClearPipeline(
+        format: GPUTextureFormat,
+        signed: boolean,
+        sampleCount: number,
+    ): GPURenderPipeline {
+        const key = `${format}:${signed ? "sint" : "uint"}:samples=${sampleCount}`;
+        let pipeline = this.integerClearPipelines.get(key);
+        if (pipeline) return pipeline;
+        const scalar = signed ? "i32" : "u32";
+        const module = this.hydDevice.createShaderModule({
+            label: `${key} clearBuffer shader`,
+            code: `
+struct ClearValue { value: vec4<${scalar}> }
+@group(0) @binding(0) var<uniform> clearValue : ClearValue;
+
+@vertex
+fn vertexMain(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
+  let positions = array<vec2f, 3>(
+    vec2f(-1.0, -1.0),
+    vec2f(3.0, -1.0),
+    vec2f(-1.0, 3.0)
+  );
+  return vec4f(positions[index], 0.0, 1.0);
+}
+
+@fragment
+fn fragmentMain() -> @location(0) vec4<${scalar}> {
+  return clearValue.value;
+}
+`,
+        });
+        pipeline = this.hydDevice.createRenderPipeline({
+            label: `${key} clearBuffer pipeline`,
+            layout: "auto",
+            vertex: { module, entryPoint: "vertexMain" },
+            fragment: { module, entryPoint: "fragmentMain", targets: [{ format }] },
+            primitive: { topology: "triangle-list" },
+            multisample: { count: sampleCount },
+        });
+        this.integerClearPipelines.set(key, pipeline);
+        return pipeline;
+    }
+
+    private clearIntegerColorBuffer(
+        drawbuffer: GLint,
+        color: [number, number, number, number],
+        signed: boolean,
+    ) {
+        const maxDrawBuffers = Number(enumToConstant.get(WebGL2RenderingContext.MAX_DRAW_BUFFERS)) || 1;
+        if (!Number.isInteger(drawbuffer) || drawbuffer < 0 || drawbuffer >= maxDrawBuffers) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const framebuffer = this.hydGlobalState.commonState.drawFramebufferBinding;
+        if (this.framebufferStatus(framebuffer) !== WebGL2RenderingContext.FRAMEBUFFER_COMPLETE) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_FRAMEBUFFER_OPERATION);
+            return;
+        }
+        if (framebuffer === this.hydGlobalState.defaultFramebuffer) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const drawBuffer = framebuffer.drawBuffers[drawbuffer] ?? WebGL2RenderingContext.NONE;
+        if (drawBuffer === WebGL2RenderingContext.NONE) return;
+        const attachment = framebuffer.attachments.get(drawBuffer);
+        if (!attachment) return;
+        if (signed ? !attachment.format.endsWith("sint") : !attachment.format.endsWith("uint")) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (this.hydGlobalState.miscState.rasterizerDiscard) return;
+        this._der_flush();
+        attachment.attachment.markFramebufferRenderTarget();
+        if (!this.integerClearUniformBuffer) {
+            this.integerClearUniformBuffer = this.hydDevice.createBuffer({
+                label: "integer clearBuffer uniforms",
+                size: 16,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.UNIFORM,
+            });
+        }
+        const upload = signed ? new Int32Array(color) : new Uint32Array(color);
+        this.hydDevice.queue.writeBuffer(this.integerClearUniformBuffer, 0, upload);
+        const pipeline = this.getIntegerClearPipeline(attachment.format, signed, attachment.sampleCount);
+        const bindGroup = this.hydDevice.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [{ binding: 0, resource: { buffer: this.integerClearUniformBuffer } }],
+        });
+        const encoder = this.hydDevice.createCommandEncoder({ label: "integer clearBuffer" });
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [{
+                view: attachment.view,
+                depthSlice: attachment.depthSlice,
+                loadOp: "load",
+                storeOp: "store",
+            }],
+        });
+        if (this.hydGlobalState.miscState.scissorTest) pass.setScissorRect(...this.toGpuScissorRect());
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.draw(3);
+        pass.end();
+        this.hydDevice.queue.submit([encoder.finish()]);
+        this.markFramebufferContentChanged();
+        this.hydGlobalState.recordTransition(
+            signed ? "clearBufferiv" : "clearBufferuiv", drawbuffer, ...color);
     }
 
     depthFunc(func: GLenum) {
@@ -3387,19 +5529,96 @@ ${assignments}
         }
     }
 
+    private isValidBufferTarget(target: GLenum): boolean {
+        if (target === WebGL2RenderingContext.ARRAY_BUFFER ||
+            target === WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER) {
+            return true;
+        }
+        return this.hydContextType === "webgl2" && (
+            target === WebGL2RenderingContext.COPY_READ_BUFFER ||
+            target === WebGL2RenderingContext.COPY_WRITE_BUFFER ||
+            target === WebGL2RenderingContext.PIXEL_PACK_BUFFER ||
+            target === WebGL2RenderingContext.PIXEL_UNPACK_BUFFER ||
+            target === WebGL2RenderingContext.TRANSFORM_FEEDBACK_BUFFER ||
+            target === WebGL2RenderingContext.UNIFORM_BUFFER
+        );
+    }
+
     private bufferBindingKindForTarget(target: GLenum): "element-array" | "other" | null {
         if (target === WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER) {
             return "element-array";
         }
-        if (target === WebGL2RenderingContext.ARRAY_BUFFER) {
+        if (target === WebGL2RenderingContext.ARRAY_BUFFER ||
+            target === WebGL2RenderingContext.PIXEL_PACK_BUFFER ||
+            target === WebGL2RenderingContext.PIXEL_UNPACK_BUFFER ||
+            target === WebGL2RenderingContext.TRANSFORM_FEEDBACK_BUFFER ||
+            target === WebGL2RenderingContext.UNIFORM_BUFFER) {
             return "other";
         }
-        if (this.hydContextType === "webgl2" &&
-            (target === WebGL2RenderingContext.PIXEL_PACK_BUFFER ||
-                target === WebGL2RenderingContext.PIXEL_UNPACK_BUFFER)) {
-            return "other";
+        // COPY_* targets deliberately preserve the buffer's first-binding type.
+        return null;
+    }
+
+    private getBoundBufferForTarget(target: GLenum): HydBuffer | null {
+        if (!this.isValidBufferTarget(target)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return null;
+        }
+        switch (target) {
+            case WebGL2RenderingContext.ARRAY_BUFFER:
+                return this.hydGlobalState.commonState.arrayBufferBinding;
+            case WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER:
+                return this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding;
+            case WebGL2RenderingContext.COPY_READ_BUFFER:
+                return this.hydGlobalState.commonState.copyReadBufferBinding;
+            case WebGL2RenderingContext.COPY_WRITE_BUFFER:
+                return this.hydGlobalState.commonState.copyWriteBufferBinding;
+            case WebGL2RenderingContext.PIXEL_PACK_BUFFER:
+                return this.hydGlobalState.commonState.pixelPackBufferBinding;
+            case WebGL2RenderingContext.PIXEL_UNPACK_BUFFER:
+                return this.hydGlobalState.commonState.pixelUnpackBufferBinding;
+            case WebGL2RenderingContext.TRANSFORM_FEEDBACK_BUFFER:
+                return this.hydGlobalState.commonState.transformFeedbackBufferBinding;
+            case WebGL2RenderingContext.UNIFORM_BUFFER:
+                return this.hydGlobalState.commonState.uniformBufferBinding;
         }
         return null;
+    }
+
+    private setBoundBufferForTarget(target: GLenum, buffer: HydBuffer | null) {
+        switch (target) {
+            case WebGL2RenderingContext.ARRAY_BUFFER:
+                this.hydGlobalState.commonState.arrayBufferBinding = buffer;
+                break;
+            case WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER:
+                this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding = buffer;
+                this.hydGlobalState.recordTransition("bindBuffer", target, buffer ? buffer.hash : "null");
+                break;
+            case WebGL2RenderingContext.COPY_READ_BUFFER:
+                this.hydGlobalState.commonState.copyReadBufferBinding = buffer;
+                break;
+            case WebGL2RenderingContext.COPY_WRITE_BUFFER:
+                this.hydGlobalState.commonState.copyWriteBufferBinding = buffer;
+                break;
+            case WebGL2RenderingContext.PIXEL_PACK_BUFFER:
+                this.hydGlobalState.commonState.pixelPackBufferBinding = buffer;
+                break;
+            case WebGL2RenderingContext.PIXEL_UNPACK_BUFFER:
+                this.hydGlobalState.commonState.pixelUnpackBufferBinding = buffer;
+                break;
+            case WebGL2RenderingContext.TRANSFORM_FEEDBACK_BUFFER:
+                this.hydGlobalState.commonState.transformFeedbackBufferBinding = buffer;
+                break;
+            case WebGL2RenderingContext.UNIFORM_BUFFER:
+                this.hydGlobalState.commonState.uniformBufferBinding = buffer;
+                break;
+        }
+        if (target === WebGL2RenderingContext.COPY_READ_BUFFER ||
+            target === WebGL2RenderingContext.COPY_WRITE_BUFFER ||
+            target === WebGL2RenderingContext.TRANSFORM_FEEDBACK_BUFFER ||
+            target === WebGL2RenderingContext.UNIFORM_BUFFER) {
+            this.invalidateDrawSemanticValidation();
+        }
     }
 
     bindBuffer(target: GLenum, buffer: HydBuffer | object | null) {
@@ -3417,44 +5636,10 @@ ${assignments}
             }
         }
         if (target === WebGL2RenderingContext.ARRAY_BUFFER &&
-            buffer === this.hydGlobalState.commonState.arrayBufferBinding) {
-            return;
-        }
+            buffer === this.hydGlobalState.commonState.arrayBufferBinding) return;
         if (target === WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER &&
-            buffer === this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding) {
-            return;
-        }
-        if (this.hydContextType === "webgl2" && target === WebGL2RenderingContext.PIXEL_PACK_BUFFER &&
-            buffer === this.hydGlobalState.commonState.pixelPackBufferBinding) {
-            return;
-        }
-        if (this.hydContextType === "webgl2" && target === WebGL2RenderingContext.PIXEL_UNPACK_BUFFER &&
-            buffer === this.hydGlobalState.commonState.pixelUnpackBufferBinding) {
-            return;
-        }
-        if (buffer instanceof HydBuffer &&
-            (target === WebGL2RenderingContext.ARRAY_BUFFER || target === WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER)) {
-            if (buffer.ownerToken !== this.contextToken || buffer.deleted) {
-                this.setObjectValidationError(buffer);
-                return;
-            }
-            const bindingKind = target === WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER ? "element-array" : "other";
-            if (buffer.bindingKind && buffer.bindingKind !== bindingKind) {
-                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
-                return;
-            }
-            buffer.bindingKind = bindingKind;
-            buffer.initialized = true;
-            if (target === WebGL2RenderingContext.ARRAY_BUFFER) {
-                this.hydGlobalState.commonState.arrayBufferBinding = buffer;
-            } else {
-                this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding = buffer;
-                this.hydGlobalState.recordTransition("bindBuffer", target, buffer.hash);
-            }
-            return;
-        }
-        const bindingKind = this.bufferBindingKindForTarget(target);
-        if (!bindingKind) {
+            buffer === this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding) return;
+        if (!this.isValidBufferTarget(target)) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
             return;
         }
@@ -3468,58 +5653,79 @@ ${assignments}
         } else {
             hydBuffer = this.normalizeBuffer(buffer);
         }
-        if (hydBuffer && hydBuffer.bindingKind && hydBuffer.bindingKind !== bindingKind) {
+        if (this.getBoundBufferForTarget(target) === hydBuffer) return;
+        const bindingKind = this.bufferBindingKindForTarget(target);
+        const copyTarget = target === WebGL2RenderingContext.COPY_READ_BUFFER ||
+            target === WebGL2RenderingContext.COPY_WRITE_BUFFER;
+        if (hydBuffer && bindingKind && hydBuffer.bindingKind && hydBuffer.bindingKind !== bindingKind) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
-        if (hydBuffer && !hydBuffer.bindingKind) {
-            hydBuffer.bindingKind = bindingKind;
+        if (hydBuffer) {
+            if (bindingKind && !hydBuffer.bindingKind) hydBuffer.bindingKind = bindingKind;
+            if (copyTarget && !hydBuffer.bindingKind) hydBuffer.bindingKind = "other";
+            hydBuffer.initialized = true;
         }
-        if (target === WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER) {
-            if (hydBuffer) hydBuffer.initialized = true;
-            if (this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding !== hydBuffer) {
-                this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding = hydBuffer;
-                this.hydGlobalState.recordTransition("bindBuffer", target, hydBuffer ? hydBuffer.hash : "null");
-            }
-        } else if (target === WebGL2RenderingContext.ARRAY_BUFFER) {
-            if (hydBuffer) hydBuffer.initialized = true;
-            if (this.hydGlobalState.commonState.arrayBufferBinding !== hydBuffer) {
-                this.hydGlobalState.commonState.arrayBufferBinding = hydBuffer;
-            }
-        } else if (target === WebGL2RenderingContext.PIXEL_PACK_BUFFER) {
-            if (hydBuffer) hydBuffer.initialized = true;
-            if (this.hydGlobalState.commonState.pixelPackBufferBinding !== hydBuffer) {
-                this.hydGlobalState.commonState.pixelPackBufferBinding = hydBuffer;
-            }
-        } else if (target === WebGL2RenderingContext.PIXEL_UNPACK_BUFFER) {
-            if (hydBuffer) hydBuffer.initialized = true;
-            if (this.hydGlobalState.commonState.pixelUnpackBufferBinding !== hydBuffer) {
-                this.hydGlobalState.commonState.pixelUnpackBufferBinding = hydBuffer;
-            }
-        }
+        this.setBoundBufferForTarget(target, hydBuffer);
     }
 
-    private getBoundBufferForTarget(target: GLenum): HydBuffer | null {
-        if (!this.bufferBindingKindForTarget(target)) {
-            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+    private bufferIsBoundForActiveTransformFeedback(buffer: HydBuffer | null): boolean {
+        return !!buffer && Array.from(this.transformFeedbackObjects).some((feedback) =>
+            feedback.active && feedback.bufferBindings.some((binding) => binding?.buffer === buffer));
+    }
+
+    private bufferIsReferencedByCurrentOrActiveTransformFeedback(buffer: HydBuffer | null): boolean {
+        if (!buffer) return false;
+        if (this.transformFeedbackBinding.bufferBindings.some((binding) => binding?.buffer === buffer)) return true;
+        return this.bufferIsBoundForActiveTransformFeedback(buffer);
+    }
+
+    private bufferHasNonTransformFeedbackBinding(buffer: HydBuffer): boolean {
+        const common = this.hydGlobalState.commonState;
+        if (common.arrayBufferBinding === buffer ||
+            common.copyReadBufferBinding === buffer || common.copyWriteBufferBinding === buffer ||
+            common.pixelPackBufferBinding === buffer || common.pixelUnpackBufferBinding === buffer ||
+            common.uniformBufferBinding === buffer || common.vertexArrayBinding.elementArrayBufferBinding === buffer ||
+            common.vertexArrayBinding.attributes.some((attribute) => attribute.buffer === buffer) ||
+            this.uniformBufferBindings.some((binding) => binding?.buffer === buffer)) return true;
+        return false;
+    }
+
+    private bufferOperationConflictsWithTransformFeedback(buffer: HydBuffer, target: GLenum): boolean {
+        if (!this.bufferIsReferencedByCurrentOrActiveTransformFeedback(buffer)) return false;
+        if (this.bufferIsBoundForActiveTransformFeedback(buffer)) return true;
+        return target !== WebGL2RenderingContext.TRANSFORM_FEEDBACK_BUFFER ||
+            this.bufferHasNonTransformFeedbackBinding(buffer);
+    }
+
+    private invalidateDerivedVertexState(invalidated: boolean) {
+        if (!invalidated) return;
+        this.hydGlobalState.invalidateDerivedVertexState();
+        this.lastDrawPbv = null;
+        this.lastArrayDraw = null;
+        this.lastIndexedDraw = null;
+    }
+
+    private bufferSourceSubrange(data: ArrayBufferLike | ArrayBufferView, srcOffset: number = 0, length?: number): Uint8Array | null {
+        const bytesPerElement = ArrayBuffer.isView(data) ? ((data as any).BYTES_PER_ELEMENT || 1) : 1;
+        const byteLength = data.byteLength;
+        const elementLength = ArrayBuffer.isView(data) && typeof (data as any).length === "number"
+            ? (data as any).length
+            : Math.floor(byteLength / bytesPerElement);
+        const offset = toWebGlInt64(srcOffset);
+        const requestedLength = length === undefined || Number(length) === 0
+            ? elementLength - offset
+            : toWebGlInt64(length);
+        if (offset < 0 || requestedLength < 0 || offset > elementLength || offset + requestedLength > elementLength) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
             return null;
         }
-        if (target === WebGL2RenderingContext.ARRAY_BUFFER) {
-            return this.hydGlobalState.commonState.arrayBufferBinding;
-        }
-        if (target === WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER) {
-            return this.hydGlobalState.commonState.vertexArrayBinding.elementArrayBufferBinding;
-        }
-        if (target === WebGL2RenderingContext.PIXEL_PACK_BUFFER) {
-            return this.hydGlobalState.commonState.pixelPackBufferBinding;
-        }
-        if (target === WebGL2RenderingContext.PIXEL_UNPACK_BUFFER) {
-            return this.hydGlobalState.commonState.pixelUnpackBufferBinding;
-        }
-        return null;
+        const sourceBuffer = ArrayBuffer.isView(data) ? data.buffer : data;
+        const sourceByteOffset = (ArrayBuffer.isView(data) ? data.byteOffset : 0) + offset * bytesPerElement;
+        return new Uint8Array(sourceBuffer, sourceByteOffset, requestedLength * bytesPerElement);
     }
 
-    bufferData(target: GLenum, data: any, usage: GLenum) {
+    bufferData(target: GLenum, data: any, usage: GLenum, ...sourceRange: [GLuint?, GLuint?]) {
         const drawUsage = usage === WebGL2RenderingContext.STATIC_DRAW ||
             usage === WebGL2RenderingContext.DYNAMIC_DRAW ||
             usage === WebGL2RenderingContext.STREAM_DRAW;
@@ -3533,12 +5739,16 @@ ${assignments}
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
             return;
         }
-        if (!this.bufferBindingKindForTarget(target)) {
+        if (!this.isValidBufferTarget(target)) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
             return;
         }
         const buffer = this.getBoundBufferForTarget(target);
         if (!buffer) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (this.bufferOperationConflictsWithTransformFeedback(buffer, target)) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
@@ -3549,8 +5759,12 @@ ${assignments}
             return;
         }
         if (isBufferSource(data)) {
-            source = data;
-            size = data.byteLength;
+            const range = this.hydContextType === "webgl2" && sourceRange.length > 0
+                ? this.bufferSourceSubrange(data, sourceRange[0], sourceRange[1])
+                : this.bufferSourceSubrange(data);
+            if (!range) return;
+            source = range;
+            size = range.byteLength;
         } else {
             const converted = Number(data);
             size = Number.isFinite(converted) ? Math.trunc(converted) : 0;
@@ -3561,19 +5775,12 @@ ${assignments}
         }
 
         this._der_flush();
-        if (target === WebGL2RenderingContext.ARRAY_BUFFER) {
-            buffer.descriptor.usage |= GPUBufferUsage.VERTEX;
-        } else if (target === WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER) {
-            buffer.descriptor.usage |= GPUBufferUsage.INDEX;
-        } else if (target === WebGL2RenderingContext.PIXEL_PACK_BUFFER || target === WebGL2RenderingContext.PIXEL_UNPACK_BUFFER) {
-            buffer.descriptor.usage |= GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
-        }
-
         buffer.webglSize = size;
-        buffer.descriptor.size = Math.max(4, Math.ceil(size / 4) * 4);
+        buffer.descriptor.size = physicalWebGlBufferSize(size);
         const invalidatesConvertedVertices = buffer.hasConvertedVertexBuffers;
         buffer.write(source, 0);
         buffer.webglUsage = usage;
+        this.hydGlobalState.invalidateUniformBufferBindingHash();
         this.hydGlobalState.recordTransition(
             "bufferData",
             target,
@@ -3581,10 +5788,11 @@ ${assignments}
             size,
             invalidatesConvertedVertices ? buffer.version : 0,
         );
+        this.invalidateDerivedVertexState(invalidatesConvertedVertices);
     }
 
-    bufferSubData(target: GLenum, dstOffset: GLintptr, data: any) {
-        if (!this.bufferBindingKindForTarget(target)) {
+    bufferSubData(target: GLenum, dstOffset: GLintptr, data: any, ...sourceRange: [GLuint?, GLuint?]) {
+        if (!this.isValidBufferTarget(target)) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
             return;
         }
@@ -3593,34 +5801,219 @@ ${assignments}
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
+        if (this.bufferOperationConflictsWithTransformFeedback(buffer, target)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         if (!isBufferSource(data)) {
             throw new TypeError("bufferSubData requires an ArrayBuffer or ArrayBufferView");
         }
+        const source = this.hydContextType === "webgl2" && sourceRange.length > 0
+            ? this.bufferSourceSubrange(data, sourceRange[0], sourceRange[1])
+            : this.bufferSourceSubrange(data);
+        if (!source) return;
         const offset = toWebGlInt64(dstOffset);
-        if (offset < 0 || offset + data.byteLength > buffer.webglSize) {
+        if (offset < 0 || offset + source.byteLength > buffer.webglSize) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
             return;
         }
-        if (data.byteLength === 0) return;
+        if (source.byteLength === 0) return;
         this._der_flush();
         const invalidatesConvertedVertices = buffer.hasConvertedVertexBuffers;
-        buffer.write(data, offset);
+        buffer.write(source, offset);
         if (invalidatesConvertedVertices) {
             this.hydGlobalState.recordTransition("bufferSubDataConvertedVertex", buffer.hash, buffer.version);
         }
+        this.invalidateDerivedVertexState(invalidatesConvertedVertices);
     }
 
     getBufferSubData(target: GLenum, srcByteOffset: GLintptr, dstData: ArrayBufferView, dstOffset: GLuint = 0, length?: GLuint) {
+        if (this.hydContextType !== "webgl2") {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (!ArrayBuffer.isView(dstData)) {
+            throw new TypeError("getBufferSubData destination must be an ArrayBufferView");
+        }
         const buffer = this.getBoundBufferForTarget(target);
         if (!buffer) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
-            throw new Error("getBufferSubData called with no buffer bound for target: " + target);
+            return;
+        }
+        if (this.bufferOperationConflictsWithTransformFeedback(buffer, target)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
         }
         const dst = new Uint8Array(dstData.buffer, dstData.byteOffset, dstData.byteLength);
         const bytesPerElement = (dstData as any).BYTES_PER_ELEMENT || 1;
-        const byteOffset = dstOffset * bytesPerElement;
-        const byteLength = length === undefined ? dst.byteLength - byteOffset : length * bytesPerElement;
-        dst.set(buffer.shadowData.subarray(srcByteOffset, srcByteOffset + byteLength), byteOffset);
+        const destinationOffset = toWebGlInt64(dstOffset);
+        const destinationElementLength = typeof (dstData as any).length === "number"
+            ? (dstData as any).length
+            : Math.floor(dst.byteLength / bytesPerElement);
+        const copyElementLength = length === undefined || Number(length) === 0
+            ? destinationElementLength - destinationOffset
+            : toWebGlInt64(length);
+        const sourceOffset = toWebGlInt64(srcByteOffset);
+        const destinationByteOffset = destinationOffset * bytesPerElement;
+        const copyByteLength = copyElementLength * bytesPerElement;
+        if (sourceOffset < 0 || destinationOffset < 0 || copyElementLength < 0 ||
+            destinationOffset > destinationElementLength ||
+            destinationOffset + copyElementLength > destinationElementLength ||
+            sourceOffset + copyByteLength > buffer.webglSize) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (copyByteLength === 0) return;
+        dst.set(buffer.shadowData.subarray(sourceOffset, sourceOffset + copyByteLength), destinationByteOffset);
+    }
+
+    copyBufferSubData(readTarget: GLenum, writeTarget: GLenum, readOffset: GLintptr, writeOffset: GLintptr, size: GLsizeiptr) {
+        if (this.hydContextType !== "webgl2" ||
+            !this.isValidBufferTarget(readTarget) || !this.isValidBufferTarget(writeTarget)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        const source = this.getBoundBufferForTarget(readTarget);
+        const destination = this.getBoundBufferForTarget(writeTarget);
+        if (!source || !destination) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (this.bufferOperationConflictsWithTransformFeedback(source, readTarget) ||
+            this.bufferOperationConflictsWithTransformFeedback(destination, writeTarget)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const sourceOffset = toWebGlInt64(readOffset);
+        const destinationOffset = toWebGlInt64(writeOffset);
+        const byteLength = toWebGlInt64(size);
+        if (sourceOffset < 0 || destinationOffset < 0 || byteLength < 0 ||
+            sourceOffset + byteLength > source.webglSize ||
+            destinationOffset + byteLength > destination.webglSize) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (source.bindingKind && destination.bindingKind && source.bindingKind !== destination.bindingKind) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (source === destination && byteLength > 0 &&
+            sourceOffset < destinationOffset + byteLength && destinationOffset < sourceOffset + byteLength) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (byteLength === 0) return;
+        this._der_flush();
+        const invalidatesConvertedVertices = destination.hasConvertedVertexBuffers;
+        destination.write(source.shadowData.slice(sourceOffset, sourceOffset + byteLength), destinationOffset);
+        this.hydGlobalState.recordTransition("copyBufferSubData", destination.hash, destination.version);
+        this.invalidateDerivedVertexState(invalidatesConvertedVertices);
+    }
+
+    private indexedBindingsForTarget(target: GLenum): Array<HydIndexedBufferBinding | null> | null {
+        if (target === WebGL2RenderingContext.UNIFORM_BUFFER) return this.uniformBufferBindings;
+        if (target === WebGL2RenderingContext.TRANSFORM_FEEDBACK_BUFFER) return this.transformFeedbackBinding.bufferBindings;
+        return null;
+    }
+
+    bindBufferBase(target: GLenum, index: GLuint, buffer: HydBuffer | null) {
+        const bindings = this.indexedBindingsForTarget(target);
+        index = Number(index) >>> 0;
+        if (!bindings) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (index >= bindings.length) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (target === WebGL2RenderingContext.TRANSFORM_FEEDBACK_BUFFER && this.transformFeedbackBinding.active) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        this.bindBuffer(target, buffer);
+        if (this.getBoundBufferForTarget(target) !== buffer) return;
+        bindings[index] = buffer ? { buffer, offset: 0, size: buffer.webglSize, wholeBuffer: true } : null;
+        if (target === WebGL2RenderingContext.UNIFORM_BUFFER) {
+            this.hydGlobalState.invalidateUniformBufferBindingHash();
+        }
+        if (target === WebGL2RenderingContext.TRANSFORM_FEEDBACK_BUFFER) {
+            this.invalidateDrawSemanticValidation();
+        }
+        this.hydGlobalState.recordTransition("bindBufferBase", target, index, buffer?.hash || "null", buffer?.webglSize || 0);
+    }
+
+    bindBufferRange(target: GLenum, index: GLuint, buffer: HydBuffer | null, offset: GLintptr, size: GLsizeiptr) {
+        const bindings = this.indexedBindingsForTarget(target);
+        index = Number(index) >>> 0;
+        offset = toWebGlInt64(offset);
+        size = toWebGlInt64(size);
+        if (!bindings) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (index >= bindings.length) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (target === WebGL2RenderingContext.TRANSFORM_FEEDBACK_BUFFER && this.transformFeedbackBinding.active) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (buffer && (offset < 0 || size <= 0)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const alignment = target === WebGL2RenderingContext.UNIFORM_BUFFER
+            ? this.hydDevice.limits.minUniformBufferOffsetAlignment
+            : 4;
+        if (buffer && (offset % alignment !== 0 ||
+            (target === WebGL2RenderingContext.TRANSFORM_FEEDBACK_BUFFER && size % 4 !== 0))) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        this.bindBuffer(target, buffer);
+        if (this.getBoundBufferForTarget(target) !== buffer) return;
+        bindings[index] = buffer ? { buffer, offset, size } : null;
+        if (target === WebGL2RenderingContext.UNIFORM_BUFFER) {
+            this.hydGlobalState.invalidateUniformBufferBindingHash();
+        }
+        if (target === WebGL2RenderingContext.TRANSFORM_FEEDBACK_BUFFER) {
+            this.invalidateDrawSemanticValidation();
+        }
+        this.hydGlobalState.recordTransition("bindBufferRange", target, index, buffer?.hash || "null", offset, size);
+    }
+
+    getIndexedParameter(target: GLenum, index: GLuint) {
+        index = Number(index) >>> 0;
+        let bindings: Array<HydIndexedBufferBinding | null> | null = null;
+        let field: "buffer" | "offset" | "size" = "buffer";
+        if (target === WebGL2RenderingContext.UNIFORM_BUFFER_BINDING) bindings = this.uniformBufferBindings;
+        else if (target === WebGL2RenderingContext.UNIFORM_BUFFER_START) {
+            bindings = this.uniformBufferBindings;
+            field = "offset";
+        } else if (target === WebGL2RenderingContext.UNIFORM_BUFFER_SIZE) {
+            bindings = this.uniformBufferBindings;
+            field = "size";
+        } else if (target === WebGL2RenderingContext.TRANSFORM_FEEDBACK_BUFFER_BINDING) bindings = this.transformFeedbackBinding.bufferBindings;
+        else if (target === WebGL2RenderingContext.TRANSFORM_FEEDBACK_BUFFER_START) {
+            bindings = this.transformFeedbackBinding.bufferBindings;
+            field = "offset";
+        } else if (target === WebGL2RenderingContext.TRANSFORM_FEEDBACK_BUFFER_SIZE) {
+            bindings = this.transformFeedbackBinding.bufferBindings;
+            field = "size";
+        }
+        if (!bindings) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return null;
+        }
+        if (index >= bindings.length) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return null;
+        }
+        const binding = bindings[index];
+        if (field === "buffer") return binding?.buffer || null;
+        return binding && !binding.wholeBuffer ? binding[field] : 0;
     }
 
     getActiveUniform(program: HydProgram, index: GLuint): HydActiveUniformInfo {
@@ -3630,6 +6023,18 @@ ${assignments}
         if (!this.isProgram(program)) {
             this.setShaderProgramValidationError(program);
             return null;
+        }
+        if (this.hydContextType === "webgl2" && program.uniformReflection.length > 0) {
+            const uniform = program.uniformReflection[index];
+            if (!uniform) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+                return null;
+            }
+            return brandHydWebGlObject({
+                name: uniform.name,
+                size: uniform.size,
+                type: uniform.type,
+            }, "active-info");
         }
         const publicUniforms = program.hydUniforms.filter(isVisibleActiveUniform);
         const publicSamplers = program.hydSamplers.filter((sampler) => sampler.arrayIndex === undefined || sampler.arrayIndex === 0);
@@ -3662,6 +6067,17 @@ ${assignments}
             this.setShaderProgramValidationError(program);
             return null;
         }
+        if (this.hydContextType === "webgl2" && program.uniformReflection.length > 0) {
+            return uniformNames.map((name) => {
+                const exact = program.uniformReflection.findIndex((uniform) => uniform.name === name);
+                if (exact >= 0) return exact;
+                const normalized = name.replace(/\[0\](?=\.|$)/g, "");
+                const normalizedIndex = program.uniformReflection.findIndex((uniform) =>
+                    (uniform.size > 1 || /\[0\](?=\.|$)/.test(uniform.name)) &&
+                    uniform.name.replace(/\[0\](?=\.|$)/g, "") === normalized);
+                return normalizedIndex >= 0 ? normalizedIndex : 0xffffffff;
+            });
+        }
         const publicUniforms = program.hydUniforms.filter(isVisibleActiveUniform);
         const publicSamplers = program.hydSamplers.filter((sampler) => sampler.arrayIndex === undefined || sampler.arrayIndex === 0);
         return uniformNames.map((name) => {
@@ -3681,6 +6097,59 @@ ${assignments}
     }
 
     getActiveUniforms(program: HydProgram, uniformIndices: GLuint[], pname: GLenum): any[] {
+        if (!this.isProgram(program)) {
+            this.setShaderProgramValidationError(program);
+            return null;
+        }
+        if (this.hydContextType !== "webgl2" || !program.linked) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return null;
+        }
+        const validPnames = new Set<GLenum>([
+            WebGL2RenderingContext.UNIFORM_TYPE,
+            WebGL2RenderingContext.UNIFORM_SIZE,
+            WebGL2RenderingContext.UNIFORM_BLOCK_INDEX,
+            WebGL2RenderingContext.UNIFORM_OFFSET,
+            WebGL2RenderingContext.UNIFORM_ARRAY_STRIDE,
+            WebGL2RenderingContext.UNIFORM_MATRIX_STRIDE,
+            WebGL2RenderingContext.UNIFORM_IS_ROW_MAJOR,
+        ]);
+        if (!validPnames.has(pname)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return null;
+        }
+        const activeUniformCount = program.uniformReflection.length ||
+            program.hydUniforms.filter(isVisibleActiveUniform).length +
+            program.hydSamplers.filter((sampler) => sampler.arrayIndex === undefined || sampler.arrayIndex === 0).length;
+        if (uniformIndices.some((index) => index >= activeUniformCount)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return null;
+        }
+        if (this.hydContextType === "webgl2" && program.uniformReflection.length > 0) {
+            return uniformIndices.map((index) => {
+                const entry = program.uniformReflection[index];
+                if (!entry) return null;
+                switch (pname) {
+                    case WebGL2RenderingContext.UNIFORM_TYPE:
+                        return entry.type;
+                    case WebGL2RenderingContext.UNIFORM_SIZE:
+                        return entry.size;
+                    case WebGL2RenderingContext.UNIFORM_BLOCK_INDEX:
+                        return entry.blockIndex;
+                    case WebGL2RenderingContext.UNIFORM_OFFSET:
+                        return entry.offset;
+                    case WebGL2RenderingContext.UNIFORM_ARRAY_STRIDE:
+                        return entry.arrayStride;
+                    case WebGL2RenderingContext.UNIFORM_MATRIX_STRIDE:
+                        return entry.matrixStride;
+                    case WebGL2RenderingContext.UNIFORM_IS_ROW_MAJOR:
+                        return entry.rowMajor;
+                    default:
+                        this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                        return null;
+                }
+            });
+        }
         const publicUniforms = program.hydUniforms.filter(isVisibleActiveUniform);
         const publicSamplers = program.hydSamplers.filter((sampler) => sampler.arrayIndex === undefined || sampler.arrayIndex === 0);
         const entries = [...publicUniforms, ...publicSamplers];
@@ -3710,6 +6179,91 @@ ${assignments}
         });
     }
 
+    getUniformBlockIndex(program: HydProgram, uniformBlockName: string): GLuint {
+        if (!this.isProgram(program)) {
+            this.setShaderProgramValidationError(program);
+            return 0xffffffff;
+        }
+        if (this.hydContextType !== "webgl2") {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return 0xffffffff;
+        }
+        const exact = program.hydUniformBlocks.find((block) => block.name === uniformBlockName);
+        if (exact) return exact.index;
+        const normalized = uniformBlockName.replace(/\[0\]$/, "");
+        const firstArrayElement = program.hydUniformBlocks.find((block) =>
+            block.name.replace(/\[0\]$/, "") === normalized);
+        return firstArrayElement?.index ?? 0xffffffff;
+    }
+
+    getActiveUniformBlockName(program: HydProgram, uniformBlockIndex: GLuint): string | null {
+        if (!this.isProgram(program)) {
+            this.setShaderProgramValidationError(program);
+            return null;
+        }
+        if (!program.linked) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return null;
+        }
+        const block = program.hydUniformBlocks[uniformBlockIndex];
+        if (this.hydContextType !== "webgl2" || !block) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return null;
+        }
+        return block.name;
+    }
+
+    getActiveUniformBlockParameter(program: HydProgram, uniformBlockIndex: GLuint, pname: GLenum): any {
+        if (!this.isProgram(program)) {
+            this.setShaderProgramValidationError(program);
+            return null;
+        }
+        const block = program.hydUniformBlocks[uniformBlockIndex];
+        if (this.hydContextType !== "webgl2" || !block) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return null;
+        }
+        switch (pname) {
+            case WebGL2RenderingContext.UNIFORM_BLOCK_BINDING:
+                return block.binding;
+            case WebGL2RenderingContext.UNIFORM_BLOCK_DATA_SIZE:
+                return block.dataSize;
+            case WebGL2RenderingContext.UNIFORM_BLOCK_ACTIVE_UNIFORMS:
+                return block.activeUniformIndices.length;
+            case WebGL2RenderingContext.UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES:
+                return new Uint32Array(block.activeUniformIndices);
+            case WebGL2RenderingContext.UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER:
+                return block.referencedByVertex;
+            case WebGL2RenderingContext.UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER:
+                return block.referencedByFragment;
+            default:
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                return null;
+        }
+    }
+
+    uniformBlockBinding(program: HydProgram, uniformBlockIndex: GLuint, uniformBlockBinding: GLuint) {
+        if (!this.isProgram(program)) {
+            this.setShaderProgramValidationError(program);
+            return;
+        }
+        const block = program.hydUniformBlocks[uniformBlockIndex];
+        if (this.hydContextType !== "webgl2" || !block || uniformBlockBinding >= this.uniformBufferBindings.length) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (block.binding !== uniformBlockBinding) {
+            block.binding = uniformBlockBinding;
+            this.invalidateDrawSemanticValidation();
+            this.hydGlobalState.recordTransition(
+                "uniformBlockBinding",
+                program.hash,
+                uniformBlockIndex,
+                uniformBlockBinding,
+            );
+        }
+    }
+
     getActiveAttrib(program: HydProgram, index: GLuint): HydActiveUniformInfo {
         if (program === null || program === undefined) {
             throw new TypeError("getActiveAttrib requires a WebGLProgram");
@@ -3718,14 +6272,16 @@ ${assignments}
             this.setShaderProgramValidationError(program);
             return null;
         }
-        if (index < 0 || index >= program.hydAttributes.length) {
+        const activeAttributes = [...program.hydAttributes, ...program.activeBuiltInAttributes];
+        if (index < 0 || index >= activeAttributes.length) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
             return null;
         }
+        const attribute = activeAttributes[index];
         return brandHydWebGlObject({
-            name: program.hydAttributes[index].name,
-            size: program.hydAttributes[index].size,
-            type: program.hydAttributes[index].type,
+            name: attribute.name,
+            size: attribute.size,
+            type: attribute.type,
         }, "active-info");
     }
 
@@ -3746,6 +6302,10 @@ ${assignments}
         }
         s.compiled = false;
         s.infoLog = "";
+        if (this.hydContextType === "webgl2" && hasMisplacedGlslEs3VersionDirective(s.glsl_shader)) {
+            s.infoLog = "GLSL ES 3.00 #version directive must occur on the first line.";
+            return;
+        }
         const validationContext = nativeValidationContext(this.hydContextType);
         if (!validationContext) {
             s.infoLog = "Native WebGL shader validation context is unavailable.";
@@ -3784,12 +6344,153 @@ ${assignments}
         }
     }
 
+    private captureWebGl2ProgramReflection(
+        program: HydProgram,
+        gl: WebGL2RenderingContext,
+        nativeProgram: WebGLProgram,
+        attachedShaders: HydShader[],
+    ): ProgramTransformFeedbackVarying[] {
+        const originalNames = new Map<string, string>();
+        const identifier = /\b[A-Za-z_]\w*\b/g;
+        for (const shader of attachedShaders) {
+            for (let match = identifier.exec(shader.glsl_shader); match !== null; match = identifier.exec(shader.glsl_shader)) {
+                const bridged = bridgeGlslDunderIdentifier(match[0]);
+                if (bridged !== match[0]) originalNames.set(bridged, match[0]);
+            }
+        }
+        const restoreName = (name: string) => name.replace(identifier, (part) => originalNames.get(part) || part);
+        const uniformCount = Number(gl.getProgramParameter(nativeProgram, gl.ACTIVE_UNIFORMS)) || 0;
+        const indices = Array.from({ length: uniformCount }, (_, index) => index);
+        const queryUniformProperty = (pname: GLenum, fallback: number | boolean) => {
+            if (indices.length === 0) return [];
+            const values = gl.getActiveUniforms(nativeProgram, indices, pname);
+            return values ? Array.from(values) : indices.map(() => fallback);
+        };
+        const blockIndices = queryUniformProperty(gl.UNIFORM_BLOCK_INDEX, -1);
+        const offsets = queryUniformProperty(gl.UNIFORM_OFFSET, -1);
+        const arrayStrides = queryUniformProperty(gl.UNIFORM_ARRAY_STRIDE, 0);
+        const matrixStrides = queryUniformProperty(gl.UNIFORM_MATRIX_STRIDE, 0);
+        const rowMajors = queryUniformProperty(gl.UNIFORM_IS_ROW_MAJOR, false);
+        const uniforms: ProgramUniformReflection[] = [];
+        for (let index = 0; index < uniformCount; index++) {
+            const info = gl.getActiveUniform(nativeProgram, index);
+            if (!info) continue;
+            uniforms.push({
+                name: restoreName(info.name),
+                size: info.size,
+                type: info.type,
+                blockIndex: Number(blockIndices[index]),
+                offset: Number(offsets[index]),
+                arrayStride: Number(arrayStrides[index]),
+                matrixStride: Number(matrixStrides[index]),
+                rowMajor: Boolean(rowMajors[index]),
+            });
+        }
+
+        const blockCount = Number(gl.getProgramParameter(nativeProgram, gl.ACTIVE_UNIFORM_BLOCKS)) || 0;
+        const blocks: ProgramUniformBlock[] = [];
+        for (let index = 0; index < blockCount; index++) {
+            const name = gl.getActiveUniformBlockName(nativeProgram, index);
+            const activeIndices = gl.getActiveUniformBlockParameter(
+                nativeProgram,
+                index,
+                gl.UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES,
+            ) as Uint32Array | number[] | null;
+            blocks.push(new ProgramUniformBlock(
+                restoreName(name || ""),
+                index,
+                Number(gl.getActiveUniformBlockParameter(nativeProgram, index, gl.UNIFORM_BLOCK_DATA_SIZE)) || 0,
+                activeIndices ? Array.from(activeIndices) : [],
+                Boolean(gl.getActiveUniformBlockParameter(nativeProgram, index, gl.UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER)),
+                Boolean(gl.getActiveUniformBlockParameter(nativeProgram, index, gl.UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER)),
+        ));
+    }
+
+        program.setUniformBlockReflection(uniforms, blocks);
+        const varyingCount = Number(gl.getProgramParameter(nativeProgram, gl.TRANSFORM_FEEDBACK_VARYINGS)) || 0;
+        const varyings: ProgramTransformFeedbackVarying[] = [];
+        for (let index = 0; index < varyingCount; index++) {
+            const info = gl.getTransformFeedbackVarying(nativeProgram, index);
+            if (info) varyings.push({ name: restoreName(info.name), size: info.size, type: info.type });
+        }
+        return varyings;
+    }
+
+    private captureFragmentOutputLocations(
+        program: HydProgram,
+        gl: WebGLRenderingContext | WebGL2RenderingContext,
+        nativeProgram: WebGLProgram,
+        attachedShaders: HydShader[],
+    ) {
+        const fragmentShader = attachedShaders.find((shader) => shader.type === WebGL2RenderingContext.FRAGMENT_SHADER);
+        const outputs = new Map<string, number>();
+        const outputTypes = new Map<number, "float" | "sint" | "uint">();
+        if (!fragmentShader) {
+            program.fragmentOutputLocations = outputs;
+            program.fragmentOutputTypes = outputTypes;
+            return;
+        }
+        const source = fragmentShader.glsl_shader
+            .replace(/\/\*[\s\S]*?\*\//g, "")
+            .replace(/\/\/.*$/gm, "");
+        const declarations = /\b(?:layout\s*\([^)]*\)\s*)?(?:(?:flat|smooth|noperspective|centroid|sample|invariant)\s+)*(?:out)\s+(?:(?:lowp|mediump|highp)\s+)?[A-Za-z_]\w*\s+([^;{}]+);/g;
+        for (let match = declarations.exec(source); match !== null; match = declarations.exec(source)) {
+            for (const declarator of match[1].split(",")) {
+                const nameMatch = /^\s*([A-Za-z_]\w*)(?:\s*\[\s*(\d+)\s*\])?/.exec(declarator);
+                if (!nameMatch) continue;
+                const sourceName = nameMatch[1];
+                const bridgedName = bridgeGlslDunderIdentifier(sourceName);
+                const arraySize = nameMatch[2] ? Number(nameMatch[2]) : 0;
+                const candidates = [sourceName];
+                for (let index = 0; index < arraySize; index++) candidates.push(`${sourceName}[${index}]`);
+                for (const candidate of candidates) {
+                    if (typeof (gl as WebGL2RenderingContext).getFragDataLocation !== "function") continue;
+                    const queryName = candidate.replace(sourceName, bridgedName);
+                    const location = (gl as WebGL2RenderingContext).getFragDataLocation(nativeProgram, queryName);
+                    if (location >= 0) outputs.set(candidate, location);
+                }
+            }
+        }
+        if (/\bgl_FragColor\b|\bgl_FragData\s*\[\s*0\s*\]/.test(source)) {
+            outputs.set("gl_FragColor", 0);
+        }
+        const scannedOutputs = scanGlslDeclarations(fragmentShader.glsl_shader, "fragment").outputs;
+        for (const output of scannedOutputs) {
+            const scalar = output.glsl_type.startsWith("u")
+                ? "uint"
+                : output.glsl_type.startsWith("i")
+                    ? "sint"
+                    : "float";
+            const names = output.is_array
+                ? Array.from({ length: Math.max(1, output.size) }, (_, index) => `${output.name}[${index}]`)
+                : [output.name];
+            for (const name of names) {
+                const offset = output.is_array ? Number(/\[(\d+)\]$/.exec(name)?.[1] || 0) : 0;
+                const baseLocation = outputs.get(output.name);
+                const location = outputs.get(name) ??
+                    (baseLocation === undefined ? undefined : baseLocation + offset);
+                if (location !== undefined) {
+                    outputTypes.set(location, scalar);
+                }
+            }
+        }
+        if (outputs.has("gl_FragColor")) outputTypes.set(0, "float");
+        program.fragmentOutputLocations = outputs;
+        program.fragmentOutputTypes = outputTypes;
+    }
+
     useProgram(program: HydProgram | null) {
         if (program !== null && !this.isProgram(program)) {
             this.setShaderProgramValidationError(program);
             return;
         }
         if (program !== null && !program.linked) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const activeFeedback = Array.from(this.transformFeedbackObjects).find((feedback) =>
+            feedback.active && !feedback.paused);
+        if (activeFeedback && program !== activeFeedback.activeProgram) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
@@ -3811,6 +6512,12 @@ ${assignments}
             this.setShaderProgramValidationError(program);
             return;
         }
+        if (this.hydGlobalState.commonState.currentProgram === program &&
+            Array.from(this.transformFeedbackObjects).some((feedback) =>
+                feedback.active && feedback.activeProgram === program)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         program.linkGeneration++;
         program.linked = false;
         this.lastDrawPbv = null;
@@ -3820,8 +6527,12 @@ ${assignments}
         }
         program.uniformBufferLocations = [];
         program.uniformSamplerLocations = [];
+        program.setUniformBlockReflection([], []);
+        program.fragmentOutputLocations = new Map();
+        program.fragmentOutputTypes = new Map();
         program.infoLog = "";
         const attachedShaders = program.getAttachedShaders();
+        let linkedTransformFeedbackVaryings: ProgramTransformFeedbackVarying[] = [];
         if (attachedShaders.length !== 2 || attachedShaders.some((shader) => !shader.compiled || !shader.validationShader)) {
             program.infoLog = "A successfully compiled vertex shader and fragment shader must both be attached.";
             return;
@@ -3843,9 +6554,32 @@ ${assignments}
             for (const [name, index] of program.boundAttributeLocations) {
                 validationContext.bindAttribLocation(validationProgram, index, bridgeGlslDunderIdentifier(name));
             }
+            if (this.hydContextType === "webgl2" && program.pendingTransformFeedbackVaryingNames.length > 0) {
+                (validationContext as WebGL2RenderingContext).transformFeedbackVaryings(
+                    validationProgram,
+                    program.pendingTransformFeedbackVaryingNames.map(bridgeGlslDunderIdentifier),
+                    program.pendingTransformFeedbackBufferMode || WebGL2RenderingContext.INTERLEAVED_ATTRIBS,
+                );
+            }
             validationContext.linkProgram(validationProgram);
             const linked = Boolean(validationContext.getProgramParameter(validationProgram, WebGL2RenderingContext.LINK_STATUS));
             const infoLog = validationContext.getProgramInfoLog(validationProgram) || "";
+            if (linked) {
+                if (this.hydContextType === "webgl2") {
+                    linkedTransformFeedbackVaryings = this.captureWebGl2ProgramReflection(
+                        program,
+                        validationContext as WebGL2RenderingContext,
+                        validationProgram,
+                        attachedShaders,
+                    );
+                }
+                this.captureFragmentOutputLocations(
+                    program,
+                    validationContext,
+                    validationProgram,
+                    attachedShaders,
+                );
+            }
             validationContext.deleteProgram(validationProgram);
             if (!linked) {
                 program.infoLog = infoLog;
@@ -3854,6 +6588,9 @@ ${assignments}
         }
         try {
             if (program.linkProgram()) {
+                if (this.hydContextType === "webgl2") {
+                    program.commitTransformFeedbackVaryings(linkedTransformFeedbackVaryings);
+                }
                 if (this.hydGlobalState.commonState.currentProgram === program) {
                     this.currentProgramValid = true;
                     this.activateUniformLocations(program);
@@ -3878,15 +6615,530 @@ ${assignments}
     }
 
     bindVertexArray(vertexArray: HydVertexArray | null) {
-        if (vertexArray !== null && !this.isVertexArray(vertexArray)) {
+        if (vertexArray !== null && (!(vertexArray instanceof HydVertexArray) ||
+            vertexArray.ownerToken !== this.contextToken || vertexArray.deleted)) {
             this.setObjectValidationError(vertexArray);
             return;
         }
+        if (vertexArray) vertexArray.initialized = true;
         const target = vertexArray || this.hydGlobalState.defaultVertexArrayBinding;
         if (this.hydGlobalState.commonState.vertexArrayBinding !== target) {
             this.hydGlobalState.commonState.vertexArrayBinding = target;
+            this.hydGlobalState.invalidateCurrentVertexAttribHash();
             this.hydGlobalState.recordTransition("bindVertexArray", target.hash);
         }
+    }
+
+    deleteVertexArray(vertexArray: HydVertexArray | null) {
+        if (vertexArray === null) return;
+        if (!(vertexArray instanceof HydVertexArray) || vertexArray.ownerToken !== this.contextToken) {
+            this.setObjectValidationError(vertexArray);
+            return;
+        }
+        if (vertexArray.deleted) return;
+        vertexArray.deleted = true;
+        if (this.hydGlobalState.commonState.vertexArrayBinding === vertexArray) {
+            this.hydGlobalState.commonState.vertexArrayBinding = this.hydGlobalState.defaultVertexArrayBinding;
+            this.hydGlobalState.invalidateCurrentVertexAttribHash();
+            this.hydGlobalState.recordTransition("deleteVertexArray", vertexArray.hash);
+        }
+    }
+
+    deleteSampler(sampler: HydSampler | null) {
+        if (sampler === null) return;
+        if (!(sampler instanceof HydSampler) || sampler.ownerToken !== this.contextToken) {
+            this.setObjectValidationError(sampler);
+            return;
+        }
+        if (sampler.deleted) return;
+        sampler.deleted = true;
+        for (let unit = 0; unit < this.samplerBindings.length; unit++) {
+            if (this.samplerBindings[unit] === sampler) this.samplerBindings[unit] = null;
+        }
+        this.hydGlobalState.invalidateSamplerBindingHash();
+        this.hydGlobalState.recordTransition("deleteSampler", sampler.hash);
+    }
+
+    bindSampler(unit: GLuint, sampler: HydSampler | null) {
+        unit = Number(unit) >>> 0;
+        if (unit >= this.samplerBindings.length) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (sampler !== null && !this.isSampler(sampler)) {
+            this.setObjectValidationError(sampler);
+            return;
+        }
+        if (this.samplerBindings[unit] === sampler) return;
+        this.samplerBindings[unit] = sampler;
+        this.hydGlobalState.invalidateSamplerBindingHash();
+        this.hydGlobalState.recordTransition("bindSampler", unit, sampler?.hash || "null");
+    }
+
+    private setSamplerParameter(sampler: HydSampler, pname: GLenum, param: number) {
+        if (!this.isSampler(sampler)) {
+            this.setObjectValidationError(sampler);
+            return;
+        }
+        const minFilters = new Set<number>([
+            WebGL2RenderingContext.NEAREST,
+            WebGL2RenderingContext.LINEAR,
+            WebGL2RenderingContext.NEAREST_MIPMAP_NEAREST,
+            WebGL2RenderingContext.LINEAR_MIPMAP_NEAREST,
+            WebGL2RenderingContext.NEAREST_MIPMAP_LINEAR,
+            WebGL2RenderingContext.LINEAR_MIPMAP_LINEAR,
+        ]);
+        const magFilters = new Set<number>([WebGL2RenderingContext.NEAREST, WebGL2RenderingContext.LINEAR]);
+        const wraps = new Set<number>([
+            WebGL2RenderingContext.REPEAT,
+            WebGL2RenderingContext.CLAMP_TO_EDGE,
+            WebGL2RenderingContext.MIRRORED_REPEAT,
+        ]);
+        const compareModes = new Set<number>([WebGL2RenderingContext.NONE, WebGL2RenderingContext.COMPARE_REF_TO_TEXTURE]);
+        const compareFunctions = new Set<number>([
+            WebGL2RenderingContext.NEVER,
+            WebGL2RenderingContext.LESS,
+            WebGL2RenderingContext.EQUAL,
+            WebGL2RenderingContext.LEQUAL,
+            WebGL2RenderingContext.GREATER,
+            WebGL2RenderingContext.NOTEQUAL,
+            WebGL2RenderingContext.GEQUAL,
+            WebGL2RenderingContext.ALWAYS,
+        ]);
+        const valid = pname === WebGL2RenderingContext.TEXTURE_MIN_FILTER ? minFilters.has(param) :
+            pname === WebGL2RenderingContext.TEXTURE_MAG_FILTER ? magFilters.has(param) :
+                pname === WebGL2RenderingContext.TEXTURE_WRAP_S ||
+                    pname === WebGL2RenderingContext.TEXTURE_WRAP_T ||
+                    pname === WebGL2RenderingContext.TEXTURE_WRAP_R ? wraps.has(param) :
+                    pname === WebGL2RenderingContext.TEXTURE_COMPARE_MODE ? compareModes.has(param) :
+                        pname === WebGL2RenderingContext.TEXTURE_COMPARE_FUNC ? compareFunctions.has(param) :
+                            pname === WebGL2RenderingContext.TEXTURE_MIN_LOD ||
+                                pname === WebGL2RenderingContext.TEXTURE_MAX_LOD;
+        if (!valid) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        sampler.setParameter(pname, param);
+        this.hydGlobalState.invalidateSamplerBindingHash();
+        this.hydGlobalState.recordTransition("samplerParameter", sampler.hash, pname, param);
+    }
+
+    samplerParameteri(sampler: HydSampler, pname: GLenum, param: GLint) {
+        this.setSamplerParameter(sampler, pname, Number(param));
+    }
+
+    samplerParameterf(sampler: HydSampler, pname: GLenum, param: GLfloat) {
+        this.setSamplerParameter(sampler, pname, Number(param));
+    }
+
+    getSamplerParameter(sampler: HydSampler, pname: GLenum) {
+        if (!this.isSampler(sampler)) {
+            this.setObjectValidationError(sampler);
+            return null;
+        }
+        const value = sampler.getParameter(pname);
+        if (value === undefined) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return null;
+        }
+        return value;
+    }
+
+    private isValidQueryTarget(target: GLenum): boolean {
+        return target === WebGL2RenderingContext.ANY_SAMPLES_PASSED ||
+            target === WebGL2RenderingContext.ANY_SAMPLES_PASSED_CONSERVATIVE ||
+            target === WebGL2RenderingContext.TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN;
+    }
+
+    private isOcclusionQueryTarget(target: GLenum): boolean {
+        return target === WebGL2RenderingContext.ANY_SAMPLES_PASSED ||
+            target === WebGL2RenderingContext.ANY_SAMPLES_PASSED_CONSERVATIVE;
+    }
+
+    private queryTargetKey(target: GLenum): GLenum {
+        return this.isOcclusionQueryTarget(target)
+            ? WebGL2RenderingContext.ANY_SAMPLES_PASSED
+            : target;
+    }
+
+    private allocateActiveOcclusionQuery(): HydOcclusionQueryAllocation | null {
+        const query = this.activeQueries.get(WebGL2RenderingContext.ANY_SAMPLES_PASSED) ||
+            this.activeQueries.get(WebGL2RenderingContext.ANY_SAMPLES_PASSED_CONSERVATIVE);
+        if (!query || !query.active || !this.isOcclusionQueryTarget(query.target)) return null;
+
+        const capacity = 64;
+        let segment = query.occlusionSegments[query.occlusionSegments.length - 1];
+        if (!segment || segment.used >= segment.capacity) {
+            segment = {
+                querySet: this.hydDevice.createQuerySet({
+                    label: `webgl-occlusion-query-${query.generation}-${query.occlusionSegments.length}`,
+                    type: "occlusion",
+                    count: capacity,
+                }),
+                capacity,
+                used: 0,
+            };
+            query.occlusionSegments.push(segment);
+        }
+        return {
+            querySet: segment.querySet,
+            queryIndex: segment.used++,
+        };
+    }
+
+    private waitForQueryPublicationFrame(): Promise<void> {
+        return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    }
+
+    private publishQueryResult(query: HydQuery, generation: number, result: number) {
+        if (query.generation !== generation || query.active || query.deleted) return;
+        query.result = result;
+        query.available = true;
+    }
+
+    private resolveOcclusionQuery(
+        query: HydQuery,
+        generation: number,
+        segments: HydOcclusionQuerySegment[],
+    ) {
+        if (segments.length === 0) {
+            this.waitForQueryPublicationFrame().then(() => {
+                this.publishQueryResult(query, generation, 0);
+            });
+            return;
+        }
+
+        const encoder = this.hydDevice.createCommandEncoder({
+            label: `webgl-occlusion-query-resolve-${generation}`,
+        });
+        const buffers = segments.map((segment, index) => {
+            const byteLength = segment.used * BigUint64Array.BYTES_PER_ELEMENT;
+            const resolveBuffer = this.hydDevice.createBuffer({
+                label: `webgl-occlusion-query-resolve-${generation}-${index}`,
+                size: byteLength,
+                usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+            });
+            const readBuffer = this.hydDevice.createBuffer({
+                label: `webgl-occlusion-query-read-${generation}-${index}`,
+                size: byteLength,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            });
+            encoder.resolveQuerySet(segment.querySet, 0, segment.used, resolveBuffer, 0);
+            encoder.copyBufferToBuffer(resolveBuffer, 0, readBuffer, 0, byteLength);
+            return { segment, resolveBuffer, readBuffer };
+        });
+        this.hydDevice.queue.submit([encoder.finish()]);
+
+        const readResults = buffers.map(async ({ readBuffer }) => {
+            await readBuffer.mapAsync(GPUMapMode.READ);
+            const values = new BigUint64Array(readBuffer.getMappedRange());
+            let passed = false;
+            for (const value of values) {
+                if (value !== 0n) {
+                    passed = true;
+                    break;
+                }
+            }
+            readBuffer.unmap();
+            return passed;
+        });
+
+        Promise.all([...readResults, this.waitForQueryPublicationFrame()])
+            .then((results) => {
+                const passed = results.slice(0, readResults.length).some((result) => result === true);
+                this.publishQueryResult(query, generation, passed ? 1 : 0);
+            })
+            .catch((error) => {
+                console.error("[HYD] Failed to resolve WebGL occlusion query:", error);
+                this.publishQueryResult(query, generation, 0);
+            })
+            .finally(() => {
+                for (const { segment, resolveBuffer, readBuffer } of buffers) {
+                    segment.querySet.destroy();
+                    resolveBuffer.destroy();
+                    readBuffer.destroy();
+                }
+            });
+    }
+
+    private discardOcclusionQuerySegments(segments: HydOcclusionQuerySegment[]) {
+        if (segments.length === 0) return;
+        this.hydDevice.queue.onSubmittedWorkDone().finally(() => {
+            for (const segment of segments) segment.querySet.destroy();
+        });
+    }
+
+    deleteQuery(query: HydQuery | null) {
+        if (query === null) return;
+        if (!(query instanceof HydQuery) || query.ownerToken !== this.contextToken) {
+            this.setObjectValidationError(query);
+            return;
+        }
+        if (query.deleted) return;
+        if (query.active) {
+            if (this.isOcclusionQueryTarget(query.target)) this._der_flush();
+            this.activeQueries.delete(query.target);
+            query.active = false;
+        }
+        const segments = query.occlusionSegments;
+        query.occlusionSegments = [];
+        query.generation++;
+        query.deleted = true;
+        this.queryObjects.delete(query);
+        this.discardOcclusionQuerySegments(segments);
+    }
+
+    beginQuery(target: GLenum, query: HydQuery) {
+        if (!this.isValidQueryTarget(target)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (!(query instanceof HydQuery) || query.ownerToken !== this.contextToken || query.deleted) {
+            this.setObjectValidationError(query);
+            return;
+        }
+        const targetKey = this.queryTargetKey(target);
+        const targetAlreadyActive = this.isOcclusionQueryTarget(target)
+            ? this.activeQueries.has(WebGL2RenderingContext.ANY_SAMPLES_PASSED) ||
+                this.activeQueries.has(WebGL2RenderingContext.ANY_SAMPLES_PASSED_CONSERVATIVE)
+            : this.activeQueries.has(target);
+        if (targetAlreadyActive || query.active ||
+            (query.target !== 0 && this.queryTargetKey(query.target) !== targetKey)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (this.isOcclusionQueryTarget(target)) this._der_flush();
+        query.initialized = true;
+        query.active = true;
+        query.target = target;
+        query.result = 0;
+        query.available = false;
+        query.generation++;
+        query.occlusionSegments = [];
+        this.activeQueries.set(target, query);
+    }
+
+    endQuery(target: GLenum) {
+        if (!this.isValidQueryTarget(target)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        const query = this.activeQueries.get(target);
+        if (!query) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (this.isOcclusionQueryTarget(target)) this._der_flush();
+        const generation = query.generation;
+        const segments = query.occlusionSegments;
+        query.occlusionSegments = [];
+        query.active = false;
+        this.activeQueries.delete(target);
+        if (this.isOcclusionQueryTarget(target)) {
+            this.resolveOcclusionQuery(query, generation, segments);
+        } else {
+            this.waitForQueryPublicationFrame().then(() => {
+                this.publishQueryResult(query, generation, query.result);
+            });
+        }
+    }
+
+    getQuery(target: GLenum, pname: GLenum) {
+        if (!this.isValidQueryTarget(target)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return null;
+        }
+        if (pname !== WebGL2RenderingContext.CURRENT_QUERY) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return null;
+        }
+        return this.activeQueries.get(target) || null;
+    }
+
+    getQueryParameter(query: HydQuery, pname: GLenum) {
+        if (!(query instanceof HydQuery) || query.ownerToken !== this.contextToken || query.deleted) {
+            this.setObjectValidationError(query);
+            return null;
+        }
+        if (!query.initialized) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return null;
+        }
+        if (query.active) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return null;
+        }
+        if (pname === WebGL2RenderingContext.QUERY_RESULT_AVAILABLE) return query.available;
+        if (pname === WebGL2RenderingContext.QUERY_RESULT) {
+            return query.result;
+        }
+        this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+        return null;
+    }
+
+    deleteTransformFeedback(transformFeedback: HydTransformFeedback | null) {
+        if (transformFeedback === null) return;
+        if (!this.isTransformFeedbackObject(transformFeedback)) {
+            this.setObjectValidationError(transformFeedback);
+            return;
+        }
+        if (transformFeedback.active) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        transformFeedback.deleted = true;
+        this.transformFeedbackObjects.delete(transformFeedback);
+        if (this.transformFeedbackBinding === transformFeedback) {
+            this.transformFeedbackBinding = this.defaultTransformFeedback;
+        }
+    }
+
+    bindTransformFeedback(target: GLenum, transformFeedback: HydTransformFeedback | null) {
+        if (target !== WebGL2RenderingContext.TRANSFORM_FEEDBACK) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (this.transformFeedbackBinding.active && !this.transformFeedbackBinding.paused) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (transformFeedback !== null && !this.isTransformFeedbackObject(transformFeedback)) {
+            this.setObjectValidationError(transformFeedback);
+            return;
+        }
+        if (transformFeedback) transformFeedback.initialized = true;
+        this.transformFeedbackBinding = transformFeedback || this.defaultTransformFeedback;
+        this.invalidateDrawSemanticValidation();
+        this.hydGlobalState.recordTransition("bindTransformFeedback", transformFeedback ? "object" : "default");
+    }
+
+    transformFeedbackVaryings(program: HydProgram, varyings: string[], bufferMode: GLenum) {
+        if (!this.isProgram(program)) {
+            this.setShaderProgramValidationError(program);
+            return;
+        }
+        if (bufferMode !== WebGL2RenderingContext.INTERLEAVED_ATTRIBS &&
+            bufferMode !== WebGL2RenderingContext.SEPARATE_ATTRIBS) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (!Array.isArray(varyings)) {
+            throw new TypeError("transformFeedbackVaryings requires a string array");
+        }
+        const maxSeparateAttributes = enumToConstant.get(
+            WebGL2RenderingContext.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS,
+        ) || 0;
+        if (bufferMode === WebGL2RenderingContext.SEPARATE_ATTRIBS &&
+            varyings.length > maxSeparateAttributes) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        program.pendingTransformFeedbackVaryingNames = varyings.map(String);
+        program.pendingTransformFeedbackBufferMode = bufferMode;
+        this.hydGlobalState.recordTransition(
+            "transformFeedbackVaryings",
+            program.hash,
+            bufferMode,
+            ...program.pendingTransformFeedbackVaryingNames,
+        );
+    }
+
+    getTransformFeedbackVarying(program: HydProgram, index: GLuint) {
+        if (!this.isProgram(program)) {
+            this.setShaderProgramValidationError(program);
+            return null;
+        }
+        index = Number(index) >>> 0;
+        const info = program.transformFeedbackVaryingInfo[index];
+        if (!info) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return null;
+        }
+        return brandHydWebGlObject({ ...info }, "active-info");
+    }
+
+    beginTransformFeedback(primitiveMode: GLenum) {
+        if (primitiveMode !== WebGL2RenderingContext.POINTS &&
+            primitiveMode !== WebGL2RenderingContext.LINES &&
+            primitiveMode !== WebGL2RenderingContext.TRIANGLES) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (this.transformFeedbackBinding.active || !this.currentProgramValid) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const currentProgram = this.hydGlobalState.commonState.currentProgram;
+        if (!currentProgram || currentProgram.transformFeedbackVaryingInfo.length === 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const requiredBufferCount = currentProgram.transformFeedbackBufferMode ===
+            WebGL2RenderingContext.SEPARATE_ATTRIBS
+            ? currentProgram.transformFeedbackVaryingInfo.length
+            : 1;
+        for (let index = 0; index < requiredBufferCount; index++) {
+            const binding = this.transformFeedbackBinding.bufferBindings[index];
+            // Deleting a buffer name does not release storage retained by a
+            // transform-feedback object's indexed binding.
+            if (!binding) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+        }
+        const outputBuffers = new Set<HydBuffer>();
+        for (const binding of this.transformFeedbackBinding.bufferBindings) {
+            if (!binding) continue;
+            if (outputBuffers.has(binding.buffer)) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            outputBuffers.add(binding.buffer);
+        }
+        this.transformFeedbackBinding.active = true;
+        this.transformFeedbackBinding.paused = false;
+        this.transformFeedbackBinding.primitiveMode = primitiveMode;
+        this.transformFeedbackBinding.activeProgram = currentProgram;
+        this.transformFeedbackBinding.writeOffsets.fill(0);
+        this.invalidateDrawSemanticValidation();
+        this.hydGlobalState.recordTransition("beginTransformFeedback", primitiveMode);
+    }
+
+    endTransformFeedback() {
+        if (!this.transformFeedbackBinding.active) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        this.transformFeedbackBinding.active = false;
+        this.transformFeedbackBinding.paused = false;
+        this.transformFeedbackBinding.primitiveMode = 0;
+        this.transformFeedbackBinding.activeProgram = null;
+        this.invalidateDrawSemanticValidation();
+        this.hydGlobalState.recordTransitionOne("endTransformFeedback");
+    }
+
+    pauseTransformFeedback() {
+        if (!this.transformFeedbackBinding.active || this.transformFeedbackBinding.paused) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        this.transformFeedbackBinding.paused = true;
+        this.invalidateDrawSemanticValidation();
+        this.hydGlobalState.recordTransitionOne("pauseTransformFeedback");
+    }
+
+    resumeTransformFeedback() {
+        if (!this.transformFeedbackBinding.active || !this.transformFeedbackBinding.paused) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (this.hydGlobalState.commonState.currentProgram !== this.transformFeedbackBinding.activeProgram) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        this.transformFeedbackBinding.paused = false;
+        this.invalidateDrawSemanticValidation();
+        this.hydGlobalState.recordTransitionOne("resumeTransformFeedback");
     }
 
     // ***** texture *****
@@ -3899,6 +7151,7 @@ ${assignments}
         }
         if (this.hydGlobalState.commonState.activeTextureUnit !== target) {
             this.hydGlobalState.commonState.activeTextureUnit = target;
+            this.hydGlobalState.invalidateNonTextureStateHash();
         }
     }
 
@@ -3911,7 +7164,13 @@ ${assignments}
             return;
         }
         let hydTexture: HydTexture | null;
-        if (texture instanceof HydTexture) {
+        const knownTargetTexture = texture instanceof HydTexture &&
+            texture.bindingTarget === target &&
+            texture.ownerToken === this.contextToken &&
+            !texture.deleted;
+        if (knownTargetTexture) {
+            hydTexture = texture as HydTexture;
+        } else if (texture instanceof HydTexture) {
             if (texture.deleted) {
                 this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
                 return;
@@ -3924,7 +7183,14 @@ ${assignments}
         } else {
             hydTexture = this.normalizeTexture(texture);
         }
-        if (hydTexture) hydTexture.initialized = true;
+        if (hydTexture && !knownTargetTexture) {
+            if (hydTexture.bindingTarget !== null && hydTexture.bindingTarget !== target) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            hydTexture.bindingTarget = target;
+            hydTexture.initialized = true;
+        }
         const textureUnit = this.hydGlobalState.commonState.activeTextureUnit;
         const previous = this.hydGlobalState.getTextureUnitBinding(textureUnit, vd);
         if (hydTexture === null) {
@@ -3935,7 +7201,7 @@ ${assignments}
                 this.samplerOriginStateVersion++;
             }
             this.hydGlobalState.setTextureUnitBinding(textureUnit, vd, null);
-            this.hydGlobalState.recordTransition("bindTexture", target, "null");
+            this.hydGlobalState.recordTransitionOne(`bindTexture$${target},null`, true);
             return;
         }
         if (previous === hydTexture && hydTexture.viewDimension === vd) {
@@ -3946,23 +7212,28 @@ ${assignments}
             this.samplerOriginStateVersion++;
         }
         this.hydGlobalState.setTextureUnitBinding(textureUnit, vd, hydTexture);
-        this.hydGlobalState.recordTransitionOne(hydTexture.hash);
+        this.hydGlobalState.recordTransitionOne(hydTexture.hash, true);
         // this.hydGlobalState.recordTransition("bindTexture", vd, texture.hash);
     }
 
     texImage2D(...args: Array<any>) {
-        console.assert(args.length === 9 || args.length === 6);
-        const target: GLenum = args.at(0);
-        const level: GLint = args.at(1);
-        const internalformat: GLenum = args.at(2);
+        console.assert(args.length === 10 || args.length === 9 || args.length === 6);
+        const target: GLenum = toWebGlInt32(args.at(0));
+        const level: GLint = toWebGlInt32(args.at(1));
+        const internalformat: GLenum = toWebGlInt32(args.at(2));
         let width: GLsizei;
         let height: GLsizei;
-        const border: GLint = 0;
-        const format: GLenum = args.at(-3);
-        const type: GLenum = args.at(-2);
-        const sourcePixels: any = args.at(-1);
+        const sizedUpload = args.length !== 6;
+        const border: GLint = sizedUpload ? toWebGlInt32(args.at(5)) : 0;
+        const format: GLenum = toWebGlInt32(sizedUpload ? args.at(6) : args.at(3));
+        const type: GLenum = toWebGlInt32(sizedUpload ? args.at(7) : args.at(4));
+        const sourcePixels: any = sizedUpload ? args.at(8) : args.at(5);
         let pixels = sourcePixels;
         if (!this.validateTexImage2DTarget(target)) return;
+        if (!sizedUpload && this.hydGlobalState.commonState.pixelUnpackBufferBinding) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         if (args.length === 6) {
             const extent = this.resolveTexImageSourceExtent(sourcePixels);
             if (!extent) {
@@ -3971,13 +7242,13 @@ ${assignments}
             width = extent.width;
             height = extent.height;
         } else {
-            width = args.at(3);
-            height = args.at(4);
+            width = toWebGlInt32(args.at(3));
+            height = toWebGlInt32(args.at(4));
             if (this.hydContextType !== "webgl2" && sourcePixels !== null && !ArrayBuffer.isView(sourcePixels)) {
                 throw new TypeError("texImage2D pixels must be an ArrayBufferView or null");
             }
         }
-        if ((args.length === 9 && args.at(5) !== 0) ||
+        if ((sizedUpload && border !== 0) ||
             !this.validateTexImage2DDimensions(target, level, width, height)) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
             return;
@@ -3986,8 +7257,37 @@ ${assignments}
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
             return;
         }
+        if (!this.isKnownTextureInternalFormat(internalformat)) {
+            this.hydGlobalState.setError(this.hydContextType === "webgl2"
+                ? WebGL2RenderingContext.INVALID_VALUE
+                : WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        const externalSource = sourcePixels !== null &&
+            !ArrayBuffer.isView(sourcePixels) && typeof sourcePixels !== "number";
+        if (externalSource && (
+            format === WebGL2RenderingContext.RED_INTEGER ||
+            format === WebGL2RenderingContext.RG_INTEGER ||
+            format === WebGL2RenderingContext.RGB_INTEGER ||
+            format === WebGL2RenderingContext.RGBA_INTEGER
+        ) && type !== WebGL2RenderingContext.UNSIGNED_BYTE) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (args.length === 10) {
+            if (!ArrayBuffer.isView(pixels)) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            pixels = this.textureUploadViewFromElementOffset(pixels, args.at(9));
+            if (!pixels) return;
+        }
         if (sourcePixels instanceof HTMLCanvasElement) {
             pixels = hydCanvasContexts.get(sourcePixels)?.prepareCanvasForTextureUpload() || sourcePixels;
+        }
+        if (this.hydContextType === "webgl2" && typeof pixels === "number") {
+            pixels = this.pixelUnpackBufferSlice(pixels, width, height, 1, format, type);
+            if (!pixels) return;
         }
         if (!this.textureUploadExtensionsAllow(format, type)) return;
         if (!this.isSupportedTextureUploadFormat(internalformat, format, type)) {
@@ -3998,6 +7298,10 @@ ${assignments}
         const unpack: HydPixelUnpackState = this.hydGlobalState.miscState.unpackState;
         const texture = this.currentTexture(target);
         if (!texture) return;
+        if (texture.immutableFormat) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         this._der_flush();
         try {
             texture.texImage2D(pixels, target, level, internalformat, width, height, border, format, type, unpack);
@@ -4006,42 +7310,331 @@ ${assignments}
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
+        this.markFramebufferContentChanged();
         this.samplerOriginStateVersion++;
         this.hydGlobalState.recordTransition("texImage2D", target, level, internalformat, width, height, border, format, type);
     }
 
     compressedTexImage2D(...args: Array<any>) {
-        if (this.hydContextType !== "webgl2" && (args.length < 7 || !ArrayBuffer.isView(args[6]))) {
+        if (args.length < 7 || (this.hydContextType !== "webgl2" && !ArrayBuffer.isView(args[6]))) {
             throw new TypeError(`compressedTexImage2D requires 7 arguments in WebGL 1, received ${args.length}`);
         }
-        this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
-    }
-
-    compressedTexSubImage2D(...args: Array<any>) {
-        if (this.hydContextType !== "webgl2" && (args.length < 8 || !ArrayBuffer.isView(args[7]))) {
-            throw new TypeError(`compressedTexSubImage2D requires 8 arguments in WebGL 1, received ${args.length}`);
+        const [target, level, internalformat, width, height, border] = args;
+        const info = this.compressedTextureFormatInfo(internalformat);
+        if (!info) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
         }
-        this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
-    }
-
-    texStorage2D(target: GLenum, levels: GLsizei, internalformat: GLenum, width: GLsizei, height: GLsizei) {
-        this._der_flush();
-        if (levels < 1) {
+        if (!this.validateTexImage2DTarget(target)) return;
+        if (border !== 0 || !this.validateTexImage2DDimensions(target, level, width, height)) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
             return;
         }
-        const { format, type } = this.textureStorageUploadFormat(internalformat);
-        this.currentTexture(target).texImage2D(null, target, 0, internalformat, width, height, 0, format, type, this.hydGlobalState.miscState.unpackState);
+        const expectedBytes = this.compressedTextureByteLength(width, height, info.blockBytes);
+        let data: Uint8Array;
+        if (typeof args[6] === "number") {
+            const imageSize = args[6];
+            const offset = Number(args[7]) || 0;
+            const buffer = this.hydGlobalState.commonState.pixelUnpackBufferBinding;
+            if (!buffer) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            if (imageSize !== expectedBytes || offset < 0) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+                return;
+            }
+            if (offset + imageSize > buffer.webglSize) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            data = buffer.shadowData.subarray(offset, offset + imageSize);
+        } else if (ArrayBuffer.isView(args[6])) {
+            const source = args[6] as ArrayBufferView;
+            data = this.compressedTextureViewBytes(source, args[7] ?? 0, args[8], expectedBytes);
+            if (!data) return;
+        } else {
+            throw new TypeError("compressedTexImage2D data must be an ArrayBufferView or PBO offset");
+        }
+        const texture = this.currentTexture(target);
+        if (!texture) return;
+        this._der_flush();
+        texture.compressedTexImage2D(data, target, level, internalformat, width, height, info.gpuFormat, info.blockBytes);
+        this.markFramebufferContentChanged();
+        this.samplerOriginStateVersion++;
+        this.hydGlobalState.recordTransition("compressedTexImage2D", target, level, internalformat, width, height);
+    }
+
+    compressedTexSubImage2D(...args: Array<any>) {
+        if (args.length < 8 || (this.hydContextType !== "webgl2" && !ArrayBuffer.isView(args[7]))) {
+            throw new TypeError(`compressedTexSubImage2D requires 8 arguments in WebGL 1, received ${args.length}`);
+        }
+        const [target, level, xoffset, yoffset, width, height, format] = args;
+        const info = this.compressedTextureFormatInfo(format);
+        if (!info) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (!this.validateTexImage2DTarget(target)) return;
+        if (level < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (!info.supportsSubImage) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const texture = this.currentTexture(target);
+        if (!texture) return;
+        const image = texture.getImageState(target, level);
+        if (!image || image.internalFormat !== format) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (xoffset < 0 || yoffset < 0 || width < 0 || height < 0 ||
+            xoffset + width > image.width || yoffset + height > image.height) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (xoffset % 4 !== 0 || yoffset % 4 !== 0 ||
+            (width % 4 !== 0 && xoffset + width !== image.width) ||
+            (height % 4 !== 0 && yoffset + height !== image.height)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const expectedBytes = this.compressedTextureByteLength(width, height, info.blockBytes);
+        let data: Uint8Array;
+        if (typeof args[7] === "number") {
+            const imageSize = args[7];
+            const offset = Number(args[8]) || 0;
+            const buffer = this.hydGlobalState.commonState.pixelUnpackBufferBinding;
+            if (!buffer) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            if (imageSize !== expectedBytes || offset < 0) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+                return;
+            }
+            if (offset + imageSize > buffer.webglSize) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            data = buffer.shadowData.subarray(offset, offset + imageSize);
+        } else if (ArrayBuffer.isView(args[7])) {
+            const source = args[7] as ArrayBufferView;
+            data = this.compressedTextureViewBytes(source, args[8] ?? 0, args[9], expectedBytes);
+            if (!data) return;
+        } else {
+            throw new TypeError("compressedTexSubImage2D data must be an ArrayBufferView or PBO offset");
+        }
+        this._der_flush();
+        texture.compressedTexSubImage2D(data, target, level, xoffset, yoffset, width, height, info.blockBytes);
+        this.markFramebufferContentChanged();
+        this.samplerOriginStateVersion++;
+        this.hydGlobalState.recordTransition("compressedTexSubImage2D", target, level, xoffset, yoffset, width, height, format);
+    }
+
+    compressedTexImage3D(...args: Array<any>) {
+        if (args.length < 8) {
+            throw new TypeError(`compressedTexImage3D requires 8 arguments, received ${args.length}`);
+        }
+        const [target, level, internalformat, width, height, depth, border] = args;
+        const info = this.compressedTextureFormatInfo(internalformat);
+        if (!info) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (target !== WebGL2RenderingContext.TEXTURE_3D &&
+            target !== WebGL2RenderingContext.TEXTURE_2D_ARRAY) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (target === WebGL2RenderingContext.TEXTURE_3D) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (border !== 0 || !this.validateTexImage3DDimensions(target, level, width, height, depth)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const expectedBytes = this.compressedTextureByteLength(width, height, info.blockBytes) * depth;
+        let data: Uint8Array;
+        if (typeof args[7] === "number") {
+            const imageSize = Number(args[7]);
+            const byteOffset = Number(args[8]) || 0;
+            const buffer = this.hydGlobalState.commonState.pixelUnpackBufferBinding;
+            if (!buffer) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            if (imageSize !== expectedBytes || byteOffset < 0) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+                return;
+            }
+            if (byteOffset + imageSize > buffer.webglSize) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            data = buffer.shadowData.subarray(byteOffset, byteOffset + imageSize);
+        } else if (ArrayBuffer.isView(args[7])) {
+            data = this.compressedTextureViewBytes(args[7], args[8] ?? 0, args[9], expectedBytes);
+            if (!data) return;
+        } else {
+            throw new TypeError("compressedTexImage3D data must be an ArrayBufferView or PBO offset");
+        }
+        const texture = this.currentTexture(target);
+        if (!texture) return;
+        this._der_flush();
+        texture.compressedTexImage3D(
+            data, target, level, internalformat, width, height, depth, info.gpuFormat, info.blockBytes);
+        this.markFramebufferContentChanged();
+        this.samplerOriginStateVersion++;
+        this.hydGlobalState.recordTransition(
+            "compressedTexImage3D", target, level, internalformat, width, height, depth);
+    }
+
+    compressedTexSubImage3D(...args: Array<any>) {
+        if (args.length < 10) {
+            throw new TypeError(`compressedTexSubImage3D requires 10 arguments, received ${args.length}`);
+        }
+        const [target, level, xoffset, yoffset, zoffset, width, height, depth, format] = args;
+        const info = this.compressedTextureFormatInfo(format);
+        if (!info) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (target !== WebGL2RenderingContext.TEXTURE_3D &&
+            target !== WebGL2RenderingContext.TEXTURE_2D_ARRAY) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (target === WebGL2RenderingContext.TEXTURE_3D) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (level < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (!info.supportsSubImage) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const texture = this.currentTexture(target);
+        if (!texture) return;
+        const image = texture.getImageState(target, level);
+        if (!image || image.internalFormat !== format) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (xoffset < 0 || yoffset < 0 || zoffset < 0 || width < 0 || height < 0 || depth < 0 ||
+            xoffset + width > image.width || yoffset + height > image.height || zoffset + depth > image.depth) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (xoffset % 4 !== 0 || yoffset % 4 !== 0 ||
+            (width % 4 !== 0 && xoffset + width !== image.width) ||
+            (height % 4 !== 0 && yoffset + height !== image.height)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const expectedBytes = this.compressedTextureByteLength(width, height, info.blockBytes) * depth;
+        let data: Uint8Array;
+        if (typeof args[9] === "number") {
+            const imageSize = Number(args[9]);
+            const byteOffset = Number(args[10]) || 0;
+            const buffer = this.hydGlobalState.commonState.pixelUnpackBufferBinding;
+            if (!buffer) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            if (imageSize !== expectedBytes || byteOffset < 0) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+                return;
+            }
+            if (byteOffset + imageSize > buffer.webglSize) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            data = buffer.shadowData.subarray(byteOffset, byteOffset + imageSize);
+        } else if (ArrayBuffer.isView(args[9])) {
+            data = this.compressedTextureViewBytes(args[9], args[10] ?? 0, args[11], expectedBytes);
+            if (!data) return;
+        } else {
+            throw new TypeError("compressedTexSubImage3D data must be an ArrayBufferView or PBO offset");
+        }
+        this._der_flush();
+        texture.compressedTexSubImage3D(
+            data, level, xoffset, yoffset, zoffset, width, height, depth, info.blockBytes);
+        this.markFramebufferContentChanged();
+        this.samplerOriginStateVersion++;
+        this.hydGlobalState.recordTransition(
+            "compressedTexSubImage3D", target, level, xoffset, yoffset, zoffset, width, height, depth, format);
+    }
+
+    private compressedTextureFormatInfo(format: GLenum): CompressedTextureFormatInfo | null {
+        if (format === GL_COMPRESSED_RGB_ETC1_WEBGL && this.enabledExtensions.has("WEBGL_COMPRESSED_TEXTURE_ETC1")) {
+            return ETC1_COMPRESSED_FORMAT;
+        }
+        if (this.enabledExtensions.has("WEBGL_COMPRESSED_TEXTURE_ETC")) {
+            return ETC2_COMPRESSED_FORMATS.get(format) || null;
+        }
+        return null;
+    }
+
+    private compressedTextureByteLength(width: number, height: number, blockBytes: number): number {
+        return Math.ceil(width / 4) * Math.ceil(height / 4) * blockBytes;
+    }
+
+    texStorage2D(target: GLenum, levels: GLsizei, internalformat: GLenum, width: GLsizei, height: GLsizei) {
+        const validTarget = target === WebGL2RenderingContext.TEXTURE_2D ||
+            target === WebGL2RenderingContext.TEXTURE_CUBE_MAP;
+        if (!validTarget) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (levels < 1 || width < 1 || height < 1) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const maxLevels = Math.floor(Math.log2(Math.max(width, height))) + 1;
+        if (levels > maxLevels) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const compressedInfo = this.compressedTextureFormatInfo(internalformat);
+        let uploadFormat: { format: GLenum, type: GLenum };
+        if (compressedInfo) {
+            uploadFormat = { format: internalformat, type: WebGL2RenderingContext.UNSIGNED_BYTE };
+        } else {
+            try {
+                uploadFormat = this.textureStorageUploadFormat(internalformat);
+            } catch (_) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                return;
+            }
+        }
+        const texture = this.currentTexture(target);
+        if (!texture) return;
+        if (texture.immutableFormat) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        this._der_flush();
+        texture.texStorage2D(target, levels, internalformat, width, height,
+            uploadFormat.format, uploadFormat.type, compressedInfo?.gpuFormat);
+        this.markFramebufferContentChanged();
         this.samplerOriginStateVersion++;
         this.hydGlobalState.recordTransition("texStorage2D", target, levels, internalformat, width, height);
     }
 
     texSubImage2D(...args: Array<any>) {
         console.assert(args.length === 7 || args.length === 9 || args.length === 8 || args.length === 10);
-        const target: GLenum = args.at(0);
-        const level: GLint = args.at(1);
-        const xoffset: GLint = args.at(2);
-        const yoffset: GLint = args.at(3);
+        const target: GLenum = toWebGlInt32(args.at(0));
+        const level: GLint = toWebGlInt32(args.at(1));
+        const xoffset: GLint = toWebGlInt32(args.at(2));
+        const yoffset: GLint = toWebGlInt32(args.at(3));
         let width: GLsizei;
         let height: GLsizei;
         let format: GLenum;
@@ -4049,13 +7642,16 @@ ${assignments}
         let pixels: any;
         if (!this.validateTexImage2DTarget(target)) return;
         if (args.length === 7 || args.length === 8) {
-            format = args.at(4);
-            type = args.at(5);
+            format = toWebGlInt32(args.at(4));
+            type = toWebGlInt32(args.at(5));
             pixels = args.at(6);
-            if (args.length === 8 && pixels && "byteLength" in pixels) {
-                const sourceOffset = args.at(7) || 0;
-                const byteOffset = sourceOffset * ((pixels as any).BYTES_PER_ELEMENT || 1);
-                pixels = new Uint8Array((pixels as TypedArray).buffer, (pixels as TypedArray).byteOffset + byteOffset, (pixels as TypedArray).byteLength - byteOffset);
+            if (this.hydGlobalState.commonState.pixelUnpackBufferBinding) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            if (args.length === 8 && ArrayBuffer.isView(pixels)) {
+                pixels = this.textureUploadViewFromElementOffset(pixels, args.at(7));
+                if (!pixels) return;
             }
             const extent = this.resolveTexImageSourceExtent(pixels);
             if (!extent) {
@@ -4064,20 +7660,24 @@ ${assignments}
             width = extent.width;
             height = extent.height;
         } else {
-            width = args.at(4);
-            height = args.at(5);
-            format = args.at(6);
-            type = args.at(7);
+            width = toWebGlInt32(args.at(4));
+            height = toWebGlInt32(args.at(5));
+            format = toWebGlInt32(args.at(6));
+            type = toWebGlInt32(args.at(7));
             pixels = args.at(8);
             if (this.hydContextType !== "webgl2" && pixels !== null && !ArrayBuffer.isView(pixels)) {
                 throw new TypeError("texSubImage2D pixels must be an ArrayBufferView or null");
             }
             if (typeof pixels === "number") {
                 pixels = this.pixelUnpackBufferSlice(pixels, width, height, 1, format, type);
-            } else if (args.length === 10 && pixels && "byteLength" in pixels) {
-                const sourceOffset = args.at(9) || 0;
-                const byteOffset = sourceOffset * ((pixels as any).BYTES_PER_ELEMENT || 1);
-                pixels = new Uint8Array((pixels as TypedArray).buffer, (pixels as TypedArray).byteOffset + byteOffset, (pixels as TypedArray).byteLength - byteOffset);
+                if (!pixels) return;
+            } else if (args.length === 10) {
+                if (!ArrayBuffer.isView(pixels)) {
+                    this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                    return;
+                }
+                pixels = this.textureUploadViewFromElementOffset(pixels, args.at(9));
+                if (!pixels) return;
             }
         }
         if (level < 0 || xoffset < 0 || yoffset < 0 || width < 0 || height < 0) {
@@ -4096,10 +7696,6 @@ ${assignments}
             pixels = hydCanvasContexts.get(pixels)?.prepareCanvasForTextureUpload() || pixels;
         }
         if (!this.textureUploadExtensionsAllow(format, type)) return;
-        if (!this.isSupportedTextureSubUploadFormat(format, type)) {
-            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
-            return;
-        }
         const texture = this.currentTexture(target);
         if (!texture) return;
         const image = texture.getImageState(target, level);
@@ -4112,7 +7708,9 @@ ${assignments}
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
             return;
         }
-        if (image.format !== format || (this.hydContextType !== "webgl2" && image.type !== type)) {
+        if (image.format !== format ||
+            !this.isSupportedTextureUploadFormat(image.internalFormat, format, type) ||
+            (this.hydContextType !== "webgl2" && image.type !== type)) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
@@ -4126,48 +7724,135 @@ ${assignments}
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
+        this.markFramebufferContentChanged();
         this.samplerOriginStateVersion++;
         this.hydGlobalState.recordTransition("texSubImage2D", target, level, xoffset, yoffset, width, height, format, type);
     }
 
     texStorage3D(target: GLenum, levels: GLsizei, internalformat: GLenum, width: GLsizei, height: GLsizei, depth: GLsizei) {
-        this._der_flush();
-        if (levels < 1) {
+        const validTarget = target === WebGL2RenderingContext.TEXTURE_3D ||
+            target === WebGL2RenderingContext.TEXTURE_2D_ARRAY;
+        if (!validTarget) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (levels < 1 || width < 1 || height < 1 || depth < 1) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
             return;
         }
-        const { format, type } = this.textureStorageUploadFormat(internalformat);
-        this.currentTexture(target).texImage3D(null, target, 0, internalformat, width, height, depth, 0, format, type, 0);
+        const maxDimension = this.textureLimit(target === WebGL2RenderingContext.TEXTURE_3D
+            ? WebGL2RenderingContext.MAX_3D_TEXTURE_SIZE
+            : WebGL2RenderingContext.MAX_TEXTURE_SIZE);
+        const maxDepth = target === WebGL2RenderingContext.TEXTURE_3D
+            ? maxDimension
+            : this.textureLimit(WebGL2RenderingContext.MAX_ARRAY_TEXTURE_LAYERS);
+        if (width > maxDimension || height > maxDimension || depth > maxDepth) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const mipDimension = target === WebGL2RenderingContext.TEXTURE_3D
+            ? Math.max(width, height, depth)
+            : Math.max(width, height);
+        const maxLevels = Math.floor(Math.log2(mipDimension)) + 1;
+        if (levels > maxLevels) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const compressedInfo = this.compressedTextureFormatInfo(internalformat);
+        if (compressedInfo && target === WebGL2RenderingContext.TEXTURE_3D) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        let uploadFormat: { format: GLenum, type: GLenum };
+        if (compressedInfo) {
+            uploadFormat = { format: internalformat, type: WebGL2RenderingContext.UNSIGNED_BYTE };
+        } else {
+            try {
+                uploadFormat = this.textureStorageUploadFormat(internalformat);
+            } catch (_) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                return;
+            }
+        }
+        const texture = this.currentTexture(target);
+        if (!texture) return;
+        if (texture.immutableFormat) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        this._der_flush();
+        texture.texStorage3D(
+            target, levels, internalformat, width, height, depth,
+            uploadFormat.format, uploadFormat.type, compressedInfo?.gpuFormat);
+        this.markFramebufferContentChanged();
         this.samplerOriginStateVersion++;
         this.hydGlobalState.recordTransition("texStorage3D", target, levels, internalformat, width, height, depth);
     }
 
     texImage3D(...args: Array<any>) {
-        this._der_flush();
-        // gl.texImage3D( target, 0, gl.RGBA, 1, 1, dimensions, 0, gl.RGBA, gl.UNSIGNED_BYTE, data );
-        if (args.length === 10) {
-            args.push(0);
-        }
-        console.assert(args.length === 11);
-        const [target, level, internalformat, width, height, depth, border, format, type, rawPixels, offset] = args;
+        console.assert(args.length === 10 || args.length === 11);
+        const [target, level, internalformat, width, height, depth, border, format, type, rawPixels] = args;
         let pixels = rawPixels;
-        if (pixels instanceof HTMLVideoElement
-            || border !== 0
-        ) {
-            throw new Error("unsupported texImage3D: " + args);
+        const validTarget = target === WebGL2RenderingContext.TEXTURE_3D ||
+            target === WebGL2RenderingContext.TEXTURE_2D_ARRAY;
+        if (!validTarget) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (border !== 0 || !this.validateTexImage3DDimensions(target, level, width, height, depth)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (!this.isKnownTextureFormat(format) || !this.isKnownTextureType(type)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (!this.isKnownTextureInternalFormat(internalformat)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if ((typeof rawPixels === "number" || ArrayBuffer.isView(rawPixels)) &&
+            (this.hydGlobalState.miscState.unpackFlipYWebGL ||
+                this.hydGlobalState.miscState.unpackPremultiplyAlphaWebGL)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (pixels instanceof HTMLCanvasElement) {
+            pixels = hydCanvasContexts.get(pixels)?.prepareCanvasForTextureUpload() || pixels;
         }
         if (typeof pixels === "number") {
-            pixels = this.pixelUnpackBufferSlice(pixels, width, height, depth, format, type);
-        } else if (offset && pixels && "byteLength" in pixels) {
-            const byteOffset = offset * ((pixels as any).BYTES_PER_ELEMENT || 1);
-            pixels = new Uint8Array((pixels as TypedArray).buffer, (pixels as TypedArray).byteOffset + byteOffset, (pixels as TypedArray).byteLength - byteOffset);
+            pixels = this.pixelUnpackBufferSlice(pixels, width, height, depth, format, type, true);
+            if (!pixels) return;
+        } else if (args.length === 11) {
+            if (!ArrayBuffer.isView(pixels)) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            pixels = this.textureUploadViewFromElementOffset(pixels, args.at(10));
+            if (!pixels) return;
         }
         if (!this.isSupportedTextureUploadFormat(internalformat, format, type)) {
-            throw new Error("unsupported texImage3D: " + args);
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
         }
-        this.currentTexture(target).texImage3D(pixels, target, level, internalformat, width, height, depth, border, format, type, offset);
+        if (!this.validateTextureUploadView(pixels, width, height, format, type, depth, true)) return;
+        const texture = this.currentTexture(target);
+        if (!texture) return;
+        if (texture.immutableFormat) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const unpack: HydPixelUnpackState = this.hydGlobalState.miscState.unpackState;
+        this._der_flush();
+        try {
+            texture.texImage3D(pixels, target, level, internalformat, width, height, depth, border, format, type, 0, unpack);
+        } catch (_) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        this.markFramebufferContentChanged();
         this.samplerOriginStateVersion++;
-        this.hydGlobalState.recordTransition("texImage3D", target, level, internalformat, width, height, depth, border, format, type, offset);
+        this.hydGlobalState.recordTransition("texImage3D", target, level, internalformat, width, height, depth, border, format, type);
     }
 
     texSubImage3D(...args: Array<any>) {
@@ -4184,18 +7869,68 @@ ${assignments}
         const format: GLenum = args.at(8);
         const type: GLenum = args.at(9);
         let pixels: ImageData | HTMLImageElement | HTMLCanvasElement | HTMLVideoElement | ImageBitmap | TypedArray = args.at(10);
-        if (typeof pixels === "number") {
-            pixels = this.pixelUnpackBufferSlice(pixels, width, height, depth, format, type);
-        } else if (args.length === 12 && pixels && "byteLength" in pixels) {
-            const sourceOffset = args.at(11) || 0;
-            const byteOffset = sourceOffset * ((pixels as any).BYTES_PER_ELEMENT || 1);
-            pixels = new Uint8Array((pixels as TypedArray).buffer, (pixels as TypedArray).byteOffset + byteOffset, (pixels as TypedArray).byteLength - byteOffset);
+        const validTarget = target === WebGL2RenderingContext.TEXTURE_3D ||
+            target === WebGL2RenderingContext.TEXTURE_2D_ARRAY;
+        if (!validTarget) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
         }
-        if (!this.isSupportedTextureSubUploadFormat(format, type)) {
-            throw new Error("unsupported texSubImage3D: " + args);
+        if (level < 0 || xoffset < 0 || yoffset < 0 || zoffset < 0 ||
+            width < 0 || height < 0 || depth < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (!this.isKnownTextureFormat(format) || !this.isKnownTextureType(type)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if ((typeof pixels === "number" || ArrayBuffer.isView(pixels)) &&
+            (this.hydGlobalState.miscState.unpackFlipYWebGL ||
+                this.hydGlobalState.miscState.unpackPremultiplyAlphaWebGL)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (pixels instanceof HTMLCanvasElement) {
+            pixels = hydCanvasContexts.get(pixels)?.prepareCanvasForTextureUpload() || pixels;
+        }
+        if (typeof pixels === "number") {
+            pixels = this.pixelUnpackBufferSlice(pixels, width, height, depth, format, type, true);
+            if (!pixels) return;
+        } else if (args.length === 12) {
+            if (!ArrayBuffer.isView(pixels)) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            pixels = this.textureUploadViewFromElementOffset(pixels, args.at(11));
+            if (!pixels) return;
+        }
+        if (!this.validateTextureUploadView(pixels, width, height, format, type, depth, true)) return;
+        const texture = this.currentTexture(target);
+        if (!texture) return;
+        const image = texture.getImageState(target, level);
+        if (!image) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (image.format !== format ||
+            !this.isSupportedTextureUploadFormat(image.internalFormat, format, type)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (xoffset + width > image.width || yoffset + height > image.height ||
+            zoffset + depth > image.depth) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
         }
         const unpack: HydPixelUnpackState = this.hydGlobalState.miscState.unpackState;
-        this.currentTexture(target).texSubImage3D(pixels, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, unpack);
+        this._der_flush();
+        try {
+            texture.texSubImage3D(pixels, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, unpack);
+        } catch (_) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        this.markFramebufferContentChanged();
         this.samplerOriginStateVersion++;
         this.hydGlobalState.recordTransition("texSubImage3D", target, level, xoffset, yoffset, zoffset, width, height, depth, format, type);
     }
@@ -4226,10 +7961,30 @@ ${assignments}
         ]);
         const magFilters = new Set<number>([WebGL2RenderingContext.NEAREST, WebGL2RenderingContext.LINEAR]);
         const wrapModes = new Set<number>([WebGL2RenderingContext.CLAMP_TO_EDGE, WebGL2RenderingContext.MIRRORED_REPEAT, WebGL2RenderingContext.REPEAT]);
+        const levelParameter = this.hydContextType === "webgl2" &&
+            (pname === WebGL2RenderingContext.TEXTURE_BASE_LEVEL ||
+                pname === WebGL2RenderingContext.TEXTURE_MAX_LEVEL);
+        const lodParameter = this.hydContextType === "webgl2" &&
+            (pname === WebGL2RenderingContext.TEXTURE_MIN_LOD ||
+                pname === WebGL2RenderingContext.TEXTURE_MAX_LOD) && Number.isFinite(param);
+        if (levelParameter) {
+            param = toWebGlInt32(param);
+            if (param < 0) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+                return;
+            }
+        }
+        const compareModeParameter = this.hydContextType === "webgl2" &&
+            pname === WebGL2RenderingContext.TEXTURE_COMPARE_MODE &&
+            (param === WebGL2RenderingContext.NONE || param === WebGL2RenderingContext.COMPARE_REF_TO_TEXTURE);
+        const compareFuncParameter = this.hydContextType === "webgl2" &&
+            pname === WebGL2RenderingContext.TEXTURE_COMPARE_FUNC &&
+            enumToCompareFunction.has(param);
         const valid = (pname === WebGL2RenderingContext.TEXTURE_MIN_FILTER && minFilters.has(param)) ||
             (pname === WebGL2RenderingContext.TEXTURE_MAG_FILTER && magFilters.has(param)) ||
             ((pname === WebGL2RenderingContext.TEXTURE_WRAP_S || pname === WebGL2RenderingContext.TEXTURE_WRAP_T ||
-                (this.hydContextType === "webgl2" && pname === WebGL2RenderingContext.TEXTURE_WRAP_R)) && wrapModes.has(param));
+                (this.hydContextType === "webgl2" && pname === WebGL2RenderingContext.TEXTURE_WRAP_R)) && wrapModes.has(param)) ||
+            levelParameter || lodParameter || compareModeParameter || compareFuncParameter;
         if (!valid) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
             return;
@@ -4239,30 +7994,45 @@ ${assignments}
     }
 
     texParameterf(target: GLenum, pname: GLenum, param: GLfloat) {
-        this.texParameteri(target, pname, param);
+        const integerLevel = this.hydContextType === "webgl2" &&
+            (pname === WebGL2RenderingContext.TEXTURE_BASE_LEVEL ||
+                pname === WebGL2RenderingContext.TEXTURE_MAX_LEVEL);
+        this.texParameteri(target, pname, integerLevel ? Math.round(param) : param);
     }
 
     generateMipmap(target: GLenum) {
-        if (target !== WebGL2RenderingContext.TEXTURE_2D && target !== WebGL2RenderingContext.TEXTURE_CUBE_MAP) {
+        const validTarget = target === WebGL2RenderingContext.TEXTURE_2D ||
+            target === WebGL2RenderingContext.TEXTURE_CUBE_MAP ||
+            (this.hydContextType === "webgl2" && (
+                target === WebGL2RenderingContext.TEXTURE_3D ||
+                target === WebGL2RenderingContext.TEXTURE_2D_ARRAY));
+        if (!validTarget) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
             return;
         }
         const texture = this.currentTexture(target);
         if (!texture) return;
+        const baseLevel = texture.webglParameters.get(WebGL2RenderingContext.TEXTURE_BASE_LEVEL) || 0;
+        const maxLevel = texture.webglParameters.get(WebGL2RenderingContext.TEXTURE_MAX_LEVEL) ?? 1000;
+        if (baseLevel > maxLevel) {
+            this.hydGlobalState.recordTransition("generateMipmap", target, "empty-range");
+            return;
+        }
         const baseTarget = target === WebGL2RenderingContext.TEXTURE_CUBE_MAP
             ? WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X
-            : WebGL2RenderingContext.TEXTURE_2D;
-        const baseImage = texture.getImageState(baseTarget, 0);
+            : target;
+        const baseImage = texture.getImageState(baseTarget, baseLevel);
         const powerOfTwo = (value: number) => value > 0 && (value & (value - 1)) === 0;
         if (!baseImage || baseImage.width <= 0 || baseImage.height <= 0 ||
             (this.hydContextType !== "webgl2" &&
                 (baseImage.internalFormat === GL_SRGB_EXT || baseImage.internalFormat === GL_SRGB_ALPHA_EXT)) ||
-            (target === WebGL2RenderingContext.TEXTURE_CUBE_MAP && !texture.isCubeCompleteAtLevel(0)) ||
+            (target === WebGL2RenderingContext.TEXTURE_CUBE_MAP && !texture.isCubeCompleteAtLevel(baseLevel)) ||
             (this.hydContextType !== "webgl2" && (!powerOfTwo(baseImage.width) || !powerOfTwo(baseImage.height))) ||
             !texture.generateMipmap(target)) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
+        this.markFramebufferContentChanged();
         this.hydGlobalState.recordTransition("generateMipmap", target);
     }
 
@@ -4285,11 +8055,21 @@ ${assignments}
             pname === WebGL2RenderingContext.TEXTURE_MAG_FILTER ||
             pname === WebGL2RenderingContext.TEXTURE_WRAP_S ||
             pname === WebGL2RenderingContext.TEXTURE_WRAP_T ||
-            (this.hydContextType === "webgl2" && pname === WebGL2RenderingContext.TEXTURE_WRAP_R);
+            (this.hydContextType === "webgl2" && (pname === WebGL2RenderingContext.TEXTURE_WRAP_R ||
+                pname === WebGL2RenderingContext.TEXTURE_BASE_LEVEL ||
+                pname === WebGL2RenderingContext.TEXTURE_MAX_LEVEL ||
+                pname === WebGL2RenderingContext.TEXTURE_MIN_LOD ||
+                pname === WebGL2RenderingContext.TEXTURE_MAX_LOD ||
+                pname === WebGL2RenderingContext.TEXTURE_COMPARE_MODE ||
+                pname === WebGL2RenderingContext.TEXTURE_COMPARE_FUNC ||
+                pname === WebGL2RenderingContext.TEXTURE_IMMUTABLE_FORMAT ||
+                pname === WebGL2RenderingContext.TEXTURE_IMMUTABLE_LEVELS));
         if (!validPname) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
             return null;
         }
+        if (pname === WebGL2RenderingContext.TEXTURE_IMMUTABLE_FORMAT) return texture.immutableFormat;
+        if (pname === WebGL2RenderingContext.TEXTURE_IMMUTABLE_LEVELS) return texture.immutableLevels;
         return texture.webglParameters.get(pname);
     }
 
@@ -4340,6 +8120,7 @@ ${assignments}
         }
         this.hydGlobalState.commonState.viewport[4] = zNear;
         this.hydGlobalState.commonState.viewport[5] = zFar;
+        this.hydGlobalState.depthState.range = [zNear, zFar];
         this.hydGlobalState.recordTransition("depthRange", zNear, zFar);
     }
 
@@ -4360,7 +8141,7 @@ ${assignments}
     vertexAttribPointer(index: GLuint, size: GLint, type: GLenum, normalized: GLboolean, _stride: GLsizei, offset: GLintptr) {
         const repeatAttribute = this.hydGlobalState.commonState.vertexArrayBinding.attributes[index as number];
         const repeatBuffer = this.hydGlobalState.commonState.arrayBufferBinding;
-        if (repeatAttribute && repeatBuffer &&
+        if (repeatAttribute && repeatBuffer && repeatAttribute.int === false &&
             repeatAttribute.size === size && repeatAttribute.type === type &&
             repeatAttribute.normalized === Boolean(normalized) && repeatAttribute.webglStride === _stride &&
             repeatAttribute.offset === offset && repeatAttribute.buffer === repeatBuffer) {
@@ -4377,13 +8158,20 @@ ${assignments}
             return;
         }
         const componentBytes = vertexComponentByteSize(type);
+        const packed = type === WebGL2RenderingContext.INT_2_10_10_10_REV ||
+            type === WebGL2RenderingContext.UNSIGNED_INT_2_10_10_10_REV;
         const webgl1Type = type === WebGL2RenderingContext.BYTE || type === WebGL2RenderingContext.UNSIGNED_BYTE ||
             type === WebGL2RenderingContext.SHORT || type === WebGL2RenderingContext.UNSIGNED_SHORT ||
             type === WebGL2RenderingContext.FLOAT;
         const validType = webgl1Type || (this.hydContextType === "webgl2" &&
-            (type === WebGL2RenderingContext.HALF_FLOAT || type === WebGL2RenderingContext.INT || type === WebGL2RenderingContext.UNSIGNED_INT));
+            (type === WebGL2RenderingContext.HALF_FLOAT || type === WebGL2RenderingContext.INT ||
+                type === WebGL2RenderingContext.UNSIGNED_INT || packed));
         if (!validType) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (packed && size !== 4) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
         if (size < 1 || size > 4 || _stride < 0 || _stride > 255 || offset < 0) {
@@ -4400,12 +8188,13 @@ ${assignments}
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
-        const stride = _stride || size * componentBytes;
+        const stride = _stride || (packed ? 4 : size * componentBytes);
 
-        if (attribute.size !== size || attribute.type !== type || attribute.normalized !== normalized ||
+        if (attribute.int !== false || attribute.size !== size || attribute.type !== type || attribute.normalized !== normalized ||
             attribute.stride !== stride || attribute.webglStride !== _stride ||
             attribute.offset !== offset || attribute.buffer !== buffer) {
-            const formatChanged = attribute.size !== size || attribute.type !== type || attribute.normalized !== normalized;
+            const formatChanged = attribute.int !== false || attribute.size !== size ||
+                attribute.type !== type || attribute.normalized !== normalized;
             attribute.size = size;
             attribute.type = type;
             attribute.normalized = normalized;
@@ -4425,8 +8214,83 @@ ${assignments}
                 }
             }
             attribute.updateHash();
-            this.hydGlobalState.recordTransition("vertexAttribPointer", index, size, type, normalized, stride, offset);
+            this.hydGlobalState.recordTransition(
+                "vertexAttribPointer",
+                index,
+                size,
+                type,
+                normalized,
+                stride,
+                offset,
+                buffer?.hash || "null",
+            );
         }
+    }
+
+    vertexAttribIPointer(index: GLuint, size: GLint, type: GLenum, stride: GLsizei, offset: GLintptr) {
+        if (this.hydContextType !== "webgl2") {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        index = Number(index) >>> 0;
+        size = toWebGlInt32(size);
+        type = Number(type) >>> 0;
+        stride = toWebGlInt32(stride);
+        offset = toWebGlInt64(offset);
+        const attribute = this.hydGlobalState.commonState.vertexArrayBinding.attributes[index];
+        if (!attribute) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const validType = type === WebGL2RenderingContext.BYTE ||
+            type === WebGL2RenderingContext.UNSIGNED_BYTE ||
+            type === WebGL2RenderingContext.SHORT ||
+            type === WebGL2RenderingContext.UNSIGNED_SHORT ||
+            type === WebGL2RenderingContext.INT ||
+            type === WebGL2RenderingContext.UNSIGNED_INT;
+        if (!validType) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (size < 1 || size > 4 || stride < 0 || stride > 255 || offset < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const componentBytes = vertexComponentByteSize(type);
+        if (offset % componentBytes !== 0 || stride % componentBytes !== 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const buffer = this.hydGlobalState.commonState.arrayBufferBinding;
+        if (!buffer && offset !== 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const effectiveStride = stride || size * componentBytes;
+        if (attribute.size === size && attribute.type === type && attribute.int === true &&
+            attribute.webglStride === stride && attribute.offset === offset && attribute.buffer === buffer) return;
+        attribute.size = size;
+        attribute.type = type;
+        attribute.normalized = false;
+        attribute.int = true;
+        attribute.stride = effectiveStride;
+        attribute.webglStride = stride;
+        attribute.offset = offset;
+        attribute.buffer = buffer;
+        attribute.shaderLocation = index;
+        // Integer data is converted to tightly packed 32-bit values. This also
+        // handles WebGL strides that are not legal WebGPU array strides.
+        attribute.format = null;
+        attribute.updateHash();
+        this.hydGlobalState.recordTransition(
+            "vertexAttribIPointer",
+            index,
+            size,
+            type,
+            effectiveStride,
+            offset,
+            buffer?.hash || "null",
+        );
     }
 
     private xxable(cap: GLenum, value: boolean): boolean {
@@ -4461,6 +8325,13 @@ ${assignments}
                 break;
             case WebGL2RenderingContext.DITHER:
                 this.hydGlobalState.miscState.dither = value;
+                break;
+            case WebGL2RenderingContext.RASTERIZER_DISCARD:
+                if (this.hydContextType !== "webgl2") {
+                    this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                    return false;
+                }
+                this.hydGlobalState.miscState.rasterizerDiscard = value;
                 break;
             default:
                 this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
@@ -4501,6 +8372,9 @@ ${assignments}
                 return this.hydGlobalState.miscState.sampleCoverage;
             case WebGL2RenderingContext.DITHER:
                 return this.hydGlobalState.miscState.dither;
+            case WebGL2RenderingContext.RASTERIZER_DISCARD:
+                if (this.hydContextType === "webgl2") return this.hydGlobalState.miscState.rasterizerDiscard;
+                break;
             default:
                 this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
                 return false;
@@ -4511,7 +8385,7 @@ ${assignments}
     blendFunc(sfactor: GLenum, dfactor: GLenum) {
         const src = enumToBlendFactors.get(sfactor);
         const dst = enumToBlendFactors.get(dfactor);
-        if (!src || !dst || dfactor === WebGL2RenderingContext.SRC_ALPHA_SATURATE) {
+        if (!src || !dst) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
             return;
         }
@@ -4544,9 +8418,7 @@ ${assignments}
         const dstRGB1 = enumToBlendFactors.get(dstRGB);
         const srcAlpha1 = enumToBlendFactors.get(srcAlpha);
         const dstAlpha1 = enumToBlendFactors.get(dstAlpha);
-        if (!srcRGB1 || !dstRGB1 || !srcAlpha1 || !dstAlpha1 ||
-            dstRGB === WebGL2RenderingContext.SRC_ALPHA_SATURATE ||
-            dstAlpha === WebGL2RenderingContext.SRC_ALPHA_SATURATE) {
+        if (!srcRGB1 || !dstRGB1 || !srcAlpha1 || !dstAlpha1) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
             return;
         }
@@ -4774,8 +8646,39 @@ ${assignments}
         this.hydGlobalState.recordTransition("bindFramebuffer", target, framebuffer.hash);
     }
 
+    private validateFramebufferAttachmentPoint(attachment: GLenum): boolean {
+        if (attachment === WebGL2RenderingContext.DEPTH_ATTACHMENT ||
+            attachment === WebGL2RenderingContext.STENCIL_ATTACHMENT ||
+            attachment === WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT) {
+            return true;
+        }
+        const maxColorAttachments = Number(
+            enumToConstant.get(WebGL2RenderingContext.MAX_COLOR_ATTACHMENTS)) || 1;
+        if (attachment >= WebGL2RenderingContext.COLOR_ATTACHMENT0 &&
+            attachment < WebGL2RenderingContext.COLOR_ATTACHMENT0 + maxColorAttachments) {
+            return true;
+        }
+        this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+        return false;
+    }
+
     framebufferTexture2D(target: GLenum, attachment: GLenum, texTarget: GLenum, texture: HydTexture | null, level: GLint) {
         if (!this.validateFramebufferTarget(target)) return;
+        if (!this.validateFramebufferAttachmentPoint(attachment)) return;
+        const validTextureTarget = texTarget === WebGL2RenderingContext.TEXTURE_2D || this.isCubeFaceTarget(texTarget);
+        if (!validTextureTarget) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        const maxDimension = Number(enumToConstant.get(
+            this.isCubeFaceTarget(texTarget)
+                ? WebGL2RenderingContext.MAX_CUBE_MAP_TEXTURE_SIZE
+                : WebGL2RenderingContext.MAX_TEXTURE_SIZE,
+        )) || 4096;
+        if (texture !== null && (level < 0 || level > Math.floor(Math.log2(maxDimension)))) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
         if (this.hydContextType !== "webgl2" && level !== 0) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
             return;
@@ -4795,6 +8698,15 @@ ${assignments}
             this.setObjectValidationError(texture);
             return;
         }
+        if (texture !== null) {
+            const expectedBindingTarget = this.isCubeFaceTarget(texTarget)
+                ? WebGL2RenderingContext.TEXTURE_CUBE_MAP
+                : WebGL2RenderingContext.TEXTURE_2D;
+            if (texture.bindingTarget !== expectedBindingTarget) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+        }
         this._der_flush();
         const framebuffer = this.getFramebufferForTarget(target);
         if (framebuffer === this.hydGlobalState.defaultFramebuffer) {
@@ -4802,7 +8714,7 @@ ${assignments}
             return;
         }
         if (texture === null) {
-            framebuffer.attachments.delete(attachment);
+            this.setFramebufferAttachment(framebuffer, attachment, null);
             framebuffer.resetHash();
             this.gpuViewportDirty = true;
             this.gpuScissorDirty = true;
@@ -4832,7 +8744,7 @@ ${assignments}
                 break;
         }
 
-        framebuffer.attachments.set(attachment, attrib);
+        this.setFramebufferAttachment(framebuffer, attachment, attrib);
         framebuffer.resetHash();
         this.gpuViewportDirty = true;
         this.gpuScissorDirty = true;
@@ -4840,6 +8752,8 @@ ${assignments}
     }
 
     framebufferTextureLayer(target: GLenum, attachment: GLenum, texture: HydTexture | null, level: GLint, layer: GLint) {
+        if (!this.validateFramebufferTarget(target)) return;
+        if (!this.validateFramebufferAttachmentPoint(attachment)) return;
         if (texture !== null && !this.isTexture(texture)) {
             if (texture instanceof HydTexture && texture.ownerToken === this.contextToken) {
                 this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
@@ -4848,10 +8762,32 @@ ${assignments}
             this.setObjectValidationError(texture);
             return;
         }
+        if (texture !== null) {
+            if (texture.viewDimension !== "3d" && texture.viewDimension !== "2d-array") {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            const maxDimension = this.textureLimit(
+                texture.viewDimension === "3d"
+                    ? WebGL2RenderingContext.MAX_3D_TEXTURE_SIZE
+                    : WebGL2RenderingContext.MAX_TEXTURE_SIZE);
+            const maxLayers = this.textureLimit(
+                texture.viewDimension === "3d"
+                    ? WebGL2RenderingContext.MAX_3D_TEXTURE_SIZE
+                    : WebGL2RenderingContext.MAX_ARRAY_TEXTURE_LAYERS);
+            if (level < 0 || level > Math.floor(Math.log2(maxDimension)) || layer < 0 || layer >= maxLayers) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+                return;
+            }
+        }
         this._der_flush();
         const framebuffer = this.getFramebufferForTarget(target);
+        if (framebuffer === this.hydGlobalState.defaultFramebuffer) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         if (texture === null) {
-            framebuffer.attachments.delete(attachment);
+            this.setFramebufferAttachment(framebuffer, attachment, null);
             framebuffer.resetHash();
             this.gpuViewportDirty = true;
             this.gpuScissorDirty = true;
@@ -4869,7 +8805,7 @@ ${assignments}
                 framebuffer.resetHash();
             }
         });
-        framebuffer.attachments.set(attachment, attrib);
+        this.setFramebufferAttachment(framebuffer, attachment, attrib);
         framebuffer.resetHash();
         this.gpuViewportDirty = true;
         this.gpuScissorDirty = true;
@@ -4878,6 +8814,7 @@ ${assignments}
 
     framebufferRenderbuffer(target: GLenum, attachment: GLenum, renderbufferTarget: GLenum, renderbuffer: HydTexture | null) {
         if (!this.validateFramebufferTarget(target)) return;
+        if (!this.validateFramebufferAttachmentPoint(attachment)) return;
         if (this.hydContextType !== "webgl2" &&
             attachment >= WebGL2RenderingContext.COLOR_ATTACHMENT1 &&
             attachment <= WebGL2RenderingContext.COLOR_ATTACHMENT15 &&
@@ -4904,7 +8841,7 @@ ${assignments}
             return;
         }
         if (renderbuffer === null) {
-            framebuffer.attachments.delete(attachment);
+            this.setFramebufferAttachment(framebuffer, attachment, null);
             framebuffer.resetHash();
             this.gpuViewportDirty = true;
             this.gpuScissorDirty = true;
@@ -4922,11 +8859,919 @@ ${assignments}
                 framebuffer.resetHash();
             }
         });
-        framebuffer.attachments.set(attachment, attrib);
+        this.setFramebufferAttachment(framebuffer, attachment, attrib);
         framebuffer.resetHash();
         this.gpuViewportDirty = true;
         this.gpuScissorDirty = true;
         this.hydGlobalState.recordTransition("framebufferRenderbuffer", target, attachment, renderbufferTarget, renderbuffer.hash);
+    }
+
+    private framebufferColorSurface(framebuffer: HydFramebuffer, read: boolean): {
+        texture: GPUTexture,
+        view: GPUTextureView,
+        depthSlice?: number,
+        format: GPUTextureFormat,
+        width: number,
+        height: number,
+        sampleCount: number,
+        hasAlpha: boolean,
+        colorBits: [number, number, number, number],
+        srgb: boolean,
+        isDefault: boolean,
+        attachment: FramebufferAttributes | null,
+    } | null {
+        if (framebuffer === this.hydGlobalState.defaultFramebuffer) {
+            this.ensureDefaultFramebufferRenderTarget();
+            return {
+                texture: this.hydGlobalState.__canvasTexture,
+                view: this.hydGlobalState.__canvasView,
+                format: "bgra8unorm",
+                width: this.hydCanvas.width,
+                height: this.hydCanvas.height,
+                sampleCount: 1,
+                hasAlpha: this.hydGlobalState.contextAttributes.alpha !== false,
+                colorBits: this.hydGlobalState.contextAttributes.alpha === false
+                    ? [8, 8, 8, 0]
+                    : [8, 8, 8, 8],
+                srgb: this.drawingBufferFormat === WebGL2RenderingContext.SRGB8_ALPHA8,
+                isDefault: true,
+                attachment: null,
+            };
+        }
+        const attachmentPoint = read
+            ? framebuffer.readBuffer
+            : framebuffer.drawBuffers.find((value) =>
+                value >= WebGL2RenderingContext.COLOR_ATTACHMENT0 &&
+                value <= WebGL2RenderingContext.COLOR_ATTACHMENT15);
+        if (attachmentPoint === undefined || attachmentPoint === WebGL2RenderingContext.NONE) return null;
+        const attachment = framebuffer.attachments.get(attachmentPoint);
+        if (!attachment) return null;
+        return {
+            texture: attachment.attachment.texture,
+            view: attachment.view,
+            depthSlice: attachment.depthSlice,
+            format: attachment.format,
+            width: attachment.width,
+            height: attachment.height,
+            sampleCount: attachment.sampleCount,
+            hasAlpha: attachment.colorBits[3] > 0,
+            colorBits: attachment.colorBits,
+            srgb: attachment.format.endsWith("-srgb"),
+            isDefault: false,
+            attachment,
+        };
+    }
+
+    private colorBlitScalar(format: GPUTextureFormat): "f32" | "i32" | "u32" {
+        if (format.endsWith("sint")) return "i32";
+        if (format.endsWith("uint")) return "u32";
+        return "f32";
+    }
+
+    private colorBlitFormatClass(surface: ReturnType<HydWebGLStatic["framebufferColorSurface"]>): string {
+        return `${this.colorBlitScalar(surface.format)}:${surface.srgb ? "srgb" : "linear"}:` +
+            surface.colorBits.join(",");
+    }
+
+    private getColorBlitPipeline(
+        sourceFormat: GPUTextureFormat,
+        destinationFormat: GPUTextureFormat,
+        sampleCount: number,
+        linear: boolean,
+        sourceFlipped: boolean,
+        conversion: "identity" | "rgb" | "alpha" | "luminance" | "luminance-alpha" = "identity",
+    ): GPURenderPipeline | null {
+        const sourceScalar = this.colorBlitScalar(sourceFormat);
+        const destinationScalar = this.colorBlitScalar(destinationFormat);
+        if (sourceScalar !== destinationScalar || (linear && sourceScalar !== "f32") ||
+            (conversion !== "identity" && conversion !== "rgb" && sourceScalar !== "f32")) {
+            return null;
+        }
+        const key = `${sourceScalar}:${destinationFormat}:samples=${sampleCount}:` +
+            `${linear ? "linear" : "nearest"}:${sourceFlipped ? "flipped" : "uploaded"}:${conversion}`;
+        const cached = this.colorBlitPipelines.get(key);
+        if (cached) return cached;
+
+        const vectorType = `vec4<${sourceScalar}>`;
+        const sourceDeclaration = sampleCount > 1
+            ? `@group(0) @binding(0) var source : texture_multisampled_2d<${sourceScalar}>;\n` +
+                `@group(0) @binding(1) var<uniform> params : BlitParams;`
+            : linear
+                ? `@group(0) @binding(0) var source : texture_2d<${sourceScalar}>;\n` +
+                    `@group(0) @binding(1) var sourceSampler : sampler;\n` +
+                    `@group(0) @binding(2) var<uniform> params : BlitParams;`
+                : `@group(0) @binding(0) var source : texture_2d<${sourceScalar}>;\n` +
+                    `@group(0) @binding(1) var<uniform> params : BlitParams;`;
+        let sampleExpression: string;
+        if (sampleCount > 1 && sourceScalar === "f32") {
+            sampleExpression = `
+  var sampled = vec4f(0.0);
+  for (var sampleIndex = 0; sampleIndex < ${sampleCount}; sampleIndex++) {
+    sampled += textureLoad(source, sourceTexel, sampleIndex);
+  }
+  sampled /= ${sampleCount}.0;`;
+        } else if (sampleCount > 1) {
+            sampleExpression = `let sampled = textureLoad(source, sourceTexel, 0);`;
+        } else if (linear) {
+            sampleExpression = `let sampled = textureSample(source, sourceSampler, sourceGpu / params.sizes.xy);`;
+        } else {
+            sampleExpression = `let sampled = textureLoad(source, sourceTexel, 0);`;
+        }
+        const scalarOne = sourceScalar === "f32" ? "1.0" : sourceScalar === "i32" ? "1i" : "1u";
+        const convertedSample = conversion === "rgb"
+            ? `${vectorType}(sampled.rgb, ${scalarOne})`
+            : conversion === "alpha"
+            ? "vec4f(0.0, 0.0, 0.0, sampled.a)"
+            : conversion === "luminance"
+                ? "vec4f(sampled.r, sampled.r, sampled.r, 1.0)"
+                : conversion === "luminance-alpha"
+                    ? "vec4f(sampled.r, sampled.r, sampled.r, sampled.a)"
+                    : "sampled";
+        const module = this.hydDevice.createShaderModule({
+            label: `blitFramebuffer shader ${key}`,
+            code: `
+struct BlitParams {
+  sizes : vec4f,
+  sourceRect : vec4f,
+  destinationRect : vec4f,
+};
+${sourceDeclaration}
+
+@vertex
+fn vertexMain(@builtin(vertex_index) index : u32) -> @builtin(position) vec4f {
+  let positions = array<vec2f, 3>(
+    vec2f(-1.0, -1.0),
+    vec2f(3.0, -1.0),
+    vec2f(-1.0, 3.0)
+  );
+  return vec4f(positions[index], 0.0, 1.0);
+}
+
+@fragment
+fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) ${vectorType} {
+  let destinationGl = vec2f(position.x, params.sizes.w - position.y);
+  let interpolation = (destinationGl - params.destinationRect.xy) /
+      (params.destinationRect.zw - params.destinationRect.xy);
+  let sourceGl = params.sourceRect.xy + interpolation *
+      (params.sourceRect.zw - params.sourceRect.xy);
+  if (sourceGl.x < 0.0 || sourceGl.y < 0.0 ||
+      sourceGl.x >= params.sizes.x || sourceGl.y >= params.sizes.y) {
+    discard;
+  }
+  let sourceGpu = vec2f(sourceGl.x, ${sourceFlipped ? "params.sizes.y - sourceGl.y" : "sourceGl.y"});
+  let sourceTexel = clamp(vec2i(floor(sourceGpu)), vec2i(0), vec2i(params.sizes.xy) - vec2i(1));
+  ${sampleExpression}
+  return ${convertedSample};
+}
+`,
+        });
+        const pipeline = this.hydDevice.createRenderPipeline({
+            label: `blitFramebuffer pipeline ${key}`,
+            layout: "auto",
+            vertex: { module, entryPoint: "vertexMain" },
+            fragment: { module, entryPoint: "fragmentMain", targets: [{ format: destinationFormat }] },
+            primitive: { topology: "triangle-list" },
+        });
+        this.colorBlitPipelines.set(key, pipeline);
+        return pipeline;
+    }
+
+    private shaderBlitColor(
+        source: ReturnType<HydWebGLStatic["framebufferColorSurface"]>,
+        destination: ReturnType<HydWebGLStatic["framebufferColorSurface"]>,
+        sourceRect: [number, number, number, number],
+        destinationRect: [number, number, number, number],
+        linear: boolean,
+        conversion: "identity" | "rgb" | "alpha" | "luminance" | "luminance-alpha" = "identity",
+    ): boolean {
+        const sourceFlipped = source.isDefault ||
+            Boolean(source.attachment && this.samplerNeedsOriginFlip(source.attachment.attachment));
+        const sampledLinear = linear && source.sampleCount === 1;
+        const pipeline = this.getColorBlitPipeline(
+            source.format, destination.format, source.sampleCount, sampledLinear, sourceFlipped, conversion);
+        if (!pipeline) return false;
+        const minX = Math.max(0, Math.min(destinationRect[0], destinationRect[2]));
+        const maxX = Math.min(destination.width, Math.max(destinationRect[0], destinationRect[2]));
+        const minY = Math.max(0, Math.min(destinationRect[1], destinationRect[3]));
+        const maxY = Math.min(destination.height, Math.max(destinationRect[1], destinationRect[3]));
+        if (minX >= maxX || minY >= maxY) return true;
+        if (!this.colorBlitUniformBuffer) {
+            this.colorBlitUniformBuffer = this.hydDevice.createBuffer({
+                label: "blitFramebuffer uniforms",
+                size: 48,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.UNIFORM,
+            });
+        }
+        this.hydDevice.queue.writeBuffer(this.colorBlitUniformBuffer, 0, new Float32Array([
+            source.width, source.height, destination.width, destination.height,
+            ...sourceRect,
+            ...destinationRect,
+        ]));
+        const entries: GPUBindGroupEntry[] = [{ binding: 0, resource: source.view }];
+        if (sampledLinear) {
+            if (!this.colorBlitLinearSampler) {
+                this.colorBlitLinearSampler = this.hydDevice.createSampler({
+                    minFilter: "linear",
+                    magFilter: "linear",
+                    addressModeU: "clamp-to-edge",
+                    addressModeV: "clamp-to-edge",
+                });
+            }
+            entries.push({ binding: 1, resource: this.colorBlitLinearSampler });
+            entries.push({ binding: 2, resource: { buffer: this.colorBlitUniformBuffer } });
+        } else {
+            entries.push({ binding: 1, resource: { buffer: this.colorBlitUniformBuffer } });
+        }
+        const bindGroup = this.hydDevice.createBindGroup({
+            label: "blitFramebuffer bind group",
+            layout: pipeline.getBindGroupLayout(0),
+            entries,
+        });
+        const encoder = this.hydDevice.createCommandEncoder({ label: "blitFramebuffer-shader" });
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [{
+                view: destination.view,
+                depthSlice: destination.depthSlice,
+                loadOp: "load",
+                storeOp: "store",
+            }],
+        });
+        pass.setScissorRect(minX, destination.height - maxY, maxX - minX, maxY - minY);
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.draw(3);
+        pass.end();
+        this.hydDevice.queue.submit([encoder.finish()]);
+        return true;
+    }
+
+    private blitColorAttachments(
+        srcX0: GLint,
+        srcY0: GLint,
+        srcX1: GLint,
+        srcY1: GLint,
+        dstX0: GLint,
+        dstY0: GLint,
+        dstX1: GLint,
+        dstY1: GLint,
+        filter: GLenum,
+    ): boolean {
+        const source = this.framebufferColorSurface(
+            this.hydGlobalState.commonState.readFramebufferBinding, true);
+        const destination = this.framebufferColorSurface(
+            this.hydGlobalState.commonState.drawFramebufferBinding, false);
+        // Missing draw images discard the blit. A missing read image is only an
+        // error when at least one selected draw image would consume it.
+        if (!destination) return true;
+        if (!source) return false;
+        const sameImage = (source.isDefault && destination.isDefault) ||
+            Boolean(source.attachment && destination.attachment &&
+                this.sameFramebufferImage(source.attachment, destination.attachment));
+        if (sameImage) return false;
+        const sourceWidth = Math.abs(srcX1 - srcX0);
+        const sourceHeight = Math.abs(srcY1 - srcY0);
+        const destinationWidth = Math.abs(dstX1 - dstX0);
+        const destinationHeight = Math.abs(dstY1 - dstY0);
+        if (source.sampleCount > 1 &&
+            (destination.sampleCount !== 1 || sourceWidth !== destinationWidth || sourceHeight !== destinationHeight ||
+                srcX0 !== dstX0 || srcY0 !== dstY0 || srcX1 !== dstX1 || srcY1 !== dstY1)) {
+            return false;
+        }
+        if (destination.sampleCount > 1 || (destination.isDefault && this.hydGlobalState.contextAttributes.antialias === true)) {
+            return false;
+        }
+        if (source.sampleCount > 1 &&
+            this.colorBlitFormatClass(source) !== this.colorBlitFormatClass(destination)) return false;
+        if (source.sampleCount > 1 && source.hasAlpha !== destination.hasAlpha) return false;
+        if (filter === WebGL2RenderingContext.LINEAR && this.colorBlitScalar(source.format) !== "f32") return false;
+
+        const sameSize = sourceWidth === destinationWidth && sourceHeight === destinationHeight;
+        const forward = srcX1 >= srcX0 && srcY1 >= srcY0 && dstX1 >= dstX0 && dstY1 >= dstY0;
+        const inBounds = srcX0 >= 0 && srcY0 >= 0 && srcX1 <= source.width && srcY1 <= source.height &&
+            dstX0 >= 0 && dstY0 >= 0 && dstX1 <= destination.width && dstY1 <= destination.height;
+        const encoder = this.hydDevice.createCommandEncoder({ label: "blitFramebuffer-color" });
+        const sourceFlipped = source.isDefault ||
+            Boolean(source.attachment && this.samplerNeedsOriginFlip(source.attachment.attachment));
+        const alphaConversion = source.hasAlpha && destination.hasAlpha ? "identity" : "rgb";
+        if (source.sampleCount > 1 && source.format === destination.format) {
+            const fullSource = srcX0 === 0 && srcY0 === 0 && srcX1 === source.width && srcY1 === source.height;
+            const fullDestination = dstX0 === 0 && dstY0 === 0 && dstX1 === destination.width && dstY1 === destination.height;
+            if (fullSource && fullDestination && alphaConversion === "identity") {
+                const pass = encoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: source.view,
+                        depthSlice: source.depthSlice,
+                        resolveTarget: destination.view,
+                        loadOp: "load",
+                        storeOp: "store",
+                    }],
+                });
+                pass.end();
+            } else if (!this.shaderBlitColor(
+                source,
+                destination,
+                [srcX0, srcY0, srcX1, srcY1],
+                [dstX0, dstY0, dstX1, dstY1],
+                false,
+                alphaConversion,
+            )) {
+                return false;
+            }
+        } else if (source.sampleCount === 1 && source.format === destination.format &&
+            source.texture !== destination.texture && sourceFlipped &&
+            sameSize && forward && inBounds && alphaConversion === "identity") {
+            encoder.copyTextureToTexture(
+                {
+                    texture: source.texture,
+                    origin: { x: srcX0, y: source.height - srcY1, z: 0 },
+                },
+                {
+                    texture: destination.texture,
+                    origin: { x: dstX0, y: destination.height - dstY1, z: 0 },
+                },
+                { width: sourceWidth, height: sourceHeight, depthOrArrayLayers: 1 },
+            );
+        } else {
+            if (!this.shaderBlitColor(
+                source,
+                destination,
+                [srcX0, srcY0, srcX1, srcY1],
+                [dstX0, dstY0, dstX1, dstY1],
+                filter === WebGL2RenderingContext.LINEAR,
+                alphaConversion,
+            )) return false;
+        }
+        this.hydDevice.queue.submit([encoder.finish()]);
+        if (destination.attachment) {
+            destination.attachment.attachment.markFramebufferRenderTarget();
+        } else if (this.hydGlobalState.__canvasTexture === this.defaultFramebufferBackingTexture) {
+            this.defaultFramebufferBackingNeedsPresentation = true;
+        }
+        return true;
+    }
+
+    private depthStencilPassAttachment(
+        attachment: FramebufferAttributes,
+    ): GPURenderPassDepthStencilAttachment {
+        const descriptor: GPURenderPassDepthStencilAttachment = { view: attachment.view };
+        if (attachment.format.includes("depth")) {
+            descriptor.depthLoadOp = "load";
+            descriptor.depthStoreOp = "store";
+        }
+        if (attachment.format.includes("stencil")) {
+            descriptor.stencilLoadOp = "load";
+            descriptor.stencilStoreOp = "store";
+        }
+        return descriptor;
+    }
+
+    private getDepthBlitPipeline(
+        sourceSamples: number,
+        destinationFormat: GPUTextureFormat,
+        destinationSamples: number,
+    ): GPURenderPipeline {
+        const key = `${sourceSamples}:${destinationFormat}:${destinationSamples}`;
+        const cached = this.depthBlitPipelines.get(key);
+        if (cached) return cached;
+        const sourceDeclaration = sourceSamples > 1
+            ? "@group(0) @binding(0) var source : texture_depth_multisampled_2d;"
+            : "@group(0) @binding(0) var source : texture_depth_2d;";
+        const sampleParameter = destinationSamples > 1
+            ? ", @builtin(sample_index) sampleIndex : u32"
+            : "";
+        const sampleIndex = sourceSamples > 1 && destinationSamples > 1
+            ? "i32(sampleIndex)"
+            : "0";
+        const sampleExpression = sourceSamples > 1
+            ? `textureLoad(source, sourceTexel, ${sampleIndex})`
+            : "textureLoad(source, sourceTexel, 0)";
+        const module = this.hydDevice.createShaderModule({
+            label: `depth blit shader ${key}`,
+            code: `
+struct BlitParams {
+  sizes : vec4f,
+  sourceRect : vec4f,
+  destinationRect : vec4f,
+};
+${sourceDeclaration}
+@group(0) @binding(1) var<uniform> params : BlitParams;
+
+@vertex
+fn vertexMain(@builtin(vertex_index) index : u32) -> @builtin(position) vec4f {
+  let positions = array<vec2f, 3>(
+    vec2f(-1.0, -1.0),
+    vec2f(3.0, -1.0),
+    vec2f(-1.0, 3.0)
+  );
+  return vec4f(positions[index], 0.0, 1.0);
+}
+
+@fragment
+fn fragmentMain(@builtin(position) position : vec4f${sampleParameter}) -> @builtin(frag_depth) f32 {
+  let destinationGl = vec2f(position.x, params.sizes.w - position.y);
+  let interpolation = (destinationGl - params.destinationRect.xy) /
+      (params.destinationRect.zw - params.destinationRect.xy);
+  let sourceGl = params.sourceRect.xy + interpolation *
+      (params.sourceRect.zw - params.sourceRect.xy);
+  if (sourceGl.x < 0.0 || sourceGl.y < 0.0 ||
+      sourceGl.x >= params.sizes.x || sourceGl.y >= params.sizes.y) {
+    discard;
+  }
+  let sourceGpu = vec2f(sourceGl.x, params.sizes.y - sourceGl.y);
+  let sourceTexel = clamp(vec2i(floor(sourceGpu)), vec2i(0), vec2i(params.sizes.xy) - vec2i(1));
+  return ${sampleExpression};
+}
+`,
+        });
+        const depthStencil: GPUDepthStencilState = {
+            format: destinationFormat,
+            depthWriteEnabled: true,
+            depthCompare: "always",
+        };
+        if (destinationFormat.includes("stencil")) {
+            const neutralStencil: GPUStencilFaceState = {
+                compare: "always",
+                failOp: "keep",
+                depthFailOp: "keep",
+                passOp: "keep",
+            };
+            depthStencil.stencilFront = neutralStencil;
+            depthStencil.stencilBack = neutralStencil;
+            depthStencil.stencilWriteMask = 0;
+        }
+        const pipeline = this.hydDevice.createRenderPipeline({
+            label: `depth blit pipeline ${key}`,
+            layout: "auto",
+            vertex: { module, entryPoint: "vertexMain" },
+            fragment: { module, entryPoint: "fragmentMain", targets: [] },
+            primitive: { topology: "triangle-list" },
+            depthStencil,
+            multisample: { count: destinationSamples },
+        });
+        this.depthBlitPipelines.set(key, pipeline);
+        return pipeline;
+    }
+
+    private getStencilCapturePipeline(
+        sourceFormat: GPUTextureFormat,
+        sourceSamples: number,
+        bit: number,
+    ): GPURenderPipeline {
+        const key = `${sourceFormat}:${sourceSamples}:${bit}`;
+        const cached = this.stencilCapturePipelines.get(key);
+        if (cached) return cached;
+        const module = this.hydDevice.createShaderModule({
+            label: `stencil capture shader ${key}`,
+            code: `
+@vertex
+fn vertexMain(@builtin(vertex_index) index : u32) -> @builtin(position) vec4f {
+  let positions = array<vec2f, 3>(
+    vec2f(-1.0, -1.0),
+    vec2f(3.0, -1.0),
+    vec2f(-1.0, 3.0)
+  );
+  return vec4f(positions[index], 0.0, 1.0);
+}
+
+@fragment
+fn fragmentMain() -> @location(0) vec4f {
+  return vec4f(${bit}.0 / 255.0, 0.0, 0.0, 0.0);
+}
+`,
+        });
+        const testBit: GPUStencilFaceState = {
+            compare: "equal",
+            failOp: "keep",
+            depthFailOp: "keep",
+            passOp: "keep",
+        };
+        const depthStencil: GPUDepthStencilState = {
+            format: sourceFormat,
+            stencilFront: testBit,
+            stencilBack: testBit,
+            stencilReadMask: bit,
+            stencilWriteMask: 0,
+        };
+        if (sourceFormat.includes("depth")) {
+            depthStencil.depthWriteEnabled = false;
+            depthStencil.depthCompare = "always";
+        }
+        const additive: GPUBlendState = {
+            color: { srcFactor: "one", dstFactor: "one", operation: "add" },
+            alpha: { srcFactor: "one", dstFactor: "one", operation: "add" },
+        };
+        const pipeline = this.hydDevice.createRenderPipeline({
+            label: `stencil capture pipeline ${key}`,
+            layout: "auto",
+            vertex: { module, entryPoint: "vertexMain" },
+            fragment: {
+                module,
+                entryPoint: "fragmentMain",
+                targets: [{ format: "rgba8unorm", blend: additive, writeMask: GPUColorWrite.RED }],
+            },
+            primitive: { topology: "triangle-list" },
+            depthStencil,
+            multisample: { count: sourceSamples },
+        });
+        this.stencilCapturePipelines.set(key, pipeline);
+        return pipeline;
+    }
+
+    private getStencilZeroPipeline(
+        destinationFormat: GPUTextureFormat,
+        destinationSamples: number,
+    ): GPURenderPipeline {
+        const key = `${destinationFormat}:${destinationSamples}`;
+        const cached = this.stencilZeroPipelines.get(key);
+        if (cached) return cached;
+        const module = this.hydDevice.createShaderModule({
+            label: `stencil zero shader ${key}`,
+            code: `
+@vertex
+fn vertexMain(@builtin(vertex_index) index : u32) -> @builtin(position) vec4f {
+  let positions = array<vec2f, 3>(
+    vec2f(-1.0, -1.0),
+    vec2f(3.0, -1.0),
+    vec2f(-1.0, 3.0)
+  );
+  return vec4f(positions[index], 0.0, 1.0);
+}
+@fragment fn fragmentMain() {}
+`,
+        });
+        const replace: GPUStencilFaceState = {
+            compare: "always",
+            failOp: "keep",
+            depthFailOp: "keep",
+            passOp: "replace",
+        };
+        const depthStencil: GPUDepthStencilState = {
+            format: destinationFormat,
+            stencilFront: replace,
+            stencilBack: replace,
+            stencilReadMask: 0xffffffff,
+            stencilWriteMask: 0xff,
+        };
+        if (destinationFormat.includes("depth")) {
+            depthStencil.depthWriteEnabled = false;
+            depthStencil.depthCompare = "always";
+        }
+        const pipeline = this.hydDevice.createRenderPipeline({
+            label: `stencil zero pipeline ${key}`,
+            layout: "auto",
+            vertex: { module, entryPoint: "vertexMain" },
+            fragment: { module, entryPoint: "fragmentMain", targets: [] },
+            primitive: { topology: "triangle-list" },
+            depthStencil,
+            multisample: { count: destinationSamples },
+        });
+        this.stencilZeroPipelines.set(key, pipeline);
+        return pipeline;
+    }
+
+    private getStencilWritePipeline(
+        sourceSamples: number,
+        destinationFormat: GPUTextureFormat,
+        destinationSamples: number,
+        bit: number,
+    ): GPURenderPipeline {
+        const key = `${sourceSamples}:${destinationFormat}:${destinationSamples}:${bit}`;
+        const cached = this.stencilWritePipelines.get(key);
+        if (cached) return cached;
+        const sourceDeclaration = sourceSamples > 1
+            ? "@group(0) @binding(0) var source : texture_multisampled_2d<f32>;"
+            : "@group(0) @binding(0) var source : texture_2d<f32>;";
+        const sampleParameter = destinationSamples > 1
+            ? ", @builtin(sample_index) sampleIndex : u32"
+            : "";
+        const sampleIndex = sourceSamples > 1 && destinationSamples > 1
+            ? "i32(sampleIndex)"
+            : "0";
+        const sampleExpression = sourceSamples > 1
+            ? `textureLoad(source, sourceTexel, ${sampleIndex})`
+            : "textureLoad(source, sourceTexel, 0)";
+        const module = this.hydDevice.createShaderModule({
+            label: `stencil write shader ${key}`,
+            code: `
+struct BlitParams {
+  sizes : vec4f,
+  sourceRect : vec4f,
+  destinationRect : vec4f,
+};
+${sourceDeclaration}
+@group(0) @binding(1) var<uniform> params : BlitParams;
+
+@vertex
+fn vertexMain(@builtin(vertex_index) index : u32) -> @builtin(position) vec4f {
+  let positions = array<vec2f, 3>(
+    vec2f(-1.0, -1.0),
+    vec2f(3.0, -1.0),
+    vec2f(-1.0, 3.0)
+  );
+  return vec4f(positions[index], 0.0, 1.0);
+}
+
+@fragment
+fn fragmentMain(@builtin(position) position : vec4f${sampleParameter}) {
+  let destinationGl = vec2f(position.x, params.sizes.w - position.y);
+  let interpolation = (destinationGl - params.destinationRect.xy) /
+      (params.destinationRect.zw - params.destinationRect.xy);
+  let sourceGl = params.sourceRect.xy + interpolation *
+      (params.sourceRect.zw - params.sourceRect.xy);
+  if (sourceGl.x < 0.0 || sourceGl.y < 0.0 ||
+      sourceGl.x >= params.sizes.x || sourceGl.y >= params.sizes.y) {
+    discard;
+  }
+  let sourceGpu = vec2f(sourceGl.x, params.sizes.y - sourceGl.y);
+  let sourceTexel = clamp(vec2i(floor(sourceGpu)), vec2i(0), vec2i(params.sizes.xy) - vec2i(1));
+  let encoded = ${sampleExpression};
+  let stencil = u32(round(encoded.r * 255.0));
+  if ((stencil & ${bit}u) == 0u) {
+    discard;
+  }
+}
+`,
+        });
+        const replace: GPUStencilFaceState = {
+            compare: "always",
+            failOp: "keep",
+            depthFailOp: "keep",
+            passOp: "replace",
+        };
+        const depthStencil: GPUDepthStencilState = {
+            format: destinationFormat,
+            stencilFront: replace,
+            stencilBack: replace,
+            stencilReadMask: 0xffffffff,
+            stencilWriteMask: bit,
+        };
+        if (destinationFormat.includes("depth")) {
+            depthStencil.depthWriteEnabled = false;
+            depthStencil.depthCompare = "always";
+        }
+        const pipeline = this.hydDevice.createRenderPipeline({
+            label: `stencil write pipeline ${key}`,
+            layout: "auto",
+            vertex: { module, entryPoint: "vertexMain" },
+            fragment: { module, entryPoint: "fragmentMain", targets: [] },
+            primitive: { topology: "triangle-list" },
+            depthStencil,
+            multisample: { count: destinationSamples },
+        });
+        this.stencilWritePipelines.set(key, pipeline);
+        return pipeline;
+    }
+
+    private encodeDepthBlit(
+        encoder: GPUCommandEncoder,
+        source: FramebufferAttributes,
+        destination: FramebufferAttributes,
+        destinationScissor: [number, number, number, number],
+    ) {
+        const pipeline = this.getDepthBlitPipeline(
+            source.sampleCount,
+            destination.format,
+            destination.sampleCount,
+        );
+        const sourceView = source.attachment.getDepthSampleView(source.face, source.level || 0, source.layer);
+        const bindGroup = this.hydDevice.createBindGroup({
+            label: "depth blit bind group",
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: sourceView },
+                { binding: 1, resource: { buffer: this.depthStencilBlitUniformBuffer } },
+            ],
+        });
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [],
+            depthStencilAttachment: this.depthStencilPassAttachment(destination),
+        });
+        pass.setScissorRect(...destinationScissor);
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.draw(3);
+        pass.end();
+    }
+
+    private encodeStencilBlit(
+        encoder: GPUCommandEncoder,
+        source: FramebufferAttributes,
+        destination: FramebufferAttributes,
+        destinationScissor: [number, number, number, number],
+    ): GPUTexture {
+        const intermediate = this.hydDevice.createTexture({
+            label: "stencil blit bit planes",
+            size: { width: source.width, height: source.height, depthOrArrayLayers: 1 },
+            format: "rgba8unorm",
+            sampleCount: source.sampleCount,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        });
+        const intermediateView = intermediate.createView({ label: "stencil blit bit planes view" });
+        const capturePass = encoder.beginRenderPass({
+            colorAttachments: [{
+                view: intermediateView,
+                loadOp: "clear",
+                storeOp: "store",
+                clearValue: { r: 0, g: 0, b: 0, a: 0 },
+            }],
+            depthStencilAttachment: this.depthStencilPassAttachment(source),
+        });
+        for (let shift = 0; shift < 8; shift++) {
+            const bit = 1 << shift;
+            capturePass.setPipeline(this.getStencilCapturePipeline(source.format, source.sampleCount, bit));
+            capturePass.setStencilReference(bit);
+            capturePass.draw(3);
+        }
+        capturePass.end();
+
+        const writePass = encoder.beginRenderPass({
+            colorAttachments: [],
+            depthStencilAttachment: this.depthStencilPassAttachment(destination),
+        });
+        writePass.setScissorRect(...destinationScissor);
+        writePass.setPipeline(this.getStencilZeroPipeline(destination.format, destination.sampleCount));
+        writePass.setStencilReference(0);
+        writePass.draw(3);
+        for (let shift = 0; shift < 8; shift++) {
+            const bit = 1 << shift;
+            const pipeline = this.getStencilWritePipeline(
+                source.sampleCount,
+                destination.format,
+                destination.sampleCount,
+                bit,
+            );
+            const bindGroup = this.hydDevice.createBindGroup({
+                label: `stencil blit bind group bit ${bit}`,
+                layout: pipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: intermediateView },
+                    { binding: 1, resource: { buffer: this.depthStencilBlitUniformBuffer } },
+                ],
+            });
+            writePass.setPipeline(pipeline);
+            writePass.setBindGroup(0, bindGroup);
+            writePass.setStencilReference(bit);
+            writePass.draw(3);
+        }
+        writePass.end();
+        return intermediate;
+    }
+
+    private blitUniformDepthStencil(
+        mask: GLbitfield,
+        srcX0: GLint,
+        srcY0: GLint,
+        srcX1: GLint,
+        srcY1: GLint,
+        dstX0: GLint,
+        dstY0: GLint,
+        dstX1: GLint,
+        dstY1: GLint,
+    ): boolean {
+        const readFramebuffer = this.hydGlobalState.commonState.readFramebufferBinding;
+        const drawFramebuffer = this.hydGlobalState.commonState.drawFramebufferBinding;
+        const sourceDepth = this.framebufferAttachment(readFramebuffer, WebGL2RenderingContext.DEPTH_ATTACHMENT);
+        const sourceStencil = this.framebufferAttachment(readFramebuffer, WebGL2RenderingContext.STENCIL_ATTACHMENT);
+        const destinationDepth = this.framebufferAttachment(drawFramebuffer, WebGL2RenderingContext.DEPTH_ATTACHMENT);
+        const destinationStencil = this.framebufferAttachment(drawFramebuffer, WebGL2RenderingContext.STENCIL_ATTACHMENT);
+        let activeMask = mask;
+        if (!destinationDepth) activeMask &= ~WebGL2RenderingContext.DEPTH_BUFFER_BIT;
+        else if ((activeMask & WebGL2RenderingContext.DEPTH_BUFFER_BIT) && !sourceDepth) return false;
+        if (!destinationStencil) activeMask &= ~WebGL2RenderingContext.STENCIL_BUFFER_BIT;
+        else if ((activeMask & WebGL2RenderingContext.STENCIL_BUFFER_BIT) && !sourceStencil) return false;
+        const copyDepth = Boolean(activeMask & WebGL2RenderingContext.DEPTH_BUFFER_BIT);
+        const copyStencil = Boolean(activeMask & WebGL2RenderingContext.STENCIL_BUFFER_BIT);
+        if (!copyDepth && !copyStencil) return true;
+        if ((copyDepth && this.sameFramebufferImage(sourceDepth, destinationDepth)) ||
+            (copyStencil && this.sameFramebufferImage(sourceStencil, destinationStencil))) {
+            return false;
+        }
+
+        const source = copyDepth ? sourceDepth : sourceStencil;
+        const destination = copyDepth ? destinationDepth : destinationStencil;
+        const sameExtent = Math.abs(srcX1 - srcX0) === Math.abs(dstX1 - dstX0) &&
+            Math.abs(srcY1 - srcY0) === Math.abs(dstY1 - dstY0);
+        if (!source || !destination || (source.sampleCount > 1 && !sameExtent)) return false;
+        if (copyDepth && sourceDepth.internalFormat !== destinationDepth.internalFormat) return false;
+        if (copyStencil && sourceStencil.internalFormat !== destinationStencil.internalFormat) return false;
+
+        const destinationMinX = Math.max(0, Math.min(dstX0, dstX1));
+        const destinationMaxX = Math.min(destination.width, Math.max(dstX0, dstX1));
+        const destinationMinY = Math.max(0, Math.min(dstY0, dstY1));
+        const destinationMaxY = Math.min(destination.height, Math.max(dstY0, dstY1));
+        if (destinationMinX >= destinationMaxX || destinationMinY >= destinationMaxY) return true;
+        const destinationScissor: [number, number, number, number] = [
+            destinationMinX,
+            destination.height - destinationMaxY,
+            destinationMaxX - destinationMinX,
+            destinationMaxY - destinationMinY,
+        ];
+        const fullSource = srcX0 === 0 && srcY0 === 0 &&
+            srcX1 === source.width && srcY1 === source.height;
+        const fullDestination = dstX0 === 0 && dstY0 === 0 &&
+            dstX1 === destination.width && dstY1 === destination.height;
+
+        if (copyDepth && copyStencil && fullSource && fullDestination &&
+            this.sameFramebufferImage(sourceDepth, sourceStencil) &&
+            this.sameFramebufferImage(destinationDepth, destinationStencil) &&
+            sourceDepth.format === destinationDepth.format &&
+            sourceDepth.sampleCount === 1 && destinationDepth.sampleCount === 1) {
+            const sourceLayer = sourceDepth.layer ??
+                (sourceDepth.isCubeFace
+                    ? sourceDepth.face - WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X
+                    : 0);
+            const destinationLayer = destinationDepth.layer ??
+                (destinationDepth.isCubeFace
+                    ? destinationDepth.face - WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X
+                    : 0);
+            const encoder = this.hydDevice.createCommandEncoder({ label: "blitFramebuffer-depth-stencil-full" });
+            encoder.copyTextureToTexture(
+                {
+                    texture: sourceDepth.attachment.texture,
+                    mipLevel: sourceDepth.level || 0,
+                    origin: { x: 0, y: 0, z: sourceLayer },
+                    aspect: "all",
+                },
+                {
+                    texture: destinationDepth.attachment.texture,
+                    mipLevel: destinationDepth.level || 0,
+                    origin: { x: 0, y: 0, z: destinationLayer },
+                    aspect: "all",
+                },
+                { width: sourceDepth.width, height: sourceDepth.height, depthOrArrayLayers: 1 },
+            );
+            this.hydDevice.queue.submit([encoder.finish()]);
+            destinationDepth.attachment.uniformDepthValue = sourceDepth.attachment.uniformDepthValue;
+            destinationStencil.attachment.uniformStencilValue = sourceStencil.attachment.uniformStencilValue;
+            destinationDepth.attachment.markFramebufferRenderTarget();
+            return true;
+        }
+
+        const uniformDepth = !copyDepth || sourceDepth.attachment.uniformDepthValue !== null;
+        const uniformStencil = !copyStencil || sourceStencil.attachment.uniformStencilValue !== null;
+        const combinedDestination = !copyDepth || !copyStencil ||
+            this.sameFramebufferImage(destinationDepth, destinationStencil);
+        if (fullDestination && uniformDepth && uniformStencil && combinedDestination) {
+            const target = copyDepth ? destinationDepth : destinationStencil;
+            const descriptor = this.depthStencilPassAttachment(target);
+            if (copyDepth) {
+                descriptor.depthLoadOp = "clear";
+                descriptor.depthClearValue = sourceDepth.attachment.uniformDepthValue;
+            }
+            if (copyStencil) {
+                descriptor.stencilLoadOp = "clear";
+                descriptor.stencilClearValue = sourceStencil.attachment.uniformStencilValue;
+            }
+            const encoder = this.hydDevice.createCommandEncoder({ label: "blitFramebuffer-depth-stencil-uniform" });
+            encoder.beginRenderPass({ colorAttachments: [], depthStencilAttachment: descriptor }).end();
+            this.hydDevice.queue.submit([encoder.finish()]);
+        } else {
+            if (!this.depthStencilBlitUniformBuffer) {
+                this.depthStencilBlitUniformBuffer = this.hydDevice.createBuffer({
+                    label: "depth/stencil blit uniforms",
+                    size: 48,
+                    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.UNIFORM,
+                });
+            }
+            this.hydDevice.queue.writeBuffer(this.depthStencilBlitUniformBuffer, 0, new Float32Array([
+                source.width, source.height, destination.width, destination.height,
+                srcX0, srcY0, srcX1, srcY1,
+                dstX0, dstY0, dstX1, dstY1,
+            ]));
+            const encoder = this.hydDevice.createCommandEncoder({ label: "blitFramebuffer-depth-stencil-shader" });
+            const temporaryTextures: GPUTexture[] = [];
+            if (copyDepth) {
+                this.encodeDepthBlit(encoder, sourceDepth, destinationDepth, destinationScissor);
+            }
+            if (copyStencil) {
+                temporaryTextures.push(this.encodeStencilBlit(
+                    encoder,
+                    sourceStencil,
+                    destinationStencil,
+                    destinationScissor,
+                ));
+            }
+            this.hydDevice.queue.submit([encoder.finish()]);
+            if (temporaryTextures.length > 0) {
+                this.hydDevice.queue.onSubmittedWorkDone().then(() => {
+                    for (const texture of temporaryTextures) texture.destroy();
+                });
+            }
+        }
+
+        if (copyDepth) {
+            destinationDepth.attachment.uniformDepthValue = fullDestination
+                ? sourceDepth.attachment.uniformDepthValue
+                : null;
+            destinationDepth.attachment.markFramebufferRenderTarget();
+        }
+        if (copyStencil) {
+            destinationStencil.attachment.uniformStencilValue = fullDestination
+                ? sourceStencil.attachment.uniformStencilValue
+                : null;
+            destinationStencil.attachment.markFramebufferRenderTarget();
+        }
+        return true;
     }
 
     blitFramebuffer(
@@ -4942,6 +9787,65 @@ ${assignments}
         filter: GLenum,
     ) {
         this._der_flush();
+        const readFramebuffer = this.hydGlobalState.commonState.readFramebufferBinding;
+        const drawFramebuffer = this.hydGlobalState.commonState.drawFramebufferBinding;
+        if ((readFramebuffer === this.hydGlobalState.defaultFramebuffer ||
+            drawFramebuffer === this.hydGlobalState.defaultFramebuffer) &&
+            this.defaultFramebufferNeedsImplicitClear) {
+            if (this.canvasSizeDirty) this.updateCanvasSize();
+            this.activateDefaultFramebufferBacking(Boolean(this.hydGlobalState.__canvasTexture));
+            this.materializeImplicitDefaultFramebufferClear();
+            this._der_flush();
+        }
+        const validMask = WebGL2RenderingContext.COLOR_BUFFER_BIT |
+            WebGL2RenderingContext.DEPTH_BUFFER_BIT |
+            WebGL2RenderingContext.STENCIL_BUFFER_BIT;
+        if ((mask & ~validMask) !== 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const coordinates = [srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1];
+        if (coordinates.some((value) => !Number.isFinite(value) || !Number.isInteger(value)) ||
+            Math.abs(srcX1 - srcX0) > 0x7fffffff ||
+            Math.abs(srcY1 - srcY0) > 0x7fffffff ||
+            Math.abs(dstX1 - dstX0) > 0x7fffffff ||
+            Math.abs(dstY1 - dstY0) > 0x7fffffff) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (filter !== WebGL2RenderingContext.NEAREST && filter !== WebGL2RenderingContext.LINEAR) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if ((mask & (WebGL2RenderingContext.DEPTH_BUFFER_BIT | WebGL2RenderingContext.STENCIL_BUFFER_BIT)) &&
+            filter !== WebGL2RenderingContext.NEAREST) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (this.framebufferStatus(this.hydGlobalState.commonState.readFramebufferBinding) !== WebGL2RenderingContext.FRAMEBUFFER_COMPLETE ||
+            this.framebufferStatus(this.hydGlobalState.commonState.drawFramebufferBinding) !== WebGL2RenderingContext.FRAMEBUFFER_COMPLETE) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_FRAMEBUFFER_OPERATION);
+            return;
+        }
+        if ((mask & WebGL2RenderingContext.COLOR_BUFFER_BIT) &&
+            !this.blitColorAttachments(
+                srcX0, srcY0, srcX1, srcY1,
+                dstX0, dstY0, dstX1, dstY1,
+                filter,
+            )) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if ((mask & (WebGL2RenderingContext.DEPTH_BUFFER_BIT | WebGL2RenderingContext.STENCIL_BUFFER_BIT)) &&
+            !this.blitUniformDepthStencil(
+                mask,
+                srcX0, srcY0, srcX1, srcY1,
+                dstX0, dstY0, dstX1, dstY1,
+            )) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (mask !== 0) this.markFramebufferContentChanged();
         this.hydGlobalState.recordTransition("blitFramebuffer", srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
     }
 
@@ -4962,6 +9866,47 @@ ${assignments}
             ? target - WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X
             : 0;
         return sourceLayer === destinationLayer;
+    }
+
+    private copyTextureInternalFormatInfo(internalformat: GLenum): {
+        uploadFormat: { format: GLenum, type: GLenum },
+        scalar: "f32" | "i32" | "u32",
+        colorBits: [number, number, number, number],
+        srgb: boolean,
+        sized: boolean,
+    } | null {
+        const legacyFormats = new Set<GLenum>([
+            WebGL2RenderingContext.ALPHA,
+            WebGL2RenderingContext.LUMINANCE,
+            WebGL2RenderingContext.LUMINANCE_ALPHA,
+            WebGL2RenderingContext.RGB,
+            WebGL2RenderingContext.RGBA,
+        ]);
+        let uploadFormat: { format: GLenum, type: GLenum };
+        if (legacyFormats.has(internalformat)) {
+            uploadFormat = { format: internalformat, type: WebGL2RenderingContext.UNSIGNED_BYTE };
+        } else {
+            try {
+                uploadFormat = this.textureStorageUploadFormat(internalformat);
+            } catch (_) {
+                return null;
+            }
+        }
+        const integer = uploadFormat.format === WebGL2RenderingContext.RED_INTEGER ||
+            uploadFormat.format === WebGL2RenderingContext.RG_INTEGER ||
+            uploadFormat.format === WebGL2RenderingContext.RGB_INTEGER ||
+            uploadFormat.format === WebGL2RenderingContext.RGBA_INTEGER;
+        const signed = uploadFormat.type === WebGL2RenderingContext.BYTE ||
+            uploadFormat.type === WebGL2RenderingContext.SHORT ||
+            uploadFormat.type === WebGL2RenderingContext.INT;
+        return {
+            uploadFormat,
+            scalar: integer ? (signed ? "i32" : "u32") : "f32",
+            colorBits: webGlInternalFormatColorBits(internalformat),
+            srgb: internalformat === WebGL2RenderingContext.SRGB8 ||
+                internalformat === WebGL2RenderingContext.SRGB8_ALPHA8,
+            sized: !legacyFormats.has(internalformat),
+        };
     }
 
     copyTexImage2D(target: GLenum, level: GLint, internalformat: GLenum, x: GLint, y: GLint, width: GLsizei, height: GLsizei, border: GLint) {
@@ -4986,26 +9931,72 @@ ${assignments}
             return;
         }
         const readFramebuffer = this.hydGlobalState.commonState.readFramebufferBinding;
-        const sourceHasAlpha = readFramebuffer === this.hydGlobalState.defaultFramebuffer
-            ? this.hydGlobalState.contextAttributes.alpha !== false
-            : (this.getReadColorAttachment()?.colorBits[3] || 0) > 0;
-        const destinationNeedsAlpha = internalformat === WebGL2RenderingContext.ALPHA ||
-            internalformat === WebGL2RenderingContext.LUMINANCE_ALPHA ||
-            internalformat === WebGL2RenderingContext.RGBA;
+        if (readFramebuffer !== this.hydGlobalState.defaultFramebuffer && !this.getReadColorAttachment()) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const source = this.framebufferColorSurface(readFramebuffer, true);
+        const destinationInfo = this.copyTextureInternalFormatInfo(internalformat);
+        if (!source || !destinationInfo || destinationInfo.colorBits.every((bits) => bits === 0)) {
+            this.hydGlobalState.setError(destinationInfo ? WebGL2RenderingContext.INVALID_OPERATION : WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (internalformat === WebGL2RenderingContext.R8_SNORM ||
+            internalformat === WebGL2RenderingContext.RG8_SNORM ||
+            internalformat === WebGL2RenderingContext.RGB8_SNORM ||
+            internalformat === WebGL2RenderingContext.RGBA8_SNORM) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const sourceHasAlpha = source.hasAlpha;
+        const destinationNeedsAlpha = destinationInfo.colorBits[3] > 0;
         if (destinationNeedsAlpha && !sourceHasAlpha) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (this.colorBlitScalar(source.format) !== destinationInfo.scalar ||
+            (destinationInfo.sized && destinationInfo.colorBits.some(
+                (bits, index) => bits > 0 && source.colorBits[index] !== bits)) ||
+            destinationInfo.srgb !== source.srgb) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
         const texture = this.currentTexture(target);
         if (!texture) return;
+        if (texture.immutableFormat) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         if (this.copyAliasesReadAttachment(texture, target, level)) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
         this._der_flush();
-        texture.texImage2D(null, target, level, internalformat, width, height, border, internalformat, WebGL2RenderingContext.UNSIGNED_BYTE);
+        texture.texImage2D(
+            null,
+            target,
+            level,
+            internalformat,
+            width,
+            height,
+            border,
+            destinationInfo.uploadFormat.format,
+            destinationInfo.uploadFormat.type,
+        );
+        const destinationImage = texture.getImageState(target, level);
+        if (destinationImage && !destinationInfo.sized) {
+            destinationImage.effectiveColorBits = internalformat === WebGL2RenderingContext.ALPHA
+                ? [0, 0, 0, source.colorBits[3]]
+                : internalformat === WebGL2RenderingContext.LUMINANCE
+                    ? [source.colorBits[0], 0, 0, 0]
+                    : internalformat === WebGL2RenderingContext.LUMINANCE_ALPHA
+                        ? [source.colorBits[0], 0, 0, source.colorBits[3]]
+                        : internalformat === WebGL2RenderingContext.RGB
+                            ? [source.colorBits[0], source.colorBits[1], source.colorBits[2], 0]
+                            : [...source.colorBits];
+        }
         if (!this.copyReadFramebufferRegionToTexture(texture, target, level, 0, 0, x, y, width, height)) return;
-        texture.markCopyDestination();
+        this.markFramebufferContentChanged();
         this.samplerOriginStateVersion++;
         this.hydGlobalState.recordTransition("copyTexImage2D", target, level, internalformat, x, y, width, height, border);
     }
@@ -5033,6 +10024,10 @@ ${assignments}
             return;
         }
         const readFramebuffer = this.hydGlobalState.commonState.readFramebufferBinding;
+        if (readFramebuffer !== this.hydGlobalState.defaultFramebuffer && !this.getReadColorAttachment()) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         const sourceHasAlpha = readFramebuffer === this.hydGlobalState.defaultFramebuffer
             ? this.hydGlobalState.contextAttributes.alpha !== false
             : (this.getReadColorAttachment()?.colorBits[3] || 0) > 0;
@@ -5049,9 +10044,78 @@ ${assignments}
         }
         this._der_flush();
         if (!this.copyReadFramebufferRegionToTexture(texture, target, level, xoffset, yoffset, x, y, width, height)) return;
-        texture.markCopyDestination();
-        this.samplerOriginStateVersion++;
+        this.markFramebufferContentChanged();
         this.hydGlobalState.recordTransition("copyTexSubImage2D", target, level, xoffset, yoffset, x, y, width, height);
+    }
+
+    copyTexSubImage3D(
+        target: GLenum,
+        level: GLint,
+        xoffset: GLint,
+        yoffset: GLint,
+        zoffset: GLint,
+        x: GLint,
+        y: GLint,
+        width: GLsizei,
+        height: GLsizei,
+    ) {
+        if (this.hydContextType !== "webgl2" ||
+            (target !== WebGL2RenderingContext.TEXTURE_3D &&
+                target !== WebGL2RenderingContext.TEXTURE_2D_ARRAY)) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (level < 0 || xoffset < 0 || yoffset < 0 || zoffset < 0 || width < 0 || height < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const readFramebuffer = this.hydGlobalState.commonState.readFramebufferBinding;
+        if (this.framebufferStatus(readFramebuffer) !== WebGL2RenderingContext.FRAMEBUFFER_COMPLETE) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_FRAMEBUFFER_OPERATION);
+            return;
+        }
+        const readAttachment = readFramebuffer === this.hydGlobalState.defaultFramebuffer
+            ? null
+            : this.getReadColorAttachment();
+        if (readFramebuffer !== this.hydGlobalState.defaultFramebuffer && !readAttachment) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const texture = this.currentTexture(target);
+        if (!texture) return;
+        const destinationImage = texture.getImageState(target, level, 0);
+        if (!destinationImage) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (xoffset > destinationImage.width || yoffset > destinationImage.height ||
+            width > destinationImage.width - xoffset || height > destinationImage.height - yoffset ||
+            zoffset >= destinationImage.depth) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (readAttachment && readAttachment.attachment === texture &&
+            (readAttachment.level || 0) === level && (readAttachment.layer || 0) === zoffset) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const sourceHasAlpha = readFramebuffer === this.hydGlobalState.defaultFramebuffer
+            ? this.hydGlobalState.contextAttributes.alpha !== false
+            : (readAttachment.colorBits[3] || 0) > 0;
+        const destinationNeedsAlpha = destinationImage.internalFormat === WebGL2RenderingContext.ALPHA ||
+            destinationImage.internalFormat === WebGL2RenderingContext.LUMINANCE_ALPHA ||
+            destinationImage.internalFormat === WebGL2RenderingContext.RGBA ||
+            destinationImage.internalFormat === WebGL2RenderingContext.RGBA8;
+        if (destinationNeedsAlpha && !sourceHasAlpha) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        this._der_flush();
+        if (!this.copyReadFramebufferRegionToTexture(
+            texture, target, level, xoffset, yoffset, x, y, width, height, zoffset)) return;
+        this.markFramebufferContentChanged();
+        this.hydGlobalState.recordTransition(
+            "copyTexSubImage3D", target, level, xoffset, yoffset, zoffset, x, y, width, height);
     }
 
     private copyReadFramebufferRegionToTexture(
@@ -5064,12 +10128,9 @@ ${assignments}
         y: GLint,
         width: GLsizei,
         height: GLsizei,
+        destinationLayer: GLint = 0,
     ): boolean {
         if (width === 0 || height === 0) return true;
-        if (destination.format !== "rgba8unorm" && destination.format !== "bgra8unorm") {
-            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
-            return false;
-        }
         const framebuffer = this.hydGlobalState.commonState.readFramebufferBinding;
         const readsDefault = framebuffer === this.hydGlobalState.defaultFramebuffer;
         const attachment = readsDefault ? null : this.getReadColorAttachment();
@@ -5088,6 +10149,82 @@ ${assignments}
         const copyHeight = Math.max(0, sourceY1 - sourceY0);
         if (copyWidth === 0 || copyHeight === 0) return true;
 
+        const resolvedDestinationLayer = target >= WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X &&
+            target <= WebGL2RenderingContext.TEXTURE_CUBE_MAP_NEGATIVE_Z
+            ? target - WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X
+            : destinationLayer;
+        const destinationImage = destination.getImageState(target, level, resolvedDestinationLayer);
+        if (!destinationImage) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return false;
+        }
+        const destinationLogicalX = xoffset + sourceX0 - x;
+        const destinationLogicalY = yoffset + sourceY0 - y;
+        const destinationFlipped = this.samplerNeedsOriginFlip(destination);
+        const channelConversion = destinationImage.internalFormat === WebGL2RenderingContext.RGB
+            ? "rgb"
+            : destinationImage.internalFormat === WebGL2RenderingContext.ALPHA
+                ? "alpha"
+                : destinationImage.internalFormat === WebGL2RenderingContext.LUMINANCE
+                    ? "luminance"
+                    : destinationImage.internalFormat === WebGL2RenderingContext.LUMINANCE_ALPHA
+                        ? "luminance-alpha"
+                        : "identity";
+        const sourceSurface = this.framebufferColorSurface(framebuffer, true);
+        const sourceIs3DLayer = sourceSurface?.attachment?.attachment.textureDimension === "3d";
+        if (destination.isRenderAttachmentCapable && sourceSurface && !sourceIs3DLayer &&
+            this.colorBlitScalar(sourceSurface.format) === this.colorBlitScalar(destination.gpuFormat)) {
+            const destinationAttachment = new FramebufferAttributes(
+                WebGL2RenderingContext.COLOR_ATTACHMENT0,
+                level,
+                target,
+                destination,
+                resolvedDestinationLayer,
+            );
+            const destinationSurface: NonNullable<ReturnType<HydWebGLStatic["framebufferColorSurface"]>> = {
+                texture: destination.texture,
+                view: destinationAttachment.view,
+                depthSlice: destinationAttachment.depthSlice,
+                format: destination.gpuFormat,
+                width: destinationImage.width,
+                height: destinationImage.height,
+                sampleCount: 1,
+                hasAlpha: destinationAttachment.colorBits[3] > 0,
+                colorBits: destinationAttachment.colorBits,
+                srgb: destination.gpuFormat.endsWith("-srgb"),
+                isDefault: false,
+                attachment: destinationAttachment,
+            };
+            const destinationRect: [number, number, number, number] = destinationFlipped
+                ? [
+                    destinationLogicalX,
+                    destinationLogicalY,
+                    destinationLogicalX + copyWidth,
+                    destinationLogicalY + copyHeight,
+                ]
+                : [
+                    destinationLogicalX,
+                    destinationImage.height - destinationLogicalY,
+                    destinationLogicalX + copyWidth,
+                    destinationImage.height - destinationLogicalY - copyHeight,
+                ];
+            if (this.shaderBlitColor(
+                sourceSurface,
+                destinationSurface,
+                [sourceX0, sourceY0, sourceX1, sourceY1],
+                destinationRect,
+                false,
+                channelConversion,
+            )) {
+                return true;
+            }
+        }
+
+        if (destination.gpuFormat !== "rgba8unorm" && destination.gpuFormat !== "bgra8unorm") {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return false;
+        }
+
         const pixels = new Uint8Array(copyWidth * copyHeight * 4);
         const read = readsDefault
             ? this.readDefaultFramebufferSynchronously(sourceX0, sourceY0, copyWidth, copyHeight, pixels, 0)
@@ -5097,7 +10234,6 @@ ${assignments}
             return false;
         }
 
-        const destinationImage = destination.getImageState(target, level);
         const logicalFormat = destinationImage?.internalFormat || WebGL2RenderingContext.RGBA;
         for (let offset = 0; offset < pixels.length; offset += 4) {
             const red = pixels[offset];
@@ -5123,30 +10259,29 @@ ${assignments}
         }
 
         const rowBytes = copyWidth * 4;
-        const gpuRows = new Uint8Array(pixels.byteLength);
-        for (let row = 0; row < copyHeight; row++) {
-            const sourceOffset = row * rowBytes;
-            const destinationOffset = (copyHeight - row - 1) * rowBytes;
-            gpuRows.set(pixels.subarray(sourceOffset, sourceOffset + rowBytes), destinationOffset);
+        let uploadRows = pixels;
+        if (destinationFlipped) {
+            uploadRows = new Uint8Array(pixels.byteLength);
+            for (let row = 0; row < copyHeight; row++) {
+                const sourceOffset = row * rowBytes;
+                const destinationOffset = (copyHeight - row - 1) * rowBytes;
+                uploadRows.set(pixels.subarray(sourceOffset, sourceOffset + rowBytes), destinationOffset);
+            }
         }
-        const destinationLogicalX = xoffset + sourceX0 - x;
-        const destinationLogicalY = yoffset + sourceY0 - y;
         const destinationHeight = Math.max(1, destination.height >> level);
-        const layer = target >= WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X &&
-            target <= WebGL2RenderingContext.TEXTURE_CUBE_MAP_NEGATIVE_Z
-            ? target - WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X
-            : 0;
         this.hydDevice.queue.writeTexture(
             {
                 texture: destination.texture,
                 mipLevel: level,
                 origin: {
                     x: destinationLogicalX,
-                    y: destinationHeight - destinationLogicalY - copyHeight,
-                    z: layer,
+                    y: destinationFlipped
+                        ? destinationHeight - destinationLogicalY - copyHeight
+                        : destinationLogicalY,
+                    z: resolvedDestinationLayer,
                 },
             },
-            gpuRows,
+            uploadRows,
             { bytesPerRow: rowBytes, rowsPerImage: copyHeight },
             { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 },
         );
@@ -5390,7 +10525,10 @@ ${assignments}
     ): boolean {
         if (attachment.format !== "rgba8unorm" &&
             attachment.format !== "bgra8unorm" &&
-            attachment.format !== "rgba8unorm-srgb") {
+            attachment.format !== "rgba8unorm-srgb" &&
+            attachment.format !== "r8unorm" &&
+            attachment.format !== "rg8unorm" &&
+            attachment.format !== "rgb10a2unorm") {
             return false;
         }
         const level = attachment.level || 0;
@@ -5403,9 +10541,36 @@ ${assignments}
         const layer = attachment.layer === undefined ? cubeLayer : attachment.layer;
         const framebufferOriented = this.samplerNeedsOriginFlip(attachment.attachment);
         const readY = framebufferOriented ? y : sourceHeight - y - height;
+        let sourceTexture = attachment.attachment.texture;
+        let sourceLevel = level;
+        let sourceLayer = layer;
+        let temporarySlice: GPUTexture | null = null;
         try {
+            if (attachment.attachment.textureDimension === "3d") {
+                temporarySlice = this.hydDevice.createTexture({
+                    label: "3d framebuffer layer readback slice",
+                    size: { width: sourceWidth, height: sourceHeight, depthOrArrayLayers: 1 },
+                    format: attachment.format,
+                    usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
+                    viewFormats: attachment.format === "rgba8unorm-srgb" ? ["rgba8unorm"] : undefined,
+                });
+                const encoder = this.hydDevice.createCommandEncoder({ label: "copy 3d framebuffer layer for readback" });
+                encoder.copyTextureToTexture(
+                    {
+                        texture: sourceTexture,
+                        mipLevel: level,
+                        origin: { x: 0, y: 0, z: layer },
+                    },
+                    { texture: temporarySlice },
+                    { width: sourceWidth, height: sourceHeight, depthOrArrayLayers: 1 },
+                );
+                this.hydDevice.queue.submit([encoder.finish()]);
+                sourceTexture = temporarySlice;
+                sourceLevel = 0;
+                sourceLayer = 0;
+            }
             const read = this.readTextureChannelsSynchronously(
-                attachment.attachment.texture,
+                sourceTexture,
                 sourceWidth,
                 sourceHeight,
                 x,
@@ -5414,9 +10579,9 @@ ${assignments}
                 height,
                 destination,
                 destinationOffset,
-                level,
-                layer,
-                false,
+                sourceLevel,
+                sourceLayer,
+                attachment.colorBits[3] === 0,
                 attachment.format === "rgba8unorm-srgb" ? "rgba8unorm" : undefined,
             );
             if (read && !framebufferOriented) {
@@ -5435,6 +10600,198 @@ ${assignments}
         } catch (error) {
             console.warn("[HYD] synchronous color-attachment readPixels failed:", error);
             return false;
+        } finally {
+            temporarySlice?.destroy();
+        }
+    }
+
+    private readPackedUnormColorAttachmentSynchronously(
+        attachment: FramebufferAttributes,
+        x: GLint,
+        y: GLint,
+        width: GLsizei,
+        height: GLsizei,
+        destination: Uint8Array,
+        destinationOffset: number,
+    ): boolean {
+        if (attachment.format !== "rgb10a2unorm") return false;
+        const level = attachment.level || 0;
+        const sourceWidth = attachment.width;
+        const sourceHeight = attachment.height;
+        const cubeLayer = attachment.face >= WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X &&
+            attachment.face <= WebGL2RenderingContext.TEXTURE_CUBE_MAP_NEGATIVE_Z
+            ? attachment.face - WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X
+            : 0;
+        const layer = attachment.layer === undefined ? cubeLayer : attachment.layer;
+        const framebufferOriented = this.samplerNeedsOriginFlip(attachment.attachment);
+        const readY = framebufferOriented ? y : sourceHeight - y - height;
+        let snapshot: ImageBitmap | null = null;
+        try {
+            snapshot = this.snapshotPackedUnormTexture(
+                attachment.attachment.texture,
+                sourceWidth,
+                sourceHeight,
+                level,
+                layer,
+            );
+            if (!snapshot) return false;
+            const encoded = new Uint8Array(width * height * 2 * 4);
+            if (!this.readSnapshotSynchronously(
+                snapshot,
+                sourceWidth * 2,
+                sourceHeight,
+                x * 2,
+                readY,
+                width * 2,
+                height,
+                encoded,
+                0,
+            )) {
+                return false;
+            }
+            const destinationView = new DataView(
+                destination.buffer,
+                destination.byteOffset,
+                destination.byteLength,
+            );
+            for (let row = 0; row < height; row++) {
+                for (let column = 0; column < width; column++) {
+                    const encodedPixel = (row * width + column) * 2;
+                    const lowOffset = encodedPixel * 4;
+                    const highOffset = (encodedPixel + 1) * 4;
+                    const word = (encoded[lowOffset] |
+                        (encoded[lowOffset + 1] << 8) |
+                        (encoded[lowOffset + 2] << 16) |
+                        (encoded[highOffset] << 24)) >>> 0;
+                    destinationView.setUint32(
+                        destinationOffset + (row * width + column) * 4,
+                        word,
+                        true,
+                    );
+                }
+            }
+            if (!framebufferOriented) {
+                const rowBytes = width * 4;
+                const temporaryRow = new Uint8Array(rowBytes);
+                for (let row = 0; row < Math.floor(height / 2); row++) {
+                    const opposite = height - row - 1;
+                    const rowOffset = destinationOffset + row * rowBytes;
+                    const oppositeOffset = destinationOffset + opposite * rowBytes;
+                    temporaryRow.set(destination.subarray(rowOffset, rowOffset + rowBytes));
+                    destination.copyWithin(rowOffset, oppositeOffset, oppositeOffset + rowBytes);
+                    destination.set(temporaryRow, oppositeOffset);
+                }
+            }
+            return true;
+        } catch (error) {
+            console.warn("[HYD] synchronous packed color-attachment readPixels failed:", error);
+            return false;
+        } finally {
+            snapshot?.close();
+        }
+    }
+
+    private readIntegerColorAttachmentSynchronously(
+        attachment: FramebufferAttributes,
+        x: GLint,
+        y: GLint,
+        width: GLsizei,
+        height: GLsizei,
+        destination: Uint8Array,
+        destinationOffset: number,
+        signed: boolean,
+    ): boolean {
+        if (signed ? !attachment.format.endsWith("sint") : !attachment.format.endsWith("uint")) {
+            return false;
+        }
+        const level = attachment.level || 0;
+        const sourceWidth = attachment.width;
+        const sourceHeight = attachment.height;
+        const cubeLayer = attachment.face >= WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X &&
+            attachment.face <= WebGL2RenderingContext.TEXTURE_CUBE_MAP_NEGATIVE_Z
+            ? attachment.face - WebGL2RenderingContext.TEXTURE_CUBE_MAP_POSITIVE_X
+            : 0;
+        const layer = attachment.layer === undefined ? cubeLayer : attachment.layer;
+        const framebufferOriented = this.samplerNeedsOriginFlip(attachment.attachment);
+        const readY = framebufferOriented ? y : sourceHeight - y - height;
+        let sourceTexture = attachment.attachment.texture;
+        let sourceLevel = level;
+        let sourceLayer = layer;
+        let temporarySlice: GPUTexture | null = null;
+        let snapshot: ImageBitmap | null = null;
+        try {
+            if (attachment.attachment.textureDimension === "3d") {
+                temporarySlice = this.hydDevice.createTexture({
+                    label: "3d integer framebuffer layer readback slice",
+                    size: { width: sourceWidth, height: sourceHeight, depthOrArrayLayers: 1 },
+                    format: attachment.format,
+                    usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
+                });
+                const encoder = this.hydDevice.createCommandEncoder({ label: "copy 3d integer layer for readback" });
+                encoder.copyTextureToTexture(
+                    { texture: sourceTexture, mipLevel: level, origin: { x: 0, y: 0, z: layer } },
+                    { texture: temporarySlice },
+                    { width: sourceWidth, height: sourceHeight, depthOrArrayLayers: 1 },
+                );
+                this.hydDevice.queue.submit([encoder.finish()]);
+                sourceTexture = temporarySlice;
+                sourceLevel = 0;
+                sourceLayer = 0;
+            }
+            snapshot = this.snapshotIntegerTexture(
+                sourceTexture, sourceWidth, sourceHeight, signed, sourceLevel, sourceLayer);
+            if (!snapshot) return false;
+            const encoded = new Uint8Array(width * height * 8 * 4);
+            if (!this.readSnapshotSynchronously(
+                snapshot,
+                sourceWidth * 8,
+                sourceHeight,
+                x * 8,
+                readY,
+                width * 8,
+                height,
+                encoded,
+                0,
+            )) {
+                return false;
+            }
+            const destinationView = new DataView(
+                destination.buffer, destination.byteOffset, destination.byteLength);
+            for (let row = 0; row < height; row++) {
+                for (let column = 0; column < width; column++) {
+                    for (let component = 0; component < 4; component++) {
+                        const encodedPixel = (row * width + column) * 8 + component * 2;
+                        const encodedOffset = encodedPixel * 4;
+                        const highByteOffset = (encodedPixel + 1) * 4;
+                        const word = (encoded[encodedOffset] |
+                            (encoded[encodedOffset + 1] << 8) |
+                            (encoded[encodedOffset + 2] << 16) |
+                            (encoded[highByteOffset] << 24)) >>> 0;
+                        const targetOffset = destinationOffset +
+                            ((row * width + column) * 4 + component) * 4;
+                        destinationView.setUint32(targetOffset, word, true);
+                    }
+                }
+            }
+            if (!framebufferOriented) {
+                const rowBytes = width * 16;
+                const temporaryRow = new Uint8Array(rowBytes);
+                for (let row = 0; row < Math.floor(height / 2); row++) {
+                    const opposite = height - row - 1;
+                    const rowOffset = destinationOffset + row * rowBytes;
+                    const oppositeOffset = destinationOffset + opposite * rowBytes;
+                    temporaryRow.set(destination.subarray(rowOffset, rowOffset + rowBytes));
+                    destination.copyWithin(rowOffset, oppositeOffset, oppositeOffset + rowBytes);
+                    destination.set(temporaryRow, oppositeOffset);
+                }
+            }
+            return true;
+        } catch (error) {
+            console.warn("[HYD] synchronous integer attachment readPixels failed:", error);
+            return false;
+        } finally {
+            snapshot?.close();
+            temporarySlice?.destroy();
         }
     }
 
@@ -5518,8 +10875,50 @@ ${assignments}
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
             return;
         }
-        if (format !== WebGL2RenderingContext.RGBA || type !== WebGL2RenderingContext.UNSIGNED_BYTE) {
+        const pixelPackBuffer = this.hydGlobalState.commonState.pixelPackBufferBinding;
+        if (pixelPackBuffer && typeof pixels !== "number") {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const validReadFormats = new Set<GLenum>([
+            WebGL2RenderingContext.ALPHA,
+            WebGL2RenderingContext.RED,
+            WebGL2RenderingContext.RG,
+            WebGL2RenderingContext.RGB,
+            WebGL2RenderingContext.RGBA,
+            WebGL2RenderingContext.RED_INTEGER,
+            WebGL2RenderingContext.RG_INTEGER,
+            WebGL2RenderingContext.RGB_INTEGER,
+            WebGL2RenderingContext.RGBA_INTEGER,
+        ]);
+        const validReadTypes = new Set<GLenum>([
+            WebGL2RenderingContext.BYTE,
+            WebGL2RenderingContext.UNSIGNED_BYTE,
+            WebGL2RenderingContext.SHORT,
+            WebGL2RenderingContext.UNSIGNED_SHORT,
+            WebGL2RenderingContext.INT,
+            WebGL2RenderingContext.UNSIGNED_INT,
+            WebGL2RenderingContext.HALF_FLOAT,
+            WebGL2RenderingContext.FLOAT,
+            WebGL2RenderingContext.UNSIGNED_SHORT_5_6_5,
+            WebGL2RenderingContext.UNSIGNED_SHORT_4_4_4_4,
+            WebGL2RenderingContext.UNSIGNED_SHORT_5_5_5_1,
+            WebGL2RenderingContext.UNSIGNED_INT_2_10_10_10_REV,
+            WebGL2RenderingContext.UNSIGNED_INT_10F_11F_11F_REV,
+            WebGL2RenderingContext.UNSIGNED_INT_5_9_9_9_REV,
+        ]);
+        if (!validReadFormats.has(format) || !validReadTypes.has(type)) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        const normalizedRead = format === WebGL2RenderingContext.RGBA &&
+            type === WebGL2RenderingContext.UNSIGNED_BYTE;
+        const integerRead = format === WebGL2RenderingContext.RGBA_INTEGER &&
+            (type === WebGL2RenderingContext.INT || type === WebGL2RenderingContext.UNSIGNED_INT);
+        const packedUnormRead = format === WebGL2RenderingContext.RGBA &&
+            type === WebGL2RenderingContext.UNSIGNED_INT_2_10_10_10_REV;
+        if (!normalizedRead && !integerRead && !packedUnormRead) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
         if (pixels === null) {
@@ -5527,30 +10926,72 @@ ${assignments}
             return;
         }
         const readFramebuffer = this.hydGlobalState.commonState.readFramebufferBinding;
+        if (readFramebuffer.readBuffer === WebGL2RenderingContext.NONE) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         if (this.framebufferStatus(readFramebuffer) !== WebGL2RenderingContext.FRAMEBUFFER_COMPLETE) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_FRAMEBUFFER_OPERATION);
             return;
         }
+        const readsDefaultFramebuffer = readFramebuffer === this.hydGlobalState.defaultFramebuffer;
+        const attachment = readsDefaultFramebuffer ? null : this.getReadColorAttachment();
+        if (attachment && attachment.sampleCount > 1) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         if (this.canvasSizeDirty) this.updateCanvasSize();
-        const layout = packedPixelLayout(width, height, 4, this.hydGlobalState.miscState.packAlignment);
+        const bytesPerPixel = integerRead ? 16 : 4;
+        const packState = this.hydGlobalState.miscState;
+        const effectivePackRowLength = packState.packRowLength || width;
+        if (effectivePackRowLength < width || packState.packSkipPixels + width > effectivePackRowLength) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        const layout = packedPixelLayout(
+            width,
+            height,
+            bytesPerPixel,
+            packState.packAlignment,
+            packState.packRowLength,
+            packState.packSkipPixels,
+            packState.packSkipRows,
+        );
         let destination: Uint8Array | null = null;
         let destinationOffset = 0;
+        let destinationBuffer: HydBuffer | null = null;
 
         if (typeof pixels === "number") {
-            const buffer = this.hydGlobalState.commonState.pixelPackBufferBinding;
+            const buffer = pixelPackBuffer;
             if (!buffer) {
                 this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
                 return;
             }
+            if (this.bufferOperationConflictsWithTransformFeedback(buffer, WebGL2RenderingContext.PIXEL_PACK_BUFFER)) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
             destinationOffset = pixels;
-            if (destinationOffset < 0 || destinationOffset + layout.requiredBytes > buffer.shadowData.byteLength) {
+            if (destinationOffset < 0) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+                return;
+            }
+            if (destinationOffset + layout.requiredBytes > buffer.webglSize) {
                 this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
                 return;
             }
             destination = buffer.shadowData;
+            destinationBuffer = buffer;
         } else if (pixels && "byteLength" in pixels) {
             const bytesPerElement = (pixels as any).BYTES_PER_ELEMENT;
-            if (bytesPerElement !== 1) {
+            const compatible = normalizedRead
+                ? pixels instanceof Uint8Array || pixels instanceof Uint8ClampedArray
+                : packedUnormRead
+                    ? pixels instanceof Uint32Array
+                : type === WebGL2RenderingContext.INT
+                    ? pixels instanceof Int32Array
+                    : pixels instanceof Uint32Array;
+            if (!compatible) {
                 this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
                 return;
             }
@@ -5571,13 +11012,19 @@ ${assignments}
             return;
         }
         if (width === 0 || height === 0) {
-            this.hydGlobalState.recordTransition("readPixels", x, y, width, height, format, type);
             return;
         }
 
-        const readsDefaultFramebuffer = readFramebuffer === this.hydGlobalState.defaultFramebuffer;
-        const attachment = readsDefaultFramebuffer ? null : this.getReadColorAttachment();
+        if (integerRead && readsDefaultFramebuffer) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         if (!readsDefaultFramebuffer && !attachment) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
+        if (packedUnormRead &&
+            (readsDefaultFramebuffer || attachment.internalFormat !== WebGL2RenderingContext.RGB10_A2)) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
@@ -5590,43 +11037,146 @@ ${assignments}
         const clippedWidth = Math.max(0, sourceX1 - sourceX0);
         const clippedHeight = Math.max(0, sourceY1 - sourceY0);
         if (clippedWidth === 0 || clippedHeight === 0) {
-            this.hydGlobalState.recordTransition("readPixels", x, y, width, height, format, type);
             return;
         }
 
         this._der_flush();
-        const tightPixels = new Uint8Array(clippedWidth * clippedHeight * 4);
-        const read = readsDefaultFramebuffer
-            ? this.readDefaultFramebufferSynchronously(
-                sourceX0, sourceY0, clippedWidth, clippedHeight, tightPixels, 0)
-            : this.readColorAttachmentSynchronously(
-                attachment, sourceX0, sourceY0, clippedWidth, clippedHeight, tightPixels, 0);
+        const tightPixels = new Uint8Array(clippedWidth * clippedHeight * bytesPerPixel);
+        const cacheKey = normalizedRead && !destinationBuffer
+            ? `${readFramebuffer.hash}:${sourceX0}:${sourceY0}:${clippedWidth}:${clippedHeight}`
+            : null;
+        const cachedRead = cacheKey && this.normalizedReadPixelsCache?.stateToken === this.hydGlobalState.stateToken &&
+            this.normalizedReadPixelsCache.writeGeneration === this.framebufferWriteGeneration &&
+            this.normalizedReadPixelsCache.key === cacheKey &&
+            this.normalizedReadPixelsCache.pixels.byteLength === tightPixels.byteLength
+            ? this.normalizedReadPixelsCache
+            : null;
+        let read = true;
+        if (cachedRead) {
+            tightPixels.set(cachedRead.pixels);
+        } else {
+            read = packedUnormRead
+                ? this.readPackedUnormColorAttachmentSynchronously(
+                    attachment,
+                    sourceX0,
+                    sourceY0,
+                    clippedWidth,
+                    clippedHeight,
+                    tightPixels,
+                    0,
+                )
+                : integerRead
+                ? this.readIntegerColorAttachmentSynchronously(
+                    attachment,
+                    sourceX0,
+                    sourceY0,
+                    clippedWidth,
+                    clippedHeight,
+                    tightPixels,
+                    0,
+                    type === WebGL2RenderingContext.INT,
+                )
+                : readsDefaultFramebuffer
+                ? this.readDefaultFramebufferSynchronously(
+                    sourceX0, sourceY0, clippedWidth, clippedHeight, tightPixels, 0)
+                : this.readColorAttachmentSynchronously(
+                    attachment, sourceX0, sourceY0, clippedWidth, clippedHeight, tightPixels, 0);
+            if (read && cacheKey) {
+                this.normalizedReadPixelsCache = {
+                    stateToken: this.hydGlobalState.stateToken,
+                    writeGeneration: this.framebufferWriteGeneration,
+                    key: cacheKey,
+                    pixels: tightPixels.slice(),
+                };
+            }
+        }
         if (!read) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
-        const destinationColumnOffset = (sourceX0 - x) * 4;
+        const destinationColumnOffset = (sourceX0 - x) * bytesPerPixel;
         const destinationFirstRow = sourceY0 - y;
-        const tightRowBytes = clippedWidth * 4;
+        const tightRowBytes = clippedWidth * bytesPerPixel;
         for (let row = 0; row < clippedHeight; row++) {
             const sourceOffset = row * tightRowBytes;
             const targetOffset = destinationOffset +
+                layout.dataOffset +
                 (destinationFirstRow + row) * layout.rowStride + destinationColumnOffset;
             destination.set(tightPixels.subarray(sourceOffset, sourceOffset + tightRowBytes), targetOffset);
         }
-        this.hydGlobalState.recordTransition("readPixels", x, y, width, height, format, type);
+        if (destinationBuffer) {
+            destinationBuffer.commitShadowData(destinationOffset, layout.requiredBytes);
+            this.hydGlobalState.recordTransition("readPixels", x, y, width, height, format, type);
+        }
     }
 
     drawBuffers(buffers: Array<GLenum>) {
-        this.hydGlobalState.commonState.drawFramebufferBinding.drawBuffers = buffers;
-        this.hydGlobalState.commonState.drawFramebufferBinding.resetHash();
+        const normalized = Array.from(buffers || [], (value) => Number(value) >>> 0);
+        const framebuffer = this.hydGlobalState.commonState.drawFramebufferBinding;
+        const maxDrawBuffers = Number(enumToConstant.get(WebGL2RenderingContext.MAX_DRAW_BUFFERS)) || 1;
+        if (normalized.length > maxDrawBuffers) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        const validTokens = normalized.every((value) => value === WebGL2RenderingContext.NONE ||
+            value === WebGL2RenderingContext.BACK ||
+            (value >= WebGL2RenderingContext.COLOR_ATTACHMENT0 &&
+                value < WebGL2RenderingContext.COLOR_ATTACHMENT0 + maxDrawBuffers));
+        if (!validTokens) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+            return;
+        }
+        if (framebuffer === this.hydGlobalState.defaultFramebuffer) {
+            if (normalized.length !== 1 ||
+                (normalized[0] !== WebGL2RenderingContext.BACK && normalized[0] !== WebGL2RenderingContext.NONE)) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+        } else {
+            for (let index = 0; index < normalized.length; index++) {
+                const value = normalized[index];
+                if (value !== WebGL2RenderingContext.NONE &&
+                    value !== WebGL2RenderingContext.COLOR_ATTACHMENT0 + index) {
+                    this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                    return;
+                }
+            }
+        }
+        this._der_flush();
+        framebuffer.drawBuffers = normalized;
+        framebuffer.resetHash();
         this.gpuViewportDirty = true;
         this.gpuScissorDirty = true;
-        this.hydGlobalState.recordTransition("drawBuffers", ...buffers);
+        this.hydGlobalState.recordTransition("drawBuffers", ...normalized);
     }
 
     readBuffer(mode: GLenum) {
+        if (this.hydContextType !== "webgl2") {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         const framebuffer = this.hydGlobalState.commonState.readFramebufferBinding;
+        const isDefault = framebuffer === this.hydGlobalState.defaultFramebuffer;
+        const maxColorAttachments = Number(enumToConstant.get(WebGL2RenderingContext.MAX_COLOR_ATTACHMENTS)) || 1;
+        if (isDefault) {
+            if (mode !== WebGL2RenderingContext.BACK && mode !== WebGL2RenderingContext.NONE) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+        } else if (mode !== WebGL2RenderingContext.NONE) {
+            if (mode === WebGL2RenderingContext.BACK) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+            if (mode < WebGL2RenderingContext.COLOR_ATTACHMENT0) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                return;
+            }
+            if (mode >= WebGL2RenderingContext.COLOR_ATTACHMENT0 + maxColorAttachments) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return;
+            }
+        }
         if (framebuffer.readBuffer !== mode) {
             framebuffer.readBuffer = mode;
             framebuffer.resetHash();
@@ -5634,41 +11184,175 @@ ${assignments}
         this.hydGlobalState.recordTransition("readBuffer", mode);
     }
 
-    fenceSync(condition: GLenum, flags: GLbitfield) {
-        if (condition !== WebGL2RenderingContext.SYNC_GPU_COMMANDS_COMPLETE || flags !== 0) {
+    private validateInvalidateFramebufferAttachments(target: GLenum, attachments: ArrayLike<GLenum>): boolean {
+        if (!this.validateFramebufferTarget(target)) return false;
+        const framebuffer = this.getFramebufferForTarget(target);
+        const isDefault = framebuffer === this.hydGlobalState.defaultFramebuffer;
+        const maxColorAttachments = Number(enumToConstant.get(WebGL2RenderingContext.MAX_COLOR_ATTACHMENTS)) || 1;
+        for (let index = 0; index < attachments.length; index++) {
+            const attachment = Number(attachments[index]);
+            if (isDefault) {
+                if (attachment !== WebGL2RenderingContext.COLOR &&
+                    attachment !== WebGL2RenderingContext.DEPTH &&
+                    attachment !== WebGL2RenderingContext.STENCIL) {
+                    this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                    return false;
+                }
+                continue;
+            }
+            const colorAttachment = attachment >= WebGL2RenderingContext.COLOR_ATTACHMENT0 &&
+                attachment < WebGL2RenderingContext.COLOR_ATTACHMENT0 + maxColorAttachments;
+            if (!colorAttachment &&
+                attachment !== WebGL2RenderingContext.DEPTH_ATTACHMENT &&
+                attachment !== WebGL2RenderingContext.STENCIL_ATTACHMENT &&
+                attachment !== WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT) {
+                const exceedsColorAttachments = attachment >= WebGL2RenderingContext.COLOR_ATTACHMENT0;
+                this.hydGlobalState.setError(exceedsColorAttachments
+                    ? WebGL2RenderingContext.INVALID_OPERATION
+                    : WebGL2RenderingContext.INVALID_ENUM);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    invalidateFramebuffer(target: GLenum, attachments: ArrayLike<GLenum>) {
+        if (!this.validateInvalidateFramebufferAttachments(target, attachments)) return;
+        this._der_flush();
+        this.hydGlobalState.recordTransition(
+            "invalidateFramebuffer",
+            target,
+            ...Array.from(attachments, Number),
+        );
+    }
+
+    invalidateSubFramebuffer(
+        target: GLenum,
+        attachments: ArrayLike<GLenum>,
+        x: GLint,
+        y: GLint,
+        width: GLsizei,
+        height: GLsizei,
+    ) {
+        if (width < 0 || height < 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (!this.validateInvalidateFramebufferAttachments(target, attachments)) return;
+        this._der_flush();
+        this.hydGlobalState.recordTransition(
+            "invalidateSubFramebuffer",
+            target,
+            x,
+            y,
+            width,
+            height,
+            ...Array.from(attachments, Number),
+        );
+    }
+
+    fenceSync(condition: GLenum, flags: GLbitfield): HydSync | null {
+        if (condition !== WebGL2RenderingContext.SYNC_GPU_COMMANDS_COMPLETE) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
             return null;
         }
-        const pending = this.pendingReadbacks.splice(0);
-        const sync = {
-            condition,
-            flags,
-            signaled: pending.length === 0,
-        } as WebGLSync & { signaled: boolean };
-        if (pending.length > 0) {
-            Promise.allSettled(pending).then(() => {
-                sync.signaled = true;
-            });
+        if (flags !== 0) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return null;
         }
-        return sync as WebGLSync;
+        this._der_flush();
+        const pending: Promise<unknown>[] = this.pendingReadbacks.splice(0);
+        pending.push(typeof this.hydDevice.queue.onSubmittedWorkDone === "function"
+            ? this.hydDevice.queue.onSubmittedWorkDone()
+            : Promise.resolve());
+        const sync = brandHydWebGlObject(
+            new HydSync(this.contextToken, condition, flags, false),
+            "sync",
+        );
+        this.syncObjects.add(sync);
+        Promise.allSettled(pending).then(() => {
+            sync.signaled = true;
+        });
+        return sync;
     }
 
-    clientWaitSync(sync: WebGLSync, flags: GLbitfield, _timeout: GLuint64) {
+    clientWaitSync(sync: HydSync, flags: GLbitfield, timeout: GLuint64) {
+        if (!(sync instanceof HydSync) || sync.ownerToken !== this.contextToken) {
+            this.hydGlobalState.setError(sync instanceof HydSync
+                ? WebGL2RenderingContext.INVALID_OPERATION
+                : WebGL2RenderingContext.INVALID_VALUE);
+            return WebGL2RenderingContext.WAIT_FAILED;
+        }
+        if (sync.deleted) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return WebGL2RenderingContext.WAIT_FAILED;
+        }
         if (flags !== 0 && flags !== WebGL2RenderingContext.SYNC_FLUSH_COMMANDS_BIT) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
             return WebGL2RenderingContext.WAIT_FAILED;
         }
-        return (sync as any)?.signaled ? WebGL2RenderingContext.ALREADY_SIGNALED : WebGL2RenderingContext.TIMEOUT_EXPIRED;
+        const maxTimeout = Number(enumToConstant.get(WebGL2RenderingContext.MAX_CLIENT_WAIT_TIMEOUT_WEBGL)) || 0;
+        if (Number(timeout) > maxTimeout) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return WebGL2RenderingContext.WAIT_FAILED;
+        }
+        if (flags === WebGL2RenderingContext.SYNC_FLUSH_COMMANDS_BIT) this._der_flush();
+        return sync.signaled ? WebGL2RenderingContext.ALREADY_SIGNALED : WebGL2RenderingContext.TIMEOUT_EXPIRED;
     }
 
-    waitSync(_sync: WebGLSync, _flags: GLbitfield, _timeout: GLint64) {
+    waitSync(sync: HydSync, flags: GLbitfield, timeout: GLint64) {
+        if (!(sync instanceof HydSync) || sync.ownerToken !== this.contextToken) {
+            this.hydGlobalState.setError(sync instanceof HydSync
+                ? WebGL2RenderingContext.INVALID_OPERATION
+                : WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (sync.deleted) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (flags !== 0 || timeout !== WebGL2RenderingContext.TIMEOUT_IGNORED) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+        }
     }
 
-    deleteSync(_sync: WebGLSync) {
+    deleteSync(sync: HydSync | null) {
+        if (sync === null) return;
+        if (!(sync instanceof HydSync) || sync.ownerToken !== this.contextToken) {
+            this.hydGlobalState.setError(sync instanceof HydSync
+                ? WebGL2RenderingContext.INVALID_OPERATION
+                : WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        if (sync.deleted) return;
+        sync.deleted = true;
+        this.syncObjects.delete(sync);
     }
 
-    isSync(sync: WebGLSync) {
-        return !!sync;
+    isSync(sync: HydSync | null) {
+        return sync instanceof HydSync && sync.ownerToken === this.contextToken && !sync.deleted;
+    }
+
+    getSyncParameter(sync: HydSync, pname: GLenum) {
+        if (!(sync instanceof HydSync) || sync.ownerToken !== this.contextToken || sync.deleted) {
+            this.hydGlobalState.setError(sync instanceof HydSync && sync.ownerToken !== this.contextToken
+                ? WebGL2RenderingContext.INVALID_OPERATION
+                : WebGL2RenderingContext.INVALID_VALUE);
+            return null;
+        }
+        switch (pname) {
+            case WebGL2RenderingContext.OBJECT_TYPE:
+                return WebGL2RenderingContext.SYNC_FENCE;
+            case WebGL2RenderingContext.SYNC_STATUS:
+                return sync.signaled ? WebGL2RenderingContext.SIGNALED : WebGL2RenderingContext.UNSIGNALED;
+            case WebGL2RenderingContext.SYNC_CONDITION:
+                return sync.condition;
+            case WebGL2RenderingContext.SYNC_FLAGS:
+                return sync.flags;
+            default:
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                return null;
+        }
     }
 
     flush() {
@@ -5680,7 +11364,8 @@ ${assignments}
     }
 
     pixelStorei(pname: GLenum, param: GLint | GLboolean) {
-        const value = typeof param === "boolean" ? (param ? 1 : 0) : param;
+        pname = toWebGlInt32(pname);
+        const value = typeof param === "boolean" ? (param ? 1 : 0) : toWebGlInt32(param);
         switch (pname) {
             case WebGL2RenderingContext.UNPACK_FLIP_Y_WEBGL:
                 this.hydGlobalState.miscState.unpackFlipYWebGL = value !== 0;
@@ -5691,7 +11376,7 @@ ${assignments}
                 this.hydGlobalState.recordTransition("pixelStorei", pname, value);
                 return;
             case WebGL2RenderingContext.UNPACK_COLORSPACE_CONVERSION_WEBGL:
-                if (value !== WebGL2RenderingContext.BROWSER_DEFAULT_WEBGL && value !== WebGL2RenderingContext.NONE) {
+                if (value !== hydWebGLConstants.BROWSER_DEFAULT_WEBGL && value !== hydWebGLConstants.NONE) {
                     this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
                     return;
                 }
@@ -5714,6 +11399,34 @@ ${assignments}
                 this.hydGlobalState.miscState.packAlignment = value;
                 this.hydGlobalState.recordTransition("pixelStorei", pname, value);
                 return;
+            case WebGL2RenderingContext.UNPACK_ROW_LENGTH:
+            case WebGL2RenderingContext.UNPACK_IMAGE_HEIGHT:
+            case WebGL2RenderingContext.UNPACK_SKIP_PIXELS:
+            case WebGL2RenderingContext.UNPACK_SKIP_ROWS:
+            case WebGL2RenderingContext.UNPACK_SKIP_IMAGES:
+            case WebGL2RenderingContext.PACK_ROW_LENGTH:
+            case WebGL2RenderingContext.PACK_SKIP_PIXELS:
+            case WebGL2RenderingContext.PACK_SKIP_ROWS:
+                if (this.hydContextType !== "webgl2") {
+                    this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
+                    return;
+                }
+                if (value < 0) {
+                    this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+                    return;
+                }
+                switch (pname) {
+                    case WebGL2RenderingContext.UNPACK_ROW_LENGTH: this.hydGlobalState.miscState.unpackRowLength = value; break;
+                    case WebGL2RenderingContext.UNPACK_IMAGE_HEIGHT: this.hydGlobalState.miscState.unpackImageHeight = value; break;
+                    case WebGL2RenderingContext.UNPACK_SKIP_PIXELS: this.hydGlobalState.miscState.unpackSkipPixels = value; break;
+                    case WebGL2RenderingContext.UNPACK_SKIP_ROWS: this.hydGlobalState.miscState.unpackSkipRows = value; break;
+                    case WebGL2RenderingContext.UNPACK_SKIP_IMAGES: this.hydGlobalState.miscState.unpackSkipImages = value; break;
+                    case WebGL2RenderingContext.PACK_ROW_LENGTH: this.hydGlobalState.miscState.packRowLength = value; break;
+                    case WebGL2RenderingContext.PACK_SKIP_PIXELS: this.hydGlobalState.miscState.packSkipPixels = value; break;
+                    case WebGL2RenderingContext.PACK_SKIP_ROWS: this.hydGlobalState.miscState.packSkipRows = value; break;
+                }
+                this.hydGlobalState.recordTransition("pixelStorei", pname, value);
+                return;
             default:
                 this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_ENUM);
         }
@@ -5731,30 +11444,48 @@ ${assignments}
         if (framebuffer.attachments.size === 0) {
             return WebGL2RenderingContext.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
         }
-        const depthStencilAttachmentCount = [
-            WebGL2RenderingContext.DEPTH_ATTACHMENT,
-            WebGL2RenderingContext.STENCIL_ATTACHMENT,
-            WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT,
-        ].filter((point) => framebuffer.attachments.has(point)).length;
-        if (depthStencilAttachmentCount > 1) {
+        const combined = framebuffer.attachments.get(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT) || null;
+        const depthAttachment = framebuffer.attachments.get(WebGL2RenderingContext.DEPTH_ATTACHMENT) || combined;
+        const stencilAttachment = framebuffer.attachments.get(WebGL2RenderingContext.STENCIL_ATTACHMENT) || combined;
+        if (depthAttachment && stencilAttachment && !this.sameFramebufferImage(depthAttachment, stencilAttachment)) {
             return WebGL2RenderingContext.FRAMEBUFFER_UNSUPPORTED;
+        }
+        const colorImages: FramebufferAttributes[] = [];
+        for (const [attachmentPoint, attachment] of framebuffer.attachments) {
+            if (attachmentPoint < WebGL2RenderingContext.COLOR_ATTACHMENT0 ||
+                attachmentPoint > WebGL2RenderingContext.COLOR_ATTACHMENT15) continue;
+            if (colorImages.some((other) => this.sameFramebufferImage(other, attachment))) {
+                return WebGL2RenderingContext.FRAMEBUFFER_UNSUPPORTED;
+            }
+            colorImages.push(attachment);
         }
         let width: number | null = null;
         let height: number | null = null;
+        let sampleCount: number | null = null;
         for (const [attachmentPoint, attachment] of framebuffer.attachments) {
             if (!attachment.attachment.isConfigured || attachment.width <= 0 || attachment.height <= 0) {
                 return WebGL2RenderingContext.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
             }
-            if (attachment.isCubeFace && !attachment.attachment.isCubeCompleteAtLevel(attachment.level || 0)) {
-                return WebGL2RenderingContext.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            if (attachment.objectType === WebGL2RenderingContext.TEXTURE) {
+                if (!attachment.attachment.isFramebufferAttachmentComplete(
+                    attachment.face,
+                    attachment.level || 0,
+                    attachment.layer,
+                )) {
+                    return WebGL2RenderingContext.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+                }
+                if (attachment.isCubeFace &&
+                    !attachment.attachment.isCubeCompleteAtLevel(attachment.level || 0)) {
+                    return WebGL2RenderingContext.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+                }
             }
             const format = attachment.format;
             const colorAttachment = attachmentPoint >= WebGL2RenderingContext.COLOR_ATTACHMENT0 &&
                 attachmentPoint <= WebGL2RenderingContext.COLOR_ATTACHMENT15;
             if ((attachmentPoint === WebGL2RenderingContext.DEPTH_ATTACHMENT &&
-                    (!format.includes("depth") || format.includes("stencil"))) ||
+                    !format.includes("depth")) ||
                 (attachmentPoint === WebGL2RenderingContext.STENCIL_ATTACHMENT &&
-                    (!format.includes("stencil") || format.includes("depth"))) ||
+                    !format.includes("stencil")) ||
                 (attachmentPoint === WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT &&
                     (!format.includes("depth") || !format.includes("stencil"))) ||
                 (colorAttachment && !attachment.colorRenderable)) {
@@ -5765,12 +11496,9 @@ ${assignments}
             if (attachment.width !== width || attachment.height !== height) {
                 return WebGL2RenderingContext.FRAMEBUFFER_INCOMPLETE_DIMENSIONS;
             }
-        }
-        for (const drawBuffer of framebuffer.drawBuffers) {
-            if (drawBuffer >= WebGL2RenderingContext.COLOR_ATTACHMENT0 &&
-                drawBuffer <= WebGL2RenderingContext.COLOR_ATTACHMENT15 &&
-                !framebuffer.attachments.has(drawBuffer)) {
-                return WebGL2RenderingContext.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
+            sampleCount ??= attachment.sampleCount;
+            if (attachment.sampleCount !== sampleCount) {
+                return WebGL2RenderingContext.FRAMEBUFFER_INCOMPLETE_MULTISAMPLE;
             }
         }
         return WebGL2RenderingContext.FRAMEBUFFER_COMPLETE;
@@ -5798,7 +11526,10 @@ ${assignments}
             if (!collectFlips && !sampler.originFlipUniform) {
                 continue;
             }
-            const texture = this.hydGlobalState.getTextureUnitBinding(sampler.textureUnit, sampler.viewDimension);
+            const texture = this.hydGlobalState.getTextureUnitBinding(
+                sampler.textureUnit,
+                sampler.bindingViewDimension,
+            );
             const shouldFlipY = this.samplerNeedsOriginFlip(texture);
             if (samplerOriginFlips) {
                 samplerOriginFlips.set(sampler.name, shouldFlipY);
@@ -5835,13 +11566,15 @@ ${assignments}
             const attribute = attributes[location];
             if (!attribute.enabled) continue;
             const buffer = attribute.buffer;
-            if (!buffer || buffer.deleted) {
+            if (!buffer) {
                 valid = false;
                 break;
             }
             if (!activeLocations.has(location)) continue;
             const componentBytes = vertexComponentByteSize(attribute.type);
-            const elementBytes = componentBytes * attribute.size;
+            const packed = attribute.type === WebGL2RenderingContext.INT_2_10_10_10_REV ||
+                attribute.type === WebGL2RenderingContext.UNSIGNED_INT_2_10_10_10_REV;
+            const elementBytes = packed ? 4 : componentBytes * attribute.size;
             const stride = attribute.webglStride || elementBytes;
             if (!buffer.buffer || componentBytes === 0 ||
                 !Number.isInteger(attribute.size) || attribute.size < 1 || attribute.size > 4 ||
@@ -5867,9 +11600,43 @@ ${assignments}
     private validateDrawVertexState(maxVertexIndex: number, instanceCount: number, instancedApi: boolean): boolean {
         const limits = this.getDrawValidationLimits();
         if (!limits.valid || maxVertexIndex >= limits.vertexCapacity || instanceCount > limits.instanceCapacity ||
-            (instancedApi && !limits.hasActivePerVertexAttribute)) {
+            (instancedApi && this.hydContextType !== "webgl2" && !limits.hasActivePerVertexAttribute)) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return false;
+        }
+        return true;
+    }
+
+    private validateActiveVertexAttributeTypes(): boolean {
+        const program = this.hydGlobalState.commonState.currentProgram;
+        if (!this.currentProgramValid || !program) return true;
+        const attributes = this.hydGlobalState.commonState.vertexArrayBinding.attributes;
+        for (const programAttribute of program.hydAttributes) {
+            let expectedType: "float" | "int" | "uint" = "float";
+            if (programAttribute.type === WebGL2RenderingContext.INT ||
+                (programAttribute.type >= WebGL2RenderingContext.INT_VEC2 &&
+                    programAttribute.type <= WebGL2RenderingContext.INT_VEC4)) {
+                expectedType = "int";
+            } else if (programAttribute.type === WebGL2RenderingContext.UNSIGNED_INT ||
+                (programAttribute.type >= WebGL2RenderingContext.UNSIGNED_INT_VEC2 &&
+                    programAttribute.type <= WebGL2RenderingContext.UNSIGNED_INT_VEC4)) {
+                expectedType = "uint";
+            }
+            for (let column = 0; column < programAttribute.locationSpan; column++) {
+                const location = programAttribute.location + column;
+                const attribute = attributes[location];
+                const actualType = attribute?.enabled
+                    ? (attribute.int
+                        ? (attribute.type === WebGL2RenderingContext.UNSIGNED_BYTE ||
+                            attribute.type === WebGL2RenderingContext.UNSIGNED_SHORT ||
+                            attribute.type === WebGL2RenderingContext.UNSIGNED_INT ? "uint" : "int")
+                        : "float")
+                    : this.hydGlobalState.currentVertexAttribValueTypes[location];
+                if (actualType !== expectedType) {
+                    this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                    return false;
+                }
+            }
         }
         return true;
     }
@@ -5882,6 +11649,14 @@ ${assignments}
         if (mode === WebGL2RenderingContext.LINE_LOOP) return "line-list";
         if (mode === WebGL2RenderingContext.TRIANGLE_FAN) return "triangle-list";
         return enum2PT[mode];
+    }
+
+    private lastProvokingVertexTopology(mode: GLenum): GPUPrimitiveTopology {
+        return mode === WebGL2RenderingContext.LINES ||
+            mode === WebGL2RenderingContext.LINE_STRIP ||
+            mode === WebGL2RenderingContext.LINE_LOOP
+            ? "line-list"
+            : "triangle-list";
     }
 
     private setPrimitiveState(topology: GPUPrimitiveTopology, stripIndexFormat?: GPUIndexFormat) {
@@ -6050,6 +11825,7 @@ ${assignments}
         // this.renderPassInfo.endPass();
 
         const program = this.hydGlobalState.commonState.currentProgram;
+        program.resolveUniformBlockBindings(this.uniformBufferBindings);
         if (program.fragCoordHeightUniform) {
             const framebufferHeight = this.getDrawFramebufferHeight();
             if (program.fragCoordHeightValue !== framebufferHeight) {
@@ -6070,7 +11846,7 @@ ${assignments}
         }
         if (program.hydSamplers.length > 0) {
             const useSamplerOriginVariants = program.staticSamplerOriginVariants;
-            const samplerCount = useSamplerOriginVariants ? program.hydSampler2D.length : program.hydSamplers.length;
+            const samplerCount = useSamplerOriginVariants ? program.hydOriginSamplers.length : program.hydSamplers.length;
             const samplerOriginVersion = useSamplerOriginVariants
                 ? program.originVariantStateVersion
                 : program.originUniformStateVersion;
@@ -6152,35 +11928,233 @@ ${assignments}
             mode === WebGL2RenderingContext.TRIANGLE_FAN;
     }
 
+    private transformFeedbackModeMatchesDraw(beginMode: GLenum, drawMode: GLenum): boolean {
+        if (beginMode === WebGL2RenderingContext.POINTS) return drawMode === WebGL2RenderingContext.POINTS;
+        if (beginMode === WebGL2RenderingContext.LINES) {
+            return drawMode === WebGL2RenderingContext.LINES ||
+                drawMode === WebGL2RenderingContext.LINE_LOOP ||
+                drawMode === WebGL2RenderingContext.LINE_STRIP;
+        }
+        return drawMode === WebGL2RenderingContext.TRIANGLES ||
+            drawMode === WebGL2RenderingContext.TRIANGLE_STRIP ||
+            drawMode === WebGL2RenderingContext.TRIANGLE_FAN;
+    }
+
+    private drawPrimitiveCount(mode: GLenum, count: number): number {
+        if (mode === WebGL2RenderingContext.POINTS) return count;
+        if (mode === WebGL2RenderingContext.LINES) return Math.floor(count / 2);
+        if (mode === WebGL2RenderingContext.LINE_STRIP) return Math.max(0, count - 1);
+        if (mode === WebGL2RenderingContext.LINE_LOOP) return count > 1 ? count : 0;
+        if (mode === WebGL2RenderingContext.TRIANGLES) return Math.floor(count / 3);
+        return Math.max(0, count - 2);
+    }
+
+    private validateTransformFeedbackDraw(draw: TransformFeedbackDraw): number[] | null {
+        const feedback = this.transformFeedbackBinding;
+        const program = this.hydGlobalState.commonState.currentProgram;
+        if (!this.transformFeedbackModeMatchesDraw(feedback.primitiveMode, draw.mode) ||
+            feedback.activeProgram !== program) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return null;
+        }
+        const bound = feedback.bufferBindings.filter((binding): binding is HydIndexedBufferBinding => !!binding);
+        const buffers = new Set<HydBuffer>();
+        for (const binding of bound) {
+            if (buffers.has(binding.buffer)) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return null;
+            }
+            buffers.add(binding.buffer);
+        }
+        const vao = this.hydGlobalState.commonState.vertexArrayBinding;
+        if (vao.attributes.some((attribute) => attribute.enabled && attribute.buffer && buffers.has(attribute.buffer)) ||
+            (draw.elementBuffer && buffers.has(draw.elementBuffer)) ||
+            program.hydUniformBlocks.some((block) => block.bufferBinding && buffers.has(block.bufferBinding.buffer))) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return null;
+        }
+
+        const vertexCount = transformFeedbackOutputVertexCount(draw.mode, draw.count) * draw.instanceCount;
+        const byteLengths = Array.from({ length: feedback.bufferBindings.length }, () => 0);
+        if (program.transformFeedbackBufferMode === WebGL2RenderingContext.SEPARATE_ATTRIBS) {
+            for (let index = 0; index < program.transformFeedbackVaryingInfo.length; index++) {
+                const varying = program.transformFeedbackVaryingInfo[index];
+                byteLengths[index] = (TRANSFORM_FEEDBACK_TYPE_BYTES.get(varying.type) || 0) * varying.size * vertexCount;
+            }
+        } else {
+            byteLengths[0] = program.transformFeedbackVaryingInfo.reduce((bytes, varying) =>
+                bytes + (TRANSFORM_FEEDBACK_TYPE_BYTES.get(varying.type) || 0) * varying.size, 0) * vertexCount;
+        }
+        for (let index = 0; index < byteLengths.length; index++) {
+            const required = byteLengths[index];
+            if (required === 0) continue;
+            const binding = feedback.bufferBindings[index];
+            if (!binding || !binding.buffer.buffer) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return null;
+            }
+            const available = binding.wholeBuffer
+                ? binding.buffer.webglSize - binding.offset
+                : Math.min(binding.size, binding.buffer.webglSize - binding.offset);
+            if (feedback.writeOffsets[index] + required > available) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return null;
+            }
+        }
+        return byteLengths;
+    }
+
+    private executeActiveTransformFeedback(draw: TransformFeedbackDraw): boolean {
+        if (!this.transformFeedbackBinding.active || this.transformFeedbackBinding.paused) return true;
+        const byteLengths = this.validateTransformFeedbackDraw(draw);
+        if (!byteLengths) return false;
+        draw.feedbackByteLengths = byteLengths;
+        if (!this.transformFeedbackExecutor) {
+            const canvas = document.createElement("canvas");
+            const gl = NATIVE_CANVAS_GET_CONTEXT.call(canvas, "webgl2", {
+                alpha: false,
+                antialias: false,
+                depth: false,
+                stencil: false,
+            }) as WebGL2RenderingContext | null;
+            if (!gl) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return false;
+            }
+            this.transformFeedbackExecutor = new HydTransformFeedbackExecutor(gl);
+        }
+        const program = this.hydGlobalState.commonState.currentProgram;
+        program.resolveUniformBlockBindings(this.uniformBufferBindings);
+        const error = this.transformFeedbackExecutor.execute(
+            program,
+            this.hydGlobalState.commonState.vertexArrayBinding,
+            this.hydGlobalState.currentVertexAttribValues,
+            this.hydGlobalState.currentVertexAttribValueTypes,
+            this.transformFeedbackBinding,
+            draw,
+        );
+        if (error !== WebGL2RenderingContext.NO_ERROR) {
+            this.hydGlobalState.setError(error);
+            return false;
+        }
+        const query = this.activeQueries.get(WebGL2RenderingContext.TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN);
+        if (query) query.result += this.drawPrimitiveCount(draw.mode, draw.count) * draw.instanceCount;
+        return true;
+    }
+
     private validateFramebufferAndStencilForDraw(): boolean {
+        const stateToken = this.hydGlobalState.stateToken;
+        const generation = this.drawSemanticValidationGeneration;
+        if (this.successfulDrawSemanticValidations.get(stateToken) === generation) return true;
+        const validated = () => {
+            this.successfulDrawSemanticValidations.set(stateToken, generation);
+            return true;
+        };
         const framebuffer = this.hydGlobalState.commonState.drawFramebufferBinding;
         if (this.framebufferStatus(framebuffer) !== WebGL2RenderingContext.FRAMEBUFFER_COMPLETE) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_FRAMEBUFFER_OPERATION);
             return false;
         }
+        if (!this.validateActiveVertexAttributeTypes()) return false;
+        if (this.currentProgramValid && !this.validateSamplerTextureCompatibilityForDraw()) return false;
         if (this.currentProgramValid && framebuffer !== this.hydGlobalState.defaultFramebuffer) {
-            const attachedTextures = new Set(
-                Array.from(framebuffer.attachments.values(), (attachment) => attachment.attachment),
-            );
             const feedbackLoop = this.hydGlobalState.commonState.currentProgram.hydSamplers.some((sampler) => {
-                const texture = this.hydGlobalState.getTextureUnitBinding(sampler.textureUnit, sampler.viewDimension);
-                return texture !== null &&
-                    texture.isSamplingComplete(sampler.viewDimension, this.hydContextType === "webgl2" ? 2 : 1) &&
-                    attachedTextures.has(texture);
+                const texture = this.hydGlobalState.getTextureUnitBinding(
+                    sampler.textureUnit, sampler.bindingViewDimension);
+                const samplerState = this.samplerBindings[sampler.textureUnit]?.completenessState;
+                const webglVersion = this.hydContextType === "webgl2" ? 2 : 1;
+                if (!texture || !texture.isSamplingComplete(
+                    sampler.bindingViewDimension, webglVersion, samplerState)) return false;
+                const range = texture.getSamplingMipRange(
+                    sampler.bindingViewDimension, webglVersion, samplerState);
+                return Array.from(framebuffer.attachments.values()).some((attachment) =>
+                    attachment.objectType === WebGL2RenderingContext.TEXTURE &&
+                    attachment.attachment === texture &&
+                    (attachment.level || 0) >= range.baseLevel &&
+                    (attachment.level || 0) <= range.sampledLastLevel);
             });
             if (feedbackLoop) {
                 this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
                 return false;
             }
         }
-        if (!this.hydGlobalState.stencilState.enabled) return true;
+        if (this.currentProgramValid) {
+            const program = this.hydGlobalState.commonState.currentProgram;
+            const outputLocations = new Set(program.fragmentOutputLocations.values());
+            const colorWritesEnabled = this.hydGlobalState.miscState.colorWriteMask.some(Boolean);
+            if (colorWritesEnabled && !this.hydGlobalState.miscState.rasterizerDiscard) {
+                for (let index = 0; index < framebuffer.drawBuffers.length; index++) {
+                    const drawBuffer = framebuffer.drawBuffers[index];
+                    if (drawBuffer === WebGL2RenderingContext.NONE) continue;
+                    const attachment = framebuffer === this.hydGlobalState.defaultFramebuffer
+                        ? (drawBuffer === WebGL2RenderingContext.BACK ? null : undefined)
+                        : framebuffer.attachments.get(drawBuffer);
+                    if (attachment === undefined ||
+                        (framebuffer !== this.hydGlobalState.defaultFramebuffer && !attachment)) {
+                        continue;
+                    }
+                    if (!outputLocations.has(index)) {
+                        this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                        return false;
+                    }
+                    const outputType = program.fragmentOutputTypes.get(index) || "float";
+                    const attachmentType = attachment === null
+                        ? "float"
+                        : attachment.format.endsWith("uint")
+                            ? "uint"
+                            : attachment.format.endsWith("sint")
+                                ? "sint"
+                                : "float";
+                    if (outputType !== attachmentType) {
+                        this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                        return false;
+                    }
+                }
+            }
+            program.resolveUniformBlockBindings(this.uniformBufferBindings);
+            const feedbackOutputs = new Set(
+                this.transformFeedbackBinding.bufferBindings
+                    .map((binding) => binding?.buffer)
+                    .filter((buffer): buffer is HydBuffer => !!buffer),
+            );
+            const outputUsedByDraw = this.hydGlobalState.commonState.vertexArrayBinding.attributes.some((attribute) =>
+                attribute.enabled && attribute.buffer && feedbackOutputs.has(attribute.buffer)) ||
+                program.hydUniformBlocks.some((block) =>
+                    block.bufferBinding && feedbackOutputs.has(block.bufferBinding.buffer));
+            const common = this.hydGlobalState.commonState;
+            const outputHasActiveGenericConflict = this.transformFeedbackBinding.active && [
+                common.arrayBufferBinding,
+                common.copyReadBufferBinding,
+                common.copyWriteBufferBinding,
+                common.pixelPackBufferBinding,
+                common.pixelUnpackBufferBinding,
+                common.uniformBufferBinding,
+            ].some((buffer) => buffer && feedbackOutputs.has(buffer));
+            if (outputUsedByDraw || outputHasActiveGenericConflict) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return false;
+            }
+            for (const block of program.hydUniformBlocks) {
+                const binding = block.bufferBinding;
+                const effectiveSize = binding?.wholeBuffer
+                    ? Math.max(0, binding.buffer.webglSize - binding.offset)
+                    : binding?.size || 0;
+                if (block.resourceBinding < 0 || !binding || binding.buffer.deleted || !binding.buffer.buffer ||
+                    binding.offset < 0 || effectiveSize < block.dataSize ||
+                    binding.offset + block.dataSize > binding.buffer.webglSize) {
+                    this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                    return false;
+                }
+            }
+        }
+        if (!this.hydGlobalState.stencilState.enabled) return validated();
         const hasStencil = framebuffer === this.hydGlobalState.defaultFramebuffer
             ? this.hydGlobalState.contextAttributes.stencil === true
             : Array.from(framebuffer.attachments.entries()).some(([point, attachment]) =>
                 (point === WebGL2RenderingContext.STENCIL_ATTACHMENT ||
                     point === WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT) &&
                 attachment.format.includes("stencil"));
-        if (!hasStencil) return true;
+        if (!hasStencil) return validated();
 
         const state = this.hydGlobalState.stencilState;
         const stencilMask = 0xff;
@@ -6192,7 +12166,61 @@ ${assignments}
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return false;
         }
+        return validated();
+    }
+
+    private invalidateDrawSemanticValidation() {
+        this.drawSemanticValidationGeneration++;
+    }
+
+    private validateSamplerTextureCompatibilityForDraw(): boolean {
+        const samplersByUnit = new Map<number, GLenum>();
+        for (const sampler of this.hydGlobalState.commonState.currentProgram.hydSamplers) {
+            const priorType = samplersByUnit.get(sampler.textureUnit);
+            if (priorType !== undefined && priorType !== sampler.webgl_type) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return false;
+            }
+            samplersByUnit.set(sampler.textureUnit, sampler.webgl_type);
+
+            const texture = this.hydGlobalState.getTextureUnitBinding(
+                sampler.textureUnit,
+                sampler.bindingViewDimension,
+            );
+            const textureClass = texture?.getBaseLevelSamplingClass();
+            if (!texture || !textureClass) continue;
+            const samplerObject = this.samplerBindings[sampler.textureUnit] || null;
+            const compareMode = samplerObject?.getParameter(WebGL2RenderingContext.TEXTURE_COMPARE_MODE) ??
+                texture.webglParameters.get(WebGL2RenderingContext.TEXTURE_COMPARE_MODE) ??
+                WebGL2RenderingContext.NONE;
+            const compatible = sampler.sampleType === "depth"
+                ? textureClass === "depth" && compareMode === WebGL2RenderingContext.COMPARE_REF_TO_TEXTURE
+                : sampler.sampleType === "float"
+                    ? textureClass === "float" ||
+                        (textureClass === "depth" && compareMode === WebGL2RenderingContext.NONE)
+                    : sampler.sampleType === textureClass;
+            if (!compatible) {
+                this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+                return false;
+            }
+        }
         return true;
+    }
+
+    private currentDrawHasGpuAttachment(): boolean {
+        const framebuffer = this.hydGlobalState.commonState.drawFramebufferBinding;
+        const hasColor = framebuffer.drawBuffers.some((drawBuffer) =>
+            drawBuffer === WebGL2RenderingContext.BACK ||
+            (drawBuffer !== WebGL2RenderingContext.NONE && framebuffer.attachments.has(drawBuffer)));
+        if (hasColor) return true;
+        if (this.hydGlobalState.depthState.enabled &&
+            (framebuffer.attachments.has(WebGL2RenderingContext.DEPTH_ATTACHMENT) ||
+                framebuffer.attachments.has(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT))) {
+            return true;
+        }
+        return this.hydGlobalState.stencilState.enabled &&
+            (framebuffer.attachments.has(WebGL2RenderingContext.STENCIL_ATTACHMENT) ||
+                framebuffer.attachments.has(WebGL2RenderingContext.DEPTH_STENCIL_ATTACHMENT));
     }
 
     private getTriangleFanIndexBuffer(vertexCount: number): GPUBuffer {
@@ -6242,12 +12270,56 @@ ${assignments}
         return buffer;
     }
 
+    private getLastProvokingVertexIndexBuffer(mode: GLenum, vertexCount: number): { buffer: GPUBuffer, indexCount: number } {
+        const key = `${mode}:${vertexCount}`;
+        const cached = this.lastProvokingVertexIndexBuffers.get(key);
+        if (cached) return cached;
+        const source = Array.from({ length: vertexCount }, (_, index) => index);
+        const output: number[] = [];
+        if (mode === WebGL2RenderingContext.LINES) {
+            for (let index = 0; index + 1 < source.length; index += 2) output.push(index + 1, index);
+        } else if (mode === WebGL2RenderingContext.LINE_STRIP) {
+            for (let index = 0; index + 1 < source.length; index++) output.push(index + 1, index);
+        } else if (mode === WebGL2RenderingContext.LINE_LOOP) {
+            if (source.length >= 2) {
+                for (let index = 0; index + 1 < source.length; index++) output.push(index + 1, index);
+                output.push(0, source.length - 1);
+            }
+        } else if (mode === WebGL2RenderingContext.TRIANGLES) {
+            for (let index = 0; index + 2 < source.length; index += 3) output.push(index + 2, index, index + 1);
+        } else if (mode === WebGL2RenderingContext.TRIANGLE_STRIP) {
+            for (let index = 0; index + 2 < source.length; index++) {
+                if ((index & 1) === 0) output.push(index + 2, index, index + 1);
+                else output.push(index + 2, index + 1, index);
+            }
+        } else if (mode === WebGL2RenderingContext.TRIANGLE_FAN) {
+            for (let index = 1; index + 1 < source.length; index++) output.push(index + 1, 0, index);
+        }
+        const indices = new Uint32Array(output);
+        const buffer = this.hydDevice.createBuffer({
+            label: `last-provoking-index-buffer-${mode}-${vertexCount}`,
+            size: Math.max(4, indices.byteLength),
+            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        });
+        if (indices.byteLength > 0) {
+            this.hydDevice.queue.writeBuffer(buffer, 0, indices.buffer, indices.byteOffset, indices.byteLength);
+        }
+        const result = { buffer, indexCount: indices.length };
+        this.lastProvokingVertexIndexBuffers.set(key, result);
+        return result;
+    }
+
     drawArrays(mode: GLenum, first: GLint, count: GLsizei) {
         if (!this.validateFramebufferAndStencilForDraw()) return;
+        if (this.transformFeedbackBinding.active && !this.transformFeedbackBinding.paused) {
+            this.drawArraysInternal(mode, first, count, 1, false, this.shouldCullAllTriangles(mode));
+            return;
+        }
         if (this.shouldCullAllTriangles(mode)) {
             this.drawArraysInternal(mode, first, count, 1, false, true);
             return;
         }
+        if (!this.currentDrawHasGpuAttachment()) return;
         const stateToken = this.hydGlobalState.stateToken;
         const prepared = this.lastArrayDraw;
         if (this.currentProgramValid && prepared && prepared.stateToken === stateToken &&
@@ -6280,10 +12352,15 @@ ${assignments}
 
     drawArraysInstanced(mode: GLenum, first: GLint, count: GLsizei, instanceCount: GLsizei) {
         if (!this.validateFramebufferAndStencilForDraw()) return;
+        if (this.transformFeedbackBinding.active && !this.transformFeedbackBinding.paused) {
+            this.drawArraysInternal(mode, first, count, instanceCount, true, this.shouldCullAllTriangles(mode));
+            return;
+        }
         if (this.shouldCullAllTriangles(mode)) {
             this.drawArraysInternal(mode, first, count, instanceCount, true, true);
             return;
         }
+        if (!this.currentDrawHasGpuAttachment()) return;
         const prepared = this.findPreparedArrayDraw(mode, first, count, instanceCount, true);
         if (prepared) {
             this.executePreparedArrayDraw(prepared);
@@ -6316,13 +12393,24 @@ ${assignments}
         }
         if (count === 0 || instanceCount === 0) return;
         if (!this.validateDrawVertexState(first + count - 1, instanceCount, instancedApi)) return;
+        if (!this.executeActiveTransformFeedback({ mode, first, count, instanceCount })) return;
+        if (this.hydGlobalState.miscState.rasterizerDiscard) return;
         if (cullAll) return;
+        if (!this.currentDrawHasGpuAttachment()) return;
         if (!this.currentDrawTargetHasSize()) return;
-        this.setPrimitiveState(topology);
+        const needsLastProvokingVertex = this.hydGlobalState.commonState.currentProgram.usesFlatInterpolation &&
+            mode !== WebGL2RenderingContext.POINTS;
+        this.setPrimitiveState(needsLastProvokingVertex ? this.lastProvokingVertexTopology(mode) : topology);
         this.setPBV();
         let indexBuffer: GPUBuffer | undefined;
         let indexCount: number | undefined;
-        if (mode === WebGL2RenderingContext.TRIANGLE_FAN) {
+        if (needsLastProvokingVertex) {
+            const expanded = this.getLastProvokingVertexIndexBuffer(mode, count);
+            indexBuffer = expanded.buffer;
+            indexCount = expanded.indexCount;
+            this.hydRpCache.RpSetIndexBuffer(indexBuffer, "uint32");
+            this.hydRpCache.RpDrawIndexed(indexCount, instanceCount, 0, first, 0);
+        } else if (mode === WebGL2RenderingContext.TRIANGLE_FAN) {
             indexBuffer = this.getTriangleFanIndexBuffer(count);
             indexCount = Math.max(0, count - 2) * 3;
             this.hydRpCache.RpSetIndexBuffer(indexBuffer, "uint32");
@@ -6352,10 +12440,15 @@ ${assignments}
 
     drawElements(mode: GLenum, count: GLsizei, type: GLenum, offset: GLintptr) {
         if (!this.validateFramebufferAndStencilForDraw()) return;
+        if (this.transformFeedbackBinding.active && !this.transformFeedbackBinding.paused) {
+            this.drawElementsInternal(mode, count, type, offset, 1, false, this.shouldCullAllTriangles(mode));
+            return;
+        }
         if (this.shouldCullAllTriangles(mode)) {
             this.drawElementsInternal(mode, count, type, offset, 1, false, true);
             return;
         }
+        if (!this.currentDrawHasGpuAttachment()) return;
         if (this.currentProgramValid) {
             const stateToken = this.hydGlobalState.stateToken;
             const prepared = this.lastIndexedDraw;
@@ -6380,12 +12473,27 @@ ${assignments}
         this.drawElementsInternal(mode, count, type, offset, 1, false);
     }
 
+    drawRangeElements(mode: GLenum, start: GLuint, end: GLuint, count: GLsizei, type: GLenum, offset: GLintptr) {
+        start = Number(start) >>> 0;
+        end = Number(end) >>> 0;
+        if (end < start) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_VALUE);
+            return;
+        }
+        this.drawElements(mode, count, type, offset);
+    }
+
     drawElementsInstanced(mode: GLenum, count: GLsizei, type: GLenum, offset: GLintptr, instanceCount: GLsizei) {
         if (!this.validateFramebufferAndStencilForDraw()) return;
+        if (this.transformFeedbackBinding.active && !this.transformFeedbackBinding.paused) {
+            this.drawElementsInternal(mode, count, type, offset, instanceCount, true, this.shouldCullAllTriangles(mode));
+            return;
+        }
         if (this.shouldCullAllTriangles(mode)) {
             this.drawElementsInternal(mode, count, type, offset, instanceCount, true, true);
             return;
         }
+        if (!this.currentDrawHasGpuAttachment()) return;
         const prepared = this.findPreparedIndexedDraw(mode, count, type, offset, instanceCount, true);
         if (prepared) {
             this.executePreparedIndexedDraw(prepared);
@@ -6436,14 +12544,34 @@ ${assignments}
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
+        // WebGL 2 forbids indexed draws while transform feedback is active.
+        // This validation still applies to zero-count draws, which otherwise
+        // return before the transform-feedback execution path is reached.
+        if (this.transformFeedbackBinding.active && !this.transformFeedbackBinding.paused) {
+            this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
+            return;
+        }
         if (count === 0 || instanceCount === 0) return;
         if (!elementArrayBuffer.buffer || offset + count * indexSize > elementArrayBuffer.webglSize) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
-        const maxIndex = elementArrayBuffer.maxIndex(type, offset, count);
+        const restartIndices = this.hydContextType === "webgl2"
+            ? elementArrayBuffer.getFixedRestartIndexBuffer(mode, type, offset, count)
+            : null;
+        const maxIndex = restartIndices?.maxIndex ?? elementArrayBuffer.maxIndex(type, offset, count);
         if (!this.validateDrawVertexState(maxIndex, instanceCount, instancedApi)) return;
+        if (!this.executeActiveTransformFeedback({
+            mode,
+            count,
+            instanceCount,
+            elementBuffer: elementArrayBuffer,
+            elementType: type,
+            elementOffset: offset,
+        })) return;
+        if (this.hydGlobalState.miscState.rasterizerDiscard) return;
         if (cullAll) return;
+        if (!this.currentDrawHasGpuAttachment()) return;
         if (!this.currentDrawTargetHasSize()) return;
 
         let indexBuffer = elementArrayBuffer.buffer;
@@ -6459,14 +12587,37 @@ ${assignments}
 
         let drawIndexCount = count;
         let firstIndex = Math.floor(offset / indexSize);
-        if (mode === WebGL2RenderingContext.TRIANGLE_FAN || mode === WebGL2RenderingContext.LINE_LOOP) {
+        if (restartIndices) {
+            indexBuffer = restartIndices.buffer;
+            indexFormat = restartIndices.format;
+            drawIndexCount = restartIndices.indexCount;
+            firstIndex = 0;
+        } else if (mode === WebGL2RenderingContext.TRIANGLE_FAN || mode === WebGL2RenderingContext.LINE_LOOP) {
             const expanded = elementArrayBuffer.getExpandedIndexBuffer(mode, type, offset, count);
             indexBuffer = expanded.buffer;
             indexFormat = expanded.format;
             drawIndexCount = expanded.indexCount;
             firstIndex = 0;
         }
-        this.setPrimitiveState(topology, indexFormat);
+        const needsLastProvokingVertex = this.hydGlobalState.commonState.currentProgram.usesFlatInterpolation &&
+            mode !== WebGL2RenderingContext.POINTS;
+        if (needsLastProvokingVertex) {
+            const expanded = elementArrayBuffer.getLastProvokingVertexIndexBuffer(
+                mode,
+                type,
+                offset,
+                count,
+                this.hydContextType === "webgl2",
+            );
+            indexBuffer = expanded.buffer;
+            indexFormat = expanded.format;
+            drawIndexCount = expanded.indexCount;
+            firstIndex = 0;
+        }
+        this.setPrimitiveState(
+            needsLastProvokingVertex ? this.lastProvokingVertexTopology(mode) : topology,
+            indexFormat,
+        );
         this.setPBV();
         this.hydRpCache.RpSetIndexBuffer(indexBuffer, indexFormat);
         this.hydRpCache.RpDrawIndexed(drawIndexCount, instanceCount, firstIndex, 0, 0);
