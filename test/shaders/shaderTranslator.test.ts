@@ -18,6 +18,10 @@ import {
 } from "../../src/components/shaderWgslRobustness";
 import { preserveFlatFloatVaryingBits } from "../../src/components/shaderWgslFlatVaryings";
 import {
+    lowerBooleanUniformSpecializations,
+    selectBooleanUniformSpecializations,
+} from "../../src/components/shaderWgslUniformSpecialization";
+import {
     composeShaderModuleWgsl,
     renameReservedWgslIdentifiers,
     replaceBareWgslIdentifier,
@@ -276,6 +280,36 @@ if (robustArrayLoad.rewrittenLoads !== 1 ||
         "select(coord.y, size.y - 1i - coord.y, flipY > 0.5f)") ||
     !robustArrayLoad.wgsl.includes("return vec4i(0i);")) {
     throw new Error(`unexpected robust array textureLoad lowering:\n${robustArrayLoad.wgsl}`);
+}
+
+const booleanSpecializationSource = `
+struct HydUniforms { enabled: u32, enabled2: u32, rare: u32 };
+@group(0) @binding(0) var<uniform> _hyd_uniforms_: HydUniforms;
+fn choose() -> u32 {
+  if (_hyd_uniforms_.enabled != 0u) { return _hyd_uniforms_.enabled; }
+  return _hyd_uniforms_.enabled2 + _hyd_uniforms_.rare;
+}`;
+const booleanSpecializations = selectBooleanUniformSpecializations([
+    { name: "enabled", glsl_type: "bool", wgsl_type: "u32" },
+    { name: "enabled2", glsl_type: "bool", wgsl_type: "u32" },
+    { name: "rare", glsl_type: "bool", wgsl_type: "u32" },
+    { name: "internal", glsl_type: "bool", wgsl_type: "u32", internal: true },
+    { name: "vector", glsl_type: "bvec2", wgsl_type: "vec2<u32>" },
+], [booleanSpecializationSource], 1);
+if (booleanSpecializations.length !== 1 || booleanSpecializations[0].uniformName !== "enabled" ||
+    booleanSpecializations[0].referenceCount !== 2) {
+    throw new Error(`unexpected boolean uniform specialization selection: ${JSON.stringify(booleanSpecializations)}`);
+}
+const loweredBooleanSpecialization = lowerBooleanUniformSpecializations(
+    booleanSpecializationSource,
+    booleanSpecializations,
+);
+const enabledOverride = loweredBooleanSpecialization.overrides.get("enabled");
+if (!enabledOverride ||
+    !loweredBooleanSpecialization.wgsl.includes(`override ${enabledOverride}: u32 = 0u;`) ||
+    loweredBooleanSpecialization.wgsl.includes("_hyd_uniforms_.enabled !=") ||
+    !loweredBooleanSpecialization.wgsl.includes("_hyd_uniforms_.enabled2")) {
+    throw new Error(`unexpected boolean uniform specialization lowering:\n${loweredBooleanSpecialization.wgsl}`);
 }
 const preclampedIntegerLoad = enforceWebGlTextureLoadBounds(
     "fn x_hyd_integer_texture_i_2d(tex: texture_2d<i32>, coord: vec2i) -> vec4i { " +

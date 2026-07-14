@@ -2888,6 +2888,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         x2: number = 0,
         x3: number = 0,
     ) {
+        const previous = this.specializedBooleanValue(buffer);
         const target = components === 1 ? buffer.writeUniform1fBooleanView
             : components === 2 ? buffer.writeUniform2fBooleanView
                 : components === 3 ? buffer.writeUniform3fBooleanView
@@ -2901,6 +2902,22 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         if (components > 1) target[offset + 1] = x1 !== 0 ? 1 : 0;
         if (components > 2) target[offset + 2] = x2 !== 0 ? 1 : 0;
         if (components > 3) target[offset + 3] = x3 !== 0 ? 1 : 0;
+        this.recordSpecializedBooleanChange(buffer, previous);
+    }
+
+    private specializedBooleanValue(buffer: ProgramUniformBuffer): number | null {
+        if (buffer.webgl_type !== WebGL2RenderingContext.BOOL ||
+            !buffer.program?.hasBooleanUniformSpecialization(buffer) || !buffer.int32View) {
+            return null;
+        }
+        return buffer.int32View[buffer.wordOffset] !== 0 ? 1 : 0;
+    }
+
+    private recordSpecializedBooleanChange(buffer: ProgramUniformBuffer, previous: number | null) {
+        if (previous === null) return;
+        const next = this.specializedBooleanValue(buffer);
+        if (next === null || next === previous) return;
+        this.hydGlobalState.recordTransition("uniformBooleanSpecialization", buffer.name, next);
     }
 
     uniform1f(pub: ProgramUniformBuffer | ProgramUniformSampler, x0: number) {
@@ -2973,6 +2990,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             return;
         }
         if (!this.validateScalarUniformType(uniform, WebGL2RenderingContext.INT, WebGL2RenderingContext.BOOL)) return;
+        const previous = this.specializedBooleanValue(uniform);
         const a = uniform.writeInt32View;
         if (!a) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
@@ -2980,6 +2998,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         }
         const offset = uniform.wordOffset;
         a[offset] = x0;
+        this.recordSpecializedBooleanChange(uniform, previous);
     }
     uniform2i(pub: ProgramUniformBuffer | ProgramUniformSampler, x0: number, x1: number) {
         if (pub === null) return;
@@ -3024,12 +3043,14 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         if (pub === null) return;
         if (!this.validateScalarUniformType(pub, WebGL2RenderingContext.UNSIGNED_INT, WebGL2RenderingContext.BOOL)) return;
         const writesBoolean = pub.webgl_type === WebGL2RenderingContext.BOOL;
+        const previous = this.specializedBooleanValue(pub);
         const a = writesBoolean ? pub.writeInt32View : pub.writeUint32View;
         if (!a) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
         a[pub.wordOffset] = writesBoolean ? Number(x0) !== 0 ? 1 : 0 : x0 >>> 0;
+        this.recordSpecializedBooleanChange(pub, previous);
     }
     uniform2ui(pub: ProgramUniformBuffer | ProgramUniformSampler, x0: number, x1: number) {
         if (pub === null) return;
@@ -3116,6 +3137,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             ? WebGL2RenderingContext.BOOL
             : WebGL2RenderingContext.BOOL_VEC2 + components - 2;
         const writesBoolean = pub.webgl_type === boolType;
+        const previous = this.specializedBooleanValue(pub);
         const target = writesBoolean ? pub.writeInt32View : pub.writeFloat32View;
         if (!target) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
@@ -3143,6 +3165,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             if (components > 1) target[offset + 1] = writesBoolean ? Number(source[1]) !== 0 ? 1 : 0 : source[1];
             if (components > 2) target[offset + 2] = writesBoolean ? Number(source[2]) !== 0 ? 1 : 0 : source[2];
             if (components > 3) target[offset + 3] = writesBoolean ? Number(source[3]) !== 0 ? 1 : 0 : source[3];
+            this.recordSpecializedBooleanChange(pub, previous);
             return;
         }
         if (!writesBoolean && stride === components && valueCount === length && ArrayBuffer.isView(source)) {
@@ -3159,6 +3182,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                     : sourceValue;
             }
         }
+        this.recordSpecializedBooleanChange(pub, previous);
     }
 
     private writeIntUniformArray(
@@ -3173,6 +3197,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         const source = this.uniformSourceSubrange(value, srcOffset, srcLength);
         if (!source) return;
         const length = this.uniformArrayLength(source);
+        const previous = this.specializedBooleanValue(pub);
         const target = pub.writeInt32View;
         if (!target) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
@@ -3200,10 +3225,12 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             if (components > 1) target[offset + 1] = source[1];
             if (components > 2) target[offset + 2] = source[2];
             if (components > 3) target[offset + 3] = source[3];
+            this.recordSpecializedBooleanChange(pub, previous);
             return;
         }
         if (stride === components && valueCount === length && ArrayBuffer.isView(source)) {
             target.set(source, pub.wordOffset);
+            this.recordSpecializedBooleanChange(pub, previous);
             return;
         }
         for (let element = 0; element < elements; element++) {
@@ -3213,6 +3240,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                 target[targetOffset + component] = source[sourceOffset + component];
             }
         }
+        this.recordSpecializedBooleanChange(pub, previous);
     }
 
     private writeUintUniformArray(
@@ -3227,6 +3255,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         const source = this.uniformSourceSubrange(value, srcOffset, srcLength);
         if (!source) return;
         const length = this.uniformArrayLength(source);
+        const previous = this.specializedBooleanValue(pub);
         const target = pub.writeUint32View;
         if (!target) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
@@ -3254,10 +3283,12 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             if (components > 1) target[offset + 1] = source[1] >>> 0;
             if (components > 2) target[offset + 2] = source[2] >>> 0;
             if (components > 3) target[offset + 3] = source[3] >>> 0;
+            this.recordSpecializedBooleanChange(pub, previous);
             return;
         }
         if (stride === components && valueCount === length && ArrayBuffer.isView(source)) {
             target.set(source, pub.wordOffset);
+            this.recordSpecializedBooleanChange(pub, previous);
             return;
         }
         for (let element = 0; element < elements; element++) {
@@ -3267,6 +3298,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                 target[targetOffset + component] = source[sourceOffset + component] >>> 0;
             }
         }
+        this.recordSpecializedBooleanChange(pub, previous);
     }
 
     uniform1fv(pub: ProgramUniformBuffer, v: ArrayLike<number>, srcOffset: GLuint = 0, srcLength: GLuint = 0) {
@@ -12744,6 +12776,20 @@ fn fragmentMain(@builtin(position) position : vec4f${sampleParameter}) {
         if (!this.currentDrawHasGpuAttachment()) return;
         if (!this.currentDrawTargetHasSize()) return;
 
+        const quadStripMode = (globalThis as any).__HYD_QUAD_STRIP_FAST_PATH;
+        const program = this.hydGlobalState.commonState.currentProgram;
+        const canUseQuadStrip = Boolean(quadStripMode) && mode === WebGL2RenderingContext.TRIANGLES &&
+            count === 6 && elementArrayBuffer.matchesIndexSequence(type, offset, [0, 1, 2, 2, 1, 3]) &&
+            !program.activeBuiltInAttributes.some((attribute) => attribute.name === "gl_VertexID") &&
+            (!program.usesFlatInterpolation || quadStripMode === "force");
+        if (canUseQuadStrip) {
+            this.setPrimitiveState("triangle-strip");
+            this.setPBV();
+            this.hydRpCache.RpDraw(4, instanceCount, 0, 0);
+            this.finishDraw();
+            return;
+        }
+
         let indexBuffer = elementArrayBuffer.buffer;
         let indexFormat: GPUIndexFormat;
         if (type === WebGL2RenderingContext.UNSIGNED_SHORT) {
@@ -12769,7 +12815,7 @@ fn fragmentMain(@builtin(position) position : vec4f${sampleParameter}) {
             drawIndexCount = expanded.indexCount;
             firstIndex = 0;
         }
-        const needsLastProvokingVertex = this.hydGlobalState.commonState.currentProgram.usesFlatInterpolation &&
+        const needsLastProvokingVertex = program.usesFlatInterpolation &&
             mode !== WebGL2RenderingContext.POINTS;
         if (needsLastProvokingVertex) {
             const expanded = elementArrayBuffer.getLastProvokingVertexIndexBuffer(

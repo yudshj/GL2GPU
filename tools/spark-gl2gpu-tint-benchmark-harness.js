@@ -7,7 +7,7 @@ const { spawnSync } = require("child_process");
 
 const repoRoot = path.resolve(__dirname, "..");
 const releaseRoot = path.join(repoRoot, "dist", "release");
-const outputRoot = path.join(repoRoot, "output", "spark-gl2gpu-tint-benchmark");
+const defaultOutputRoot = path.join(repoRoot, "output", "spark-gl2gpu-tint-benchmark");
 const depsRoot = path.join(repoRoot, "output", "spark-gl2gpu-tint-benchmark-deps");
 const sparkRepoRoot = process.env.SPARK_REPO_ROOT || "/Volumes/Code/spark";
 const defaultSparkRoot = process.env.SPARK_ROOT || "/Volumes/Code/spark-worktrees/v2.1.0";
@@ -66,11 +66,32 @@ const rmseThreshold = Number(argv.get("rmse-threshold") || 0.02);
 const captureShaders = argv.get("capture-shaders") === "true";
 const debugState = argv.get("debug-state") === "true";
 const optimizeTintWgsl = argv.get("optimize-tint-wgsl") !== "false";
+const specializeBooleanUniforms = argv.get("specialize-boolean-uniforms") !== "false";
+const enforceTextureLoadBounds = argv.get("enforce-texture-load-bounds") !== "false";
+const quadStripFastPath = argv.get("quad-strip-fast-path") || "false";
 const preflightOnly = argv.get("preflight-only") === "true";
 const skipPreflight = argv.get("skip-preflight") === "true";
 const allowInstallDeps = argv.get("install-deps") !== "false";
 const cameraTransformCandidates = parseList(argv.get("camera-transforms") || "opencv-column");
 const cameraFileOverride = argv.get("camera-file") ? path.resolve(argv.get("camera-file")) : null;
+const outputRoot = path.resolve(argv.get("output-dir") || process.env.SPARK_BENCH_OUTPUT_ROOT || defaultOutputRoot);
+const measurementMode = argv.get("measurement-mode") || "raf";
+const throughputBatches = Number(argv.get("throughput-batches") || 7);
+const throughputFramesPerBatch = Number(argv.get("throughput-frames-per-batch") || 4);
+const throughputWarmupBatches = Number(argv.get("throughput-warmup-batches") || 1);
+
+if (!new Set(["raf", "gpu-throughput"]).has(measurementMode)) {
+  throw new Error(`Unsupported --measurement-mode: ${measurementMode}`);
+}
+for (const [name, value] of [
+  ["throughput-batches", throughputBatches],
+  ["throughput-frames-per-batch", throughputFramesPerBatch],
+  ["throughput-warmup-batches", throughputWarmupBatches],
+]) {
+  if (!Number.isInteger(value) || value < (name === "throughput-warmup-batches" ? 0 : 1)) {
+    throw new Error(`--${name} must be a valid non-negative/positive integer, got ${value}`);
+  }
+}
 
 function parseList(value) {
   if (value === "all") return ["all"];
@@ -244,7 +265,7 @@ function sceneByNameMap(scenes = sceneDefinitions) {
   return new Map(scenes.map((scene) => [scene.name, scene]));
 }
 
-function benchmarkHtml(scene, mode, transform, frames, warmup) {
+function benchmarkHtml(scene, mode, transform, frames, warmup, measurement = {}) {
   const camera = readCamera(scene);
   const size = canvasSize(camera);
   const config = {
@@ -258,9 +279,16 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
     height: size.height,
     frames,
     warmup,
+    measurementMode: measurement.measurementMode || measurementMode,
+    throughputBatches: measurement.throughputBatches ?? throughputBatches,
+    throughputFramesPerBatch: measurement.throughputFramesPerBatch ?? throughputFramesPerBatch,
+    throughputWarmupBatches: measurement.throughputWarmupBatches ?? throughputWarmupBatches,
     captureShaders,
     debugState,
     optimizeTintWgsl,
+    specializeBooleanUniforms,
+    enforceTextureLoadBounds,
+    quadStripFastPath,
   };
   return `<!doctype html>
 <html>
@@ -295,8 +323,15 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
       sceneName: config.sceneName,
       mode: config.mode,
       transform: config.transform,
+      measurementMode: config.measurementMode,
       frameTimes: [],
       renderDurations: [],
+      throughputBatches: [],
+      throughputConfig: {
+        measuredBatches: config.throughputBatches,
+        framesPerBatch: config.throughputFramesPerBatch,
+        warmupBatches: config.throughputWarmupBatches,
+      },
       warmupFrames: config.warmup,
       maxFrames: config.frames,
       seenFrames: 0,
@@ -316,6 +351,7 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
       adapterInfo: null,
       numSplats: null,
       activeSplats: null,
+      sortIntervals: [],
       finalDataUrl: null,
     };
     window.__SPARK_BENCH = bench;
@@ -871,17 +907,27 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
       }
       if (!window.GL2GPU) throw new Error("GL2GPU script did not load");
       window.__HYD_STATIC_SAMPLER_ORIGIN_VARIANTS = true;
+      window.__HYD_STATIC_BOOLEAN_UNIFORM_VARIANTS = config.specializeBooleanUniforms;
+      window.__HYD_QUAD_STRIP_FAST_PATH = config.quadStripFastPath === "force"
+        ? "force"
+        : config.quadStripFastPath === "true";
       window.__HYD_TRANSLATOR_OPTIONS = {
         ...(window.__HYD_TRANSLATOR_OPTIONS || {}),
         optimizeTintWgsl: config.optimizeTintWgsl,
         captureShaders: config.captureShaders,
+        enforceTextureLoadBounds: config.enforceTextureLoadBounds,
       };
       const context = await GL2GPU.gl2gpuGetContext(
         canvas,
         null,
         ["webgl2", attrs],
         [1 << 23, 0],
-        { legacyTextureCoordinateFixups: false, optimizeTintWgsl: config.optimizeTintWgsl, captureShaders: config.captureShaders }
+        {
+          legacyTextureCoordinateFixups: false,
+          optimizeTintWgsl: config.optimizeTintWgsl,
+          captureShaders: config.captureShaders,
+          enforceTextureLoadBounds: config.enforceTextureLoadBounds,
+        }
       );
       installGl2gpuStats(context);
       const originalGetContext = canvas.getContext.bind(canvas);
@@ -932,6 +978,127 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
       });
 
       let lastRafTimestamp = null;
+      let previousSorting = false;
+      let activeSortStartMs = null;
+      let throughputStarted = false;
+
+      function updateSortTiming(now) {
+        const sorting = Boolean(spark.sorting);
+        if (sorting && !previousSorting) activeSortStartMs = now;
+        if (!sorting && previousSorting && activeSortStartMs !== null) {
+          bench.sortIntervals.push({
+            startMs: activeSortStartMs - bench.loadStartMs,
+            endMs: now - bench.loadStartMs,
+            durationMs: now - activeSortStartMs,
+          });
+          activeSortStartMs = null;
+        }
+        previousSorting = sorting;
+      }
+
+      function completeBenchmark() {
+        try {
+          bench.finalDataUrl = canvas.toDataURL("image/png");
+        } catch (error) {
+          bench.errors.push(String(error && (error.message || error)));
+        }
+        bench.status = "done";
+        bench.doneMs = performance.now();
+        renderer.setAnimationLoop(null);
+      }
+
+      async function waitForGpuComplete() {
+        if (typeof gl.fenceSync !== "function" || typeof gl.clientWaitSync !== "function") {
+          throw new Error("WebGL2 fenceSync/clientWaitSync are required for gpu-throughput measurement");
+        }
+        const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+        if (!sync) throw new Error("fenceSync returned null during gpu-throughput measurement");
+        gl.flush();
+        const deadline = performance.now() + 120000;
+        try {
+          for (;;) {
+            const status = gl.clientWaitSync(sync, 0, 0);
+            if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return;
+            if (status === gl.WAIT_FAILED) throw new Error("clientWaitSync returned WAIT_FAILED");
+            if (performance.now() >= deadline) throw new Error("GPU completion fence timed out after 120 seconds");
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+        } finally {
+          gl.deleteSync(sync);
+        }
+      }
+
+      function counterDelta(before, after) {
+        if (!before || !after) return null;
+        const delta = {};
+        for (const key of Object.keys(after)) {
+          if (Number.isFinite(after[key]) && Number.isFinite(before[key])) {
+            delta[key] = after[key] - before[key];
+          }
+        }
+        return delta;
+      }
+
+      async function runThroughput() {
+        const totalBatches = config.throughputWarmupBatches + config.throughputBatches;
+        try {
+          for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+            const warmupBatch = batchIndex < config.throughputWarmupBatches;
+            const statsBefore = bench.gl2gpuStats ? { ...bench.gl2gpuStats } : null;
+            const batchStart = performance.now();
+            if (window.GL2GPU) {
+              if (bench.gl2gpuStats) bench.gl2gpuStats.beginFrame++;
+              GL2GPU.beginFrame();
+            }
+            const renderLoopStart = performance.now();
+            let renderLoopEnd = renderLoopStart;
+            try {
+              for (let frame = 0; frame < config.throughputFramesPerBatch; frame++) {
+                renderer.render(scene, camera);
+              }
+              renderLoopEnd = performance.now();
+            } finally {
+              if (window.GL2GPU) {
+                GL2GPU.endFrame();
+                if (bench.gl2gpuStats) bench.gl2gpuStats.endFrame++;
+              }
+            }
+            const submitEnd = performance.now();
+            await waitForGpuComplete();
+            const gpuCompleteEnd = performance.now();
+            const statsAfter = bench.gl2gpuStats ? { ...bench.gl2gpuStats } : null;
+            const record = {
+              index: batchIndex,
+              warmup: warmupBatch,
+              frames: config.throughputFramesPerBatch,
+              renderLoopMs: renderLoopEnd - renderLoopStart,
+              frameBoundaryMs: (submitEnd - batchStart) - (renderLoopEnd - renderLoopStart),
+              cpuSubmitMs: submitEnd - batchStart,
+              gpuWaitMs: gpuCompleteEnd - submitEnd,
+              gpuCompleteMs: gpuCompleteEnd - batchStart,
+              perFrameRenderLoopMs: (renderLoopEnd - renderLoopStart) / config.throughputFramesPerBatch,
+              perFrameBoundaryMs: ((submitEnd - batchStart) - (renderLoopEnd - renderLoopStart)) /
+                config.throughputFramesPerBatch,
+              perFrameCpuSubmitMs: (submitEnd - batchStart) / config.throughputFramesPerBatch,
+              perFrameGpuCompleteMs: (gpuCompleteEnd - batchStart) / config.throughputFramesPerBatch,
+              gl2gpuStatsDelta: counterDelta(statsBefore, statsAfter),
+            };
+            bench.throughputBatches.push(record);
+            if (!warmupBatch) {
+              bench.frameTimes.push(record.perFrameGpuCompleteMs);
+              bench.renderDurations.push(record.perFrameCpuSubmitMs);
+              bench.measuredFrames += config.throughputFramesPerBatch;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+          completeBenchmark();
+        } catch (error) {
+          bench.errors.push(String(error && (error.stack || error.message) || error));
+          bench.status = "error";
+          bench.doneMs = performance.now();
+        }
+      }
+
       function probeIntegerTexture(textureUnit, target) {
         const previousActiveTexture = gl.getParameter(gl.ACTIVE_TEXTURE);
         const previousReadFramebuffer = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
@@ -1053,6 +1220,7 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
         bench.activeSplats = spark.activeSplats;
         bench.sorting = spark.sorting;
         bench.sortDirty = spark.sortDirty;
+        updateSortTiming(renderEnd);
         if (bench.status === "settling") {
           const settled = spark.activeSplats > 0 && !spark.sorting && !spark.sortDirty;
           bench.settleStableFrames = settled ? bench.settleStableFrames + 1 : 0;
@@ -1066,6 +1234,12 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
             bench.status = "running";
             bench.seenFrames = 0;
             lastRafTimestamp = null;
+            if (config.measurementMode === "gpu-throughput" && !throughputStarted) {
+              throughputStarted = true;
+              renderer.setAnimationLoop(null);
+              setTimeout(() => runThroughput(), 0);
+              return;
+            }
           }
         }
         if (bench.status === "running") {
@@ -1075,14 +1249,7 @@ function benchmarkHtml(scene, mode, transform, frames, warmup) {
               bench.renderDurations.push(renderEnd - renderStart);
               bench.measuredFrames = bench.frameTimes.length;
               if (bench.frameTimes.length >= bench.maxFrames) {
-                try {
-                  bench.finalDataUrl = canvas.toDataURL("image/png");
-                } catch (error) {
-                  bench.errors.push(String(error && (error.message || error)));
-                }
-                bench.status = "done";
-                bench.doneMs = performance.now();
-                renderer.setAnimationLoop(null);
+                completeBenchmark();
                 return;
               }
             }
@@ -1128,7 +1295,20 @@ async function startServer({ sparkRoot, threeRoot }) {
         const transform = url.searchParams.get("transform") || "direct";
         const frames = Number(url.searchParams.get("frames") || measureFrames);
         const warmup = Number(url.searchParams.get("warmup") || warmupFrames);
-        sendBuffer(response, 200, Buffer.from(benchmarkHtml(scene, mode, transform, frames, warmup), "utf8"), "text/html; charset=utf-8");
+        const pageMeasurementMode = url.searchParams.get("measurementMode") || measurementMode;
+        const pageThroughputBatches = Number(url.searchParams.get("throughputBatches") || throughputBatches);
+        const pageThroughputFramesPerBatch = Number(
+          url.searchParams.get("throughputFramesPerBatch") || throughputFramesPerBatch,
+        );
+        const pageThroughputWarmupBatches = Number(
+          url.searchParams.get("throughputWarmupBatches") || throughputWarmupBatches,
+        );
+        sendBuffer(response, 200, Buffer.from(benchmarkHtml(scene, mode, transform, frames, warmup, {
+          measurementMode: pageMeasurementMode,
+          throughputBatches: pageThroughputBatches,
+          throughputFramesPerBatch: pageThroughputFramesPerBatch,
+          throughputWarmupBatches: pageThroughputWarmupBatches,
+        }), "utf8"), "text/html; charset=utf-8");
         return;
       }
       if (pathname === "/js/gl2gpu.js") {
@@ -1439,6 +1619,10 @@ async function runTrial(browser, baseURL, serverState, scene, mode, transform, t
   const shaderCaptures = [];
   const frames = options.frames || measureFrames;
   const warmup = options.warmup || warmupFrames;
+  const trialMeasurementMode = options.measurementMode || measurementMode;
+  const trialThroughputBatches = options.throughputBatches ?? throughputBatches;
+  const trialThroughputFramesPerBatch = options.throughputFramesPerBatch ?? throughputFramesPerBatch;
+  const trialThroughputWarmupBatches = options.throughputWarmupBatches ?? throughputWarmupBatches;
   const label = options.label || `trial-${trial}`;
   const severePatterns = [
     /validation error/i,
@@ -1486,6 +1670,10 @@ async function runTrial(browser, baseURL, serverState, scene, mode, transform, t
   url.searchParams.set("transform", transform);
   url.searchParams.set("frames", String(frames));
   url.searchParams.set("warmup", String(warmup));
+  url.searchParams.set("measurementMode", trialMeasurementMode);
+  url.searchParams.set("throughputBatches", String(trialThroughputBatches));
+  url.searchParams.set("throughputFramesPerBatch", String(trialThroughputFramesPerBatch));
+  url.searchParams.set("throughputWarmupBatches", String(trialThroughputWarmupBatches));
   let timeout = false;
   try {
     await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: timeoutMs });
@@ -1555,6 +1743,7 @@ async function runTrial(browser, baseURL, serverState, scene, mode, transform, t
     cameraFile: scene.camera,
     mode,
     transform,
+    measurementMode: bench && bench.measurementMode || trialMeasurementMode,
     trial,
     label,
     url: url.href,
@@ -1596,6 +1785,7 @@ async function chooseTransform(browser, baseURL, serverState, scene, transformCa
       label: `preflight-camera-${transform}`,
       frames: Math.min(preflightFrames, 30),
       warmup: preflightWarmupFrames,
+      measurementMode: "raf",
     });
     preflightResults.push(result);
     candidates.push(result);
@@ -1717,6 +1907,10 @@ function createSummary(results, comparisons) {
       const perMode = official.length > 0 ? official : nonCamera;
       const valid = perMode.filter((result) => result.valid);
       const failures = perMode.filter((result) => !result.valid);
+      const measuredBatches = valid.flatMap((result) =>
+        (result.bench && Array.isArray(result.bench.throughputBatches)
+          ? result.bench.throughputBatches.filter((batch) => !batch.warmup)
+          : []));
       row.modes[mode] = {
         validTrials: valid.length,
         totalTrials: perMode.length,
@@ -1724,6 +1918,12 @@ function createSummary(results, comparisons) {
         medianFrameMs: median(valid.map((result) => result.frameSummary.medianMs)),
         p99FrameMs: median(valid.map((result) => result.frameSummary.p99Ms)),
         medianRenderMs: median(valid.map((result) => result.renderSummary.medianMs)),
+        medianRenderLoopMs: median(measuredBatches.map((batch) => batch.perFrameRenderLoopMs)),
+        medianFrameBoundaryMs: median(measuredBatches.map((batch) => batch.perFrameBoundaryMs)),
+        medianCpuSubmitMs: median(measuredBatches.map((batch) => batch.perFrameCpuSubmitMs)),
+        medianGpuWaitMs: median(measuredBatches.map((batch) => batch.gpuWaitMs / batch.frames)),
+        medianGpuCompleteMs: median(measuredBatches.map((batch) => batch.perFrameGpuCompleteMs)),
+        measuredBatchCount: measuredBatches.length,
         medianLoadMs: median(valid.map((result) => result.loadTimeMs)),
         shaderDbRequests: perMode.reduce((sum, result) => sum + result.shaderDbRequests, 0),
         failureClasses: failures.map((result) => result.failureClass).filter(Boolean),
@@ -1766,6 +1966,8 @@ function printSummary(summary) {
     tint_fps: formatNumber(row.modes["gl2gpu-tint"]?.medianFps),
     fps_ratio: formatNumber(row.tintVsWebglFpsRatio),
     frame_reduction: Number.isFinite(row.tintFrameTimeReduction) ? `${(row.tintFrameTimeReduction * 100).toFixed(1)}%` : "n/a",
+    cpu_submit_ms: formatNumber(row.modes["gl2gpu-tint"]?.medianCpuSubmitMs),
+    gpu_wait_ms: formatNumber(row.modes["gl2gpu-tint"]?.medianGpuWaitMs),
     rmse: formatNumber(row.medianRmseNormalized, 5),
     psnr: formatNumber(row.medianPsnr),
     ssim: formatNumber(row.medianSsim, 5),
@@ -1858,6 +2060,7 @@ async function main() {
             label: `preflight-${mode}`,
             frames: preflightFrames,
             warmup: preflightWarmupFrames,
+            measurementMode: "raf",
           });
           preflightResults.push(result);
           preflightByMode.set(mode, result);
@@ -1889,6 +2092,13 @@ async function main() {
     maxTrials,
     warmupFrames,
     measureFrames,
+    specializeBooleanUniforms,
+    enforceTextureLoadBounds,
+    quadStripFastPath,
+    measurementMode,
+    throughputBatches,
+    throughputFramesPerBatch,
+    throughputWarmupBatches,
     preflightWarmupFrames,
     preflightFrames,
     downscale,

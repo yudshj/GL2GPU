@@ -301,6 +301,20 @@ export class HydBuffer implements HydHashable {
         return view.getUint32(byteOffset, true);
     }
 
+    public matchesIndexSequence(type: GLenum, byteOffset: number, expected: number[]): boolean {
+        const indexSize = type === WebGL2RenderingContext.UNSIGNED_BYTE ? 1 :
+            type === WebGL2RenderingContext.UNSIGNED_SHORT ? 2 :
+                type === WebGL2RenderingContext.UNSIGNED_INT ? 4 : 0;
+        if (indexSize === 0 || byteOffset < 0 ||
+            byteOffset + expected.length * indexSize > this.webglSize) {
+            return false;
+        }
+        for (let index = 0; index < expected.length; index++) {
+            if (this.readIndex(type, byteOffset + index * indexSize) !== expected[index]) return false;
+        }
+        return true;
+    }
+
     public maxIndex(type: GLenum, byteOffset: number, count: number): number {
         if (count <= 0) return -1;
         if (this.lastMaxIndexType === type &&

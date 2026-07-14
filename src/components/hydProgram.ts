@@ -28,6 +28,10 @@ import {
 } from './shaderSamplerState';
 import { emitShaderCapture, sourceCapture } from './shaderCapture';
 import { composeShaderModuleWgsl } from './shaderWgslTypes';
+import {
+    lowerBooleanUniformSpecializations,
+    selectBooleanUniformSpecializations,
+} from './shaderWgslUniformSpecialization';
 import type { HydBuffer } from './hydBuffer';
 
 export const ALIGNMENT_BLOCK_SIZE: number = 256;
@@ -480,10 +484,13 @@ export class HydProgram implements HydHashable {
     private _hash: string;
     uniformArrayBufferTempView: DataView;
     public get hash(): string {
-        if (!this.samplerOriginVariantKey) {
-            return this._hash;
+        let hash = this._hash;
+        if (this.samplerOriginVariantKey) {
+            hash += `origin:${this.samplerOriginVariantKey}:` +
+                `${this.vertexModule?.label || ""}:${this.fragmentModule?.label || ""}|`;
         }
-        return `${this._hash}origin:${this.samplerOriginVariantKey}:${this.vertexModule?.label || ""}:${this.fragmentModule?.label || ""}|`;
+        const booleanKey = this.booleanUniformVariantKey();
+        return booleanKey ? `${hash}bool:${booleanKey}|` : hash;
     }
     private vertexShader: HydShader;
     private fragmentShader: HydShader;
@@ -501,6 +508,9 @@ export class HydProgram implements HydHashable {
         new Map<string, SamplerCoordinateScaleOverrideNames>();
     private readonly fragmentSamplerCoordinateScaleOverrides =
         new Map<string, SamplerCoordinateScaleOverrideNames>();
+    private readonly vertexBooleanUniformOverrides = new Map<string, string>();
+    private readonly fragmentBooleanUniformOverrides = new Map<string, string>();
+    private readonly booleanUniformLocations = new Map<string, ProgramUniformBuffer>();
     private readonly device: GPUDevice;
 
     public deleted: boolean = false;
@@ -562,6 +572,41 @@ export class HydProgram implements HydHashable {
         return stage === "vertex"
             ? this.vertexSamplerCoordinateScaleOverrides
             : this.fragmentSamplerCoordinateScaleOverrides;
+    }
+
+    public booleanUniformPipelineConstants(stage: "vertex" | "fragment"): {
+        constants: Record<string, number>,
+        key: string,
+    } {
+        const overrides = stage === "vertex"
+            ? this.vertexBooleanUniformOverrides
+            : this.fragmentBooleanUniformOverrides;
+        const constants: Record<string, number> = {};
+        const keyParts: string[] = [];
+        for (const [uniformName, overrideName] of overrides) {
+            const value = this.booleanUniformValue(uniformName);
+            constants[overrideName] = value;
+            keyParts.push(`${overrideName}=${value}`);
+        }
+        return { constants, key: keyParts.join(",") };
+    }
+
+    public hasBooleanUniformSpecialization(uniform: ProgramUniformBuffer): boolean {
+        return this.booleanUniformLocations.get(uniform.name) === uniform;
+    }
+
+    private booleanUniformValue(uniformName: string): number {
+        const uniform = this.booleanUniformLocations.get(uniformName);
+        if (!uniform || !uniform.int32View) return 0;
+        return uniform.int32View[uniform.wordOffset] !== 0 ? 1 : 0;
+    }
+
+    private booleanUniformVariantKey(): string {
+        if (this.booleanUniformLocations.size === 0) return "";
+        return Array.from(this.booleanUniformLocations.keys())
+            .sort()
+            .map((uniformName) => `${uniformName}=${this.booleanUniformValue(uniformName)}`)
+            .join(",");
     }
 
     public resolveUniformBlockBindings(bindings: Array<HydIndexedBufferBinding | null>) {
@@ -758,8 +803,9 @@ export class HydProgram implements HydHashable {
         }
         let vs = this.vertexWgsl;
         let fs = this.fragmentWgsl;
+        let defaultFlips: Map<string, boolean> | null = null;
         if (this.staticSamplerOriginVariants) {
-            const defaultFlips = new Map<string, boolean>();
+            defaultFlips = new Map<string, boolean>();
             for (const sampler of runtimeShaderInfo.samplers) {
                 if (samplerOriginCoordinateKind(sampler.glsl_type) !== null) {
                     defaultFlips.set(sampler.name, false);
@@ -771,9 +817,41 @@ export class HydProgram implements HydHashable {
                 this.staticSamplerOriginVariants = false;
                 this.vertexWgsl = composeShaderModuleWgsl(dynamicCode, this.vertexShader.shader_info.wgsl);
                 this.fragmentWgsl = composeShaderModuleWgsl(dynamicCode, this.fragmentShader.shader_info.wgsl);
+                defaultFlips = null;
                 vs = this.vertexWgsl;
                 fs = this.fragmentWgsl;
             }
+        }
+        this.vertexBooleanUniformOverrides.clear();
+        this.fragmentBooleanUniformOverrides.clear();
+        this.booleanUniformLocations.clear();
+        if ((globalThis as any).__HYD_STATIC_BOOLEAN_UNIFORM_VARIANTS !== false) {
+            const specializations = selectBooleanUniformSpecializations(
+                runtimeShaderInfo.uniforms,
+                [this.vertexWgsl, this.fragmentWgsl],
+            );
+            const vertexSpecialization = lowerBooleanUniformSpecializations(
+                this.vertexWgsl,
+                specializations,
+            );
+            const fragmentSpecialization = lowerBooleanUniformSpecializations(
+                this.fragmentWgsl,
+                specializations,
+            );
+            this.vertexWgsl = vertexSpecialization.wgsl;
+            this.fragmentWgsl = fragmentSpecialization.wgsl;
+            for (const [uniformName, overrideName] of vertexSpecialization.overrides) {
+                this.vertexBooleanUniformOverrides.set(uniformName, overrideName);
+            }
+            for (const [uniformName, overrideName] of fragmentSpecialization.overrides) {
+                this.fragmentBooleanUniformOverrides.set(uniformName, overrideName);
+            }
+            vs = defaultFlips
+                ? specializeSamplerOriginWgsl(this.vertexWgsl, defaultFlips)
+                : this.vertexWgsl;
+            fs = defaultFlips
+                ? specializeSamplerOriginWgsl(this.fragmentWgsl, defaultFlips)
+                : this.fragmentWgsl;
         }
         this.samplerOriginVariants.clear();
         this.samplerOriginVariantKey = "";
@@ -838,6 +916,15 @@ export class HydProgram implements HydHashable {
             }
         }
         this.hydUniforms = aus.uniforms;
+        const specializedBooleanNames = new Set([
+            ...this.vertexBooleanUniformOverrides.keys(),
+            ...this.fragmentBooleanUniformOverrides.keys(),
+        ]);
+        for (const uniform of this.hydUniforms) {
+            if (specializedBooleanNames.has(uniform.name)) {
+                this.booleanUniformLocations.set(uniform.name, uniform);
+            }
+        }
         this.fragCoordHeightUniform = this.hydUniforms.find((uniform) =>
             uniform.name === FRAG_COORD_HEIGHT_UNIFORM_NAME) || null;
         this.fragCoordHeightValue = Number.NaN;

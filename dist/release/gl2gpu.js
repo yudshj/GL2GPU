@@ -4987,9 +4987,11 @@ class HydGlobalState {
         };
         const vertexIntegerConstants = this.integerSamplerPipelineConstants("vertex");
         const vertexCoordinateScaleConstants = this.samplerCoordinateScalePipelineConstants("vertex");
+        const vertexBooleanConstants = this.commonState.currentProgram.booleanUniformPipelineConstants("vertex");
         const vertexConstants = {
             ...vertexIntegerConstants.constants,
             ...vertexCoordinateScaleConstants.constants,
+            ...vertexBooleanConstants.constants,
         };
         if (Object.keys(vertexConstants).length > 0) {
             vertexState.constants = vertexConstants;
@@ -5019,6 +5021,7 @@ class HydGlobalState {
         let cacheKey = this.commonState.currentProgram.hash + this.polygonState.cullFace.toString() + this.polygonState.cullFaceMode.toString() + this.polygonState.frontFace.toString() + this.polygonState.polygonOffsetFill.toString() + this.polygonState.polygonOffsetUnits.toString() + this.polygonState.polygonOffsetFactor.toString() + this.topology.toString() + (this.stripIndexFormat || "none");
         cacheKey += `:integer-vertex=${vertexIntegerConstants.key}`;
         cacheKey += `:coordinate-scale-vertex=${vertexCoordinateScaleConstants.key}`;
+        cacheKey += `:boolean-vertex=${vertexBooleanConstants.key}`;
         cacheKey += `:samples=${sampleCount}:sampleMask=${sampleMask}:alphaToCoverage=${alphaToCoverageEnabled}`;
         if (haveFragmentState) {
             const blend = this.blendState.enabled ? {
@@ -5077,15 +5080,18 @@ class HydGlobalState {
             };
             const fragmentIntegerConstants = this.integerSamplerPipelineConstants("fragment");
             const fragmentCoordinateScaleConstants = this.samplerCoordinateScalePipelineConstants("fragment");
+            const fragmentBooleanConstants = this.commonState.currentProgram.booleanUniformPipelineConstants("fragment");
             const fragmentConstants = {
                 ...fragmentIntegerConstants.constants,
                 ...fragmentCoordinateScaleConstants.constants,
+                ...fragmentBooleanConstants.constants,
             };
             if (Object.keys(fragmentConstants).length > 0) {
                 pipelineDescriptor.fragment.constants = fragmentConstants;
             }
             cacheKey += `:integer-fragment=${fragmentIntegerConstants.key}`;
             cacheKey += `:coordinate-scale-fragment=${fragmentCoordinateScaleConstants.key}`;
+            cacheKey += `:boolean-fragment=${fragmentBooleanConstants.key}`;
         }
         const depthStencilAttachment = this.getDepthStencilAttachment();
         if (depthStencilAttachment) {
@@ -6961,7 +6967,63 @@ function emitShaderCapture(record) {
     }
 }
 
+;// ./src/components/shaderWgslUniformSpecialization.ts
+function shaderWgslUniformSpecialization_escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function countUniformReferences(wgsl, uniformName) {
+    const reference = `_hyd_uniforms_.${uniformName}`;
+    return wgsl.match(new RegExp(`${shaderWgslUniformSpecialization_escapeRegExp(reference)}\\b`, "g"))?.length || 0;
+}
+function stableNameHash(value) {
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < value.length; index++) {
+        hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193) >>> 0;
+    }
+    return hash.toString(16).padStart(8, "0");
+}
+function insertOverrides(wgsl, declarations) {
+    if (declarations.length === 0)
+        return wgsl;
+    const directivePrefix = wgsl.match(/^\s*(?:(?:(?:enable|requires)\s+[^;]+;|diagnostic\s*\([^;]+\)\s*;)\s*)+/);
+    const insertion = directivePrefix ? directivePrefix[0].length : 0;
+    return wgsl.slice(0, insertion) + declarations.join("\n") + "\n\n" + wgsl.slice(insertion);
+}
+function selectBooleanUniformSpecializations(uniforms, modules, limit = 8) {
+    if (limit <= 0)
+        return [];
+    return uniforms
+        .filter((uniform) => uniform.glsl_type === "bool" && !uniform.internal &&
+        !uniform.is_array && (uniform.size || 1) === 1)
+        .map((uniform) => ({
+        uniformName: uniform.name,
+        overrideName: `_hyd_static_bool_${stableNameHash(uniform.name)}`,
+        referenceCount: modules.reduce((sum, module) => sum + countUniformReferences(module, uniform.name), 0),
+    }))
+        .filter((candidate) => candidate.referenceCount > 0)
+        .sort((left, right) => right.referenceCount - left.referenceCount ||
+        left.uniformName.localeCompare(right.uniformName))
+        .slice(0, limit);
+}
+function lowerBooleanUniformSpecializations(wgsl, specializations) {
+    let out = wgsl;
+    const overrides = new Map();
+    const declarations = [];
+    for (const specialization of specializations) {
+        const reference = `_hyd_uniforms_.${specialization.uniformName}`;
+        const pattern = new RegExp(`${shaderWgslUniformSpecialization_escapeRegExp(reference)}\\b`, "g");
+        if (!pattern.test(out))
+            continue;
+        pattern.lastIndex = 0;
+        out = out.replace(pattern, specialization.overrideName);
+        overrides.set(specialization.uniformName, specialization.overrideName);
+        declarations.push(`override ${specialization.overrideName}: u32 = 0u;`);
+    }
+    return { wgsl: insertOverrides(out, declarations), overrides };
+}
+
 ;// ./src/components/hydProgram.ts
+
 
 
 
@@ -7344,10 +7406,13 @@ class HydProgram {
     _hash;
     uniformArrayBufferTempView;
     get hash() {
-        if (!this.samplerOriginVariantKey) {
-            return this._hash;
+        let hash = this._hash;
+        if (this.samplerOriginVariantKey) {
+            hash += `origin:${this.samplerOriginVariantKey}:` +
+                `${this.vertexModule?.label || ""}:${this.fragmentModule?.label || ""}|`;
         }
-        return `${this._hash}origin:${this.samplerOriginVariantKey}:${this.vertexModule?.label || ""}:${this.fragmentModule?.label || ""}|`;
+        const booleanKey = this.booleanUniformVariantKey();
+        return booleanKey ? `${hash}bool:${booleanKey}|` : hash;
     }
     vertexShader;
     fragmentShader;
@@ -7363,6 +7428,9 @@ class HydProgram {
     fragmentIntegerSamplerOverrides = new Map();
     vertexSamplerCoordinateScaleOverrides = new Map();
     fragmentSamplerCoordinateScaleOverrides = new Map();
+    vertexBooleanUniformOverrides = new Map();
+    fragmentBooleanUniformOverrides = new Map();
+    booleanUniformLocations = new Map();
     device;
     deleted = false;
     destroyed = false;
@@ -7413,6 +7481,36 @@ class HydProgram {
         return stage === "vertex"
             ? this.vertexSamplerCoordinateScaleOverrides
             : this.fragmentSamplerCoordinateScaleOverrides;
+    }
+    booleanUniformPipelineConstants(stage) {
+        const overrides = stage === "vertex"
+            ? this.vertexBooleanUniformOverrides
+            : this.fragmentBooleanUniformOverrides;
+        const constants = {};
+        const keyParts = [];
+        for (const [uniformName, overrideName] of overrides) {
+            const value = this.booleanUniformValue(uniformName);
+            constants[overrideName] = value;
+            keyParts.push(`${overrideName}=${value}`);
+        }
+        return { constants, key: keyParts.join(",") };
+    }
+    hasBooleanUniformSpecialization(uniform) {
+        return this.booleanUniformLocations.get(uniform.name) === uniform;
+    }
+    booleanUniformValue(uniformName) {
+        const uniform = this.booleanUniformLocations.get(uniformName);
+        if (!uniform || !uniform.int32View)
+            return 0;
+        return uniform.int32View[uniform.wordOffset] !== 0 ? 1 : 0;
+    }
+    booleanUniformVariantKey() {
+        if (this.booleanUniformLocations.size === 0)
+            return "";
+        return Array.from(this.booleanUniformLocations.keys())
+            .sort()
+            .map((uniformName) => `${uniformName}=${this.booleanUniformValue(uniformName)}`)
+            .join(",");
     }
     resolveUniformBlockBindings(bindings) {
         for (const block of this.hydUniformBlocks) {
@@ -7580,8 +7678,9 @@ class HydProgram {
         }
         let vs = this.vertexWgsl;
         let fs = this.fragmentWgsl;
+        let defaultFlips = null;
         if (this.staticSamplerOriginVariants) {
-            const defaultFlips = new Map();
+            defaultFlips = new Map();
             for (const sampler of runtimeShaderInfo.samplers) {
                 if (samplerOriginCoordinateKind(sampler.glsl_type) !== null) {
                     defaultFlips.set(sampler.name, false);
@@ -7593,9 +7692,32 @@ class HydProgram {
                 this.staticSamplerOriginVariants = false;
                 this.vertexWgsl = composeShaderModuleWgsl(dynamicCode, this.vertexShader.shader_info.wgsl);
                 this.fragmentWgsl = composeShaderModuleWgsl(dynamicCode, this.fragmentShader.shader_info.wgsl);
+                defaultFlips = null;
                 vs = this.vertexWgsl;
                 fs = this.fragmentWgsl;
             }
+        }
+        this.vertexBooleanUniformOverrides.clear();
+        this.fragmentBooleanUniformOverrides.clear();
+        this.booleanUniformLocations.clear();
+        if (globalThis.__HYD_STATIC_BOOLEAN_UNIFORM_VARIANTS !== false) {
+            const specializations = selectBooleanUniformSpecializations(runtimeShaderInfo.uniforms, [this.vertexWgsl, this.fragmentWgsl]);
+            const vertexSpecialization = lowerBooleanUniformSpecializations(this.vertexWgsl, specializations);
+            const fragmentSpecialization = lowerBooleanUniformSpecializations(this.fragmentWgsl, specializations);
+            this.vertexWgsl = vertexSpecialization.wgsl;
+            this.fragmentWgsl = fragmentSpecialization.wgsl;
+            for (const [uniformName, overrideName] of vertexSpecialization.overrides) {
+                this.vertexBooleanUniformOverrides.set(uniformName, overrideName);
+            }
+            for (const [uniformName, overrideName] of fragmentSpecialization.overrides) {
+                this.fragmentBooleanUniformOverrides.set(uniformName, overrideName);
+            }
+            vs = defaultFlips
+                ? specializeSamplerOriginWgsl(this.vertexWgsl, defaultFlips)
+                : this.vertexWgsl;
+            fs = defaultFlips
+                ? specializeSamplerOriginWgsl(this.fragmentWgsl, defaultFlips)
+                : this.fragmentWgsl;
         }
         this.samplerOriginVariants.clear();
         this.samplerOriginVariantKey = "";
@@ -7660,6 +7782,15 @@ class HydProgram {
             }
         }
         this.hydUniforms = aus.uniforms;
+        const specializedBooleanNames = new Set([
+            ...this.vertexBooleanUniformOverrides.keys(),
+            ...this.fragmentBooleanUniformOverrides.keys(),
+        ]);
+        for (const uniform of this.hydUniforms) {
+            if (specializedBooleanNames.has(uniform.name)) {
+                this.booleanUniformLocations.set(uniform.name, uniform);
+            }
+        }
         this.fragCoordHeightUniform = this.hydUniforms.find((uniform) => uniform.name === FRAG_COORD_HEIGHT_UNIFORM_NAME) || null;
         this.fragCoordHeightValue = Number.NaN;
         this.depthRangeUniforms = [
@@ -8038,6 +8169,20 @@ class HydBuffer {
             return view.getUint16(byteOffset, true);
         }
         return view.getUint32(byteOffset, true);
+    }
+    matchesIndexSequence(type, byteOffset, expected) {
+        const indexSize = type === WebGL2RenderingContext.UNSIGNED_BYTE ? 1 :
+            type === WebGL2RenderingContext.UNSIGNED_SHORT ? 2 :
+                type === WebGL2RenderingContext.UNSIGNED_INT ? 4 : 0;
+        if (indexSize === 0 || byteOffset < 0 ||
+            byteOffset + expected.length * indexSize > this.webglSize) {
+            return false;
+        }
+        for (let index = 0; index < expected.length; index++) {
+            if (this.readIndex(type, byteOffset + index * indexSize) !== expected[index])
+                return false;
+        }
+        return true;
     }
     maxIndex(type, byteOffset, count) {
         if (count <= 0)
@@ -14300,6 +14445,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         return true;
     }
     writeBooleanFromFloatScalars(buffer, components, x0, x1 = 0, x2 = 0, x3 = 0) {
+        const previous = this.specializedBooleanValue(buffer);
         const target = components === 1 ? buffer.writeUniform1fBooleanView
             : components === 2 ? buffer.writeUniform2fBooleanView
                 : components === 3 ? buffer.writeUniform3fBooleanView
@@ -14316,6 +14462,22 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             target[offset + 2] = x2 !== 0 ? 1 : 0;
         if (components > 3)
             target[offset + 3] = x3 !== 0 ? 1 : 0;
+        this.recordSpecializedBooleanChange(buffer, previous);
+    }
+    specializedBooleanValue(buffer) {
+        if (buffer.webgl_type !== WebGL2RenderingContext.BOOL ||
+            !buffer.program?.hasBooleanUniformSpecialization(buffer) || !buffer.int32View) {
+            return null;
+        }
+        return buffer.int32View[buffer.wordOffset] !== 0 ? 1 : 0;
+    }
+    recordSpecializedBooleanChange(buffer, previous) {
+        if (previous === null)
+            return;
+        const next = this.specializedBooleanValue(buffer);
+        if (next === null || next === previous)
+            return;
+        this.hydGlobalState.recordTransition("uniformBooleanSpecialization", buffer.name, next);
     }
     uniform1f(pub, x0) {
         if (pub === null)
@@ -14393,6 +14555,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         }
         if (!this.validateScalarUniformType(uniform, WebGL2RenderingContext.INT, WebGL2RenderingContext.BOOL))
             return;
+        const previous = this.specializedBooleanValue(uniform);
         const a = uniform.writeInt32View;
         if (!a) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
@@ -14400,6 +14563,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         }
         const offset = uniform.wordOffset;
         a[offset] = x0;
+        this.recordSpecializedBooleanChange(uniform, previous);
     }
     uniform2i(pub, x0, x1) {
         if (pub === null)
@@ -14452,12 +14616,14 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         if (!this.validateScalarUniformType(pub, WebGL2RenderingContext.UNSIGNED_INT, WebGL2RenderingContext.BOOL))
             return;
         const writesBoolean = pub.webgl_type === WebGL2RenderingContext.BOOL;
+        const previous = this.specializedBooleanValue(pub);
         const a = writesBoolean ? pub.writeInt32View : pub.writeUint32View;
         if (!a) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
             return;
         }
         a[pub.wordOffset] = writesBoolean ? Number(x0) !== 0 ? 1 : 0 : x0 >>> 0;
+        this.recordSpecializedBooleanChange(pub, previous);
     }
     uniform2ui(pub, x0, x1) {
         if (pub === null)
@@ -14538,6 +14704,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
             ? WebGL2RenderingContext.BOOL
             : WebGL2RenderingContext.BOOL_VEC2 + components - 2;
         const writesBoolean = pub.webgl_type === boolType;
+        const previous = this.specializedBooleanValue(pub);
         const target = writesBoolean ? pub.writeInt32View : pub.writeFloat32View;
         if (!target) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
@@ -14568,6 +14735,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                 target[offset + 2] = writesBoolean ? Number(source[2]) !== 0 ? 1 : 0 : source[2];
             if (components > 3)
                 target[offset + 3] = writesBoolean ? Number(source[3]) !== 0 ? 1 : 0 : source[3];
+            this.recordSpecializedBooleanChange(pub, previous);
             return;
         }
         if (!writesBoolean && stride === components && valueCount === length && ArrayBuffer.isView(source)) {
@@ -14584,12 +14752,14 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                     : sourceValue;
             }
         }
+        this.recordSpecializedBooleanChange(pub, previous);
     }
     writeIntUniformArray(pub, value, components, expectedType, boolType, srcOffset = 0, srcLength = 0) {
         const source = this.uniformSourceSubrange(value, srcOffset, srcLength);
         if (!source)
             return;
         const length = this.uniformArrayLength(source);
+        const previous = this.specializedBooleanValue(pub);
         const target = pub.writeInt32View;
         if (!target) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
@@ -14620,10 +14790,12 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                 target[offset + 2] = source[2];
             if (components > 3)
                 target[offset + 3] = source[3];
+            this.recordSpecializedBooleanChange(pub, previous);
             return;
         }
         if (stride === components && valueCount === length && ArrayBuffer.isView(source)) {
             target.set(source, pub.wordOffset);
+            this.recordSpecializedBooleanChange(pub, previous);
             return;
         }
         for (let element = 0; element < elements; element++) {
@@ -14633,12 +14805,14 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                 target[targetOffset + component] = source[sourceOffset + component];
             }
         }
+        this.recordSpecializedBooleanChange(pub, previous);
     }
     writeUintUniformArray(pub, value, components, expectedType, boolType, srcOffset = 0, srcLength = 0) {
         const source = this.uniformSourceSubrange(value, srcOffset, srcLength);
         if (!source)
             return;
         const length = this.uniformArrayLength(source);
+        const previous = this.specializedBooleanValue(pub);
         const target = pub.writeUint32View;
         if (!target) {
             this.hydGlobalState.setError(WebGL2RenderingContext.INVALID_OPERATION);
@@ -14669,10 +14843,12 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                 target[offset + 2] = source[2] >>> 0;
             if (components > 3)
                 target[offset + 3] = source[3] >>> 0;
+            this.recordSpecializedBooleanChange(pub, previous);
             return;
         }
         if (stride === components && valueCount === length && ArrayBuffer.isView(source)) {
             target.set(source, pub.wordOffset);
+            this.recordSpecializedBooleanChange(pub, previous);
             return;
         }
         for (let element = 0; element < elements; element++) {
@@ -14682,6 +14858,7 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
                 target[targetOffset + component] = source[sourceOffset + component] >>> 0;
             }
         }
+        this.recordSpecializedBooleanChange(pub, previous);
     }
     uniform1fv(pub, v, srcOffset = 0, srcLength = 0) {
         if (pub === null)
@@ -23363,6 +23540,19 @@ fn fragmentMain(@builtin(position) position : vec4f${sampleParameter}) {
             return;
         if (!this.currentDrawTargetHasSize())
             return;
+        const quadStripMode = globalThis.__HYD_QUAD_STRIP_FAST_PATH;
+        const program = this.hydGlobalState.commonState.currentProgram;
+        const canUseQuadStrip = Boolean(quadStripMode) && mode === WebGL2RenderingContext.TRIANGLES &&
+            count === 6 && elementArrayBuffer.matchesIndexSequence(type, offset, [0, 1, 2, 2, 1, 3]) &&
+            !program.activeBuiltInAttributes.some((attribute) => attribute.name === "gl_VertexID") &&
+            (!program.usesFlatInterpolation || quadStripMode === "force");
+        if (canUseQuadStrip) {
+            this.setPrimitiveState("triangle-strip");
+            this.setPBV();
+            this.hydRpCache.RpDraw(4, instanceCount, 0, 0);
+            this.finishDraw();
+            return;
+        }
         let indexBuffer = elementArrayBuffer.buffer;
         let indexFormat;
         if (type === WebGL2RenderingContext.UNSIGNED_SHORT) {
@@ -23390,7 +23580,7 @@ fn fragmentMain(@builtin(position) position : vec4f${sampleParameter}) {
             drawIndexCount = expanded.indexCount;
             firstIndex = 0;
         }
-        const needsLastProvokingVertex = this.hydGlobalState.commonState.currentProgram.usesFlatInterpolation &&
+        const needsLastProvokingVertex = program.usesFlatInterpolation &&
             mode !== WebGL2RenderingContext.POINTS;
         if (needsLastProvokingVertex) {
             const expanded = elementArrayBuffer.getLastProvokingVertexIndexBuffer(mode, type, offset, count, this.hydContextType === "webgl2");
@@ -28288,12 +28478,14 @@ class ShaderTranslator {
         const key = compiledShaderSource(shader);
         const preserveImplicitTextureLod = this.options.preserveImplicitTextureLod !== false;
         const shouldOptimizeTintWgsl = this.options.optimizeTintWgsl !== false;
+        const shouldEnforceTextureLoadBounds = this.options.enforceTextureLoadBounds !== false;
         const webglVersion = shader.webglVersion || 1;
         const runtimeKey = [
             stage,
             layout.cacheKey,
             `lod=${preserveImplicitTextureLod ? 1 : 0}`,
             `opt=${shouldOptimizeTintWgsl ? 1 : 0}`,
+            `textureBounds=${shouldEnforceTextureLoadBounds ? 1 : 0}`,
             `legacyTexCoord=${this.options.legacyTextureCoordinateFixups ? 1 : 0}`,
             `webgl=${webglVersion}`,
             key,
@@ -28388,11 +28580,13 @@ class ShaderTranslator {
             if (dimensionQueries.rewrittenQueries > 0) {
                 compatibilityFallbacks.push(`texture-dimensions:${dimensionQueries.rewrittenQueries}`);
             }
-            const robustness = enforceWebGlTextureLoadBounds(wgsl, metadata.samplers);
-            wgsl = robustness.wgsl;
-            if (robustness.rewrittenLoads > 0) {
-                timingsMs.wgslRobustness = nowMs() - robustnessStart;
-                compatibilityFallbacks.push(`texture-load-bounds:${robustness.rewrittenLoads}`);
+            if (shouldEnforceTextureLoadBounds) {
+                const robustness = enforceWebGlTextureLoadBounds(wgsl, metadata.samplers);
+                wgsl = robustness.wgsl;
+                if (robustness.rewrittenLoads > 0) {
+                    timingsMs.wgslRobustness = nowMs() - robustnessStart;
+                    compatibilityFallbacks.push(`texture-load-bounds:${robustness.rewrittenLoads}`);
+                }
             }
             const samplerOriginStart = nowMs();
             wgsl = normalizeSamplerOriginCoordinates(wgsl, metadata);

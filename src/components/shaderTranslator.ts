@@ -126,6 +126,7 @@ export interface ShaderTranslatorOptions {
     legacyTextureCoordinateFixups?: boolean;
     captureShaders?: boolean;
     preserveImplicitTextureLod?: boolean;
+    enforceTextureLoadBounds?: boolean;
     glslangLocateFile?: (path: string) => string;
     glslangWasmBinary?: ArrayBuffer | Uint8Array;
     tintLocateFile?: (path: string) => string;
@@ -1848,12 +1849,14 @@ export class ShaderTranslator {
         const key = compiledShaderSource(shader);
         const preserveImplicitTextureLod = this.options.preserveImplicitTextureLod !== false;
         const shouldOptimizeTintWgsl = this.options.optimizeTintWgsl !== false;
+        const shouldEnforceTextureLoadBounds = this.options.enforceTextureLoadBounds !== false;
         const webglVersion = shader.webglVersion || 1;
         const runtimeKey = [
             stage,
             layout.cacheKey,
             `lod=${preserveImplicitTextureLod ? 1 : 0}`,
             `opt=${shouldOptimizeTintWgsl ? 1 : 0}`,
+            `textureBounds=${shouldEnforceTextureLoadBounds ? 1 : 0}`,
             `legacyTexCoord=${this.options.legacyTextureCoordinateFixups ? 1 : 0}`,
             `webgl=${webglVersion}`,
             key,
@@ -1952,11 +1955,13 @@ export class ShaderTranslator {
             if (dimensionQueries.rewrittenQueries > 0) {
                 compatibilityFallbacks.push(`texture-dimensions:${dimensionQueries.rewrittenQueries}`);
             }
-            const robustness = enforceWebGlTextureLoadBounds(wgsl, metadata.samplers);
-            wgsl = robustness.wgsl;
-            if (robustness.rewrittenLoads > 0) {
-                timingsMs.wgslRobustness = nowMs() - robustnessStart;
-                compatibilityFallbacks.push(`texture-load-bounds:${robustness.rewrittenLoads}`);
+            if (shouldEnforceTextureLoadBounds) {
+                const robustness = enforceWebGlTextureLoadBounds(wgsl, metadata.samplers);
+                wgsl = robustness.wgsl;
+                if (robustness.rewrittenLoads > 0) {
+                    timingsMs.wgslRobustness = nowMs() - robustnessStart;
+                    compatibilityFallbacks.push(`texture-load-bounds:${robustness.rewrittenLoads}`);
+                }
             }
             const samplerOriginStart = nowMs();
             wgsl = normalizeSamplerOriginCoordinates(wgsl, metadata);

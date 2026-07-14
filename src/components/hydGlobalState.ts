@@ -705,9 +705,11 @@ export class HydGlobalState {
         };
         const vertexIntegerConstants = this.integerSamplerPipelineConstants("vertex");
         const vertexCoordinateScaleConstants = this.samplerCoordinateScalePipelineConstants("vertex");
+        const vertexBooleanConstants = this.commonState.currentProgram.booleanUniformPipelineConstants("vertex");
         const vertexConstants = {
             ...vertexIntegerConstants.constants,
             ...vertexCoordinateScaleConstants.constants,
+            ...vertexBooleanConstants.constants,
         };
         if (Object.keys(vertexConstants).length > 0) {
             vertexState.constants = vertexConstants;
@@ -737,6 +739,7 @@ export class HydGlobalState {
         let cacheKey = this.commonState.currentProgram.hash + this.polygonState.cullFace.toString() + this.polygonState.cullFaceMode.toString() + this.polygonState.frontFace.toString() + this.polygonState.polygonOffsetFill.toString() + this.polygonState.polygonOffsetUnits.toString() + this.polygonState.polygonOffsetFactor.toString() + this.topology.toString() + (this.stripIndexFormat || "none");
         cacheKey += `:integer-vertex=${vertexIntegerConstants.key}`;
         cacheKey += `:coordinate-scale-vertex=${vertexCoordinateScaleConstants.key}`;
+        cacheKey += `:boolean-vertex=${vertexBooleanConstants.key}`;
         cacheKey += `:samples=${sampleCount}:sampleMask=${sampleMask}:alphaToCoverage=${alphaToCoverageEnabled}`;
 
         if (haveFragmentState) {
@@ -794,15 +797,18 @@ export class HydGlobalState {
             }
             const fragmentIntegerConstants = this.integerSamplerPipelineConstants("fragment");
             const fragmentCoordinateScaleConstants = this.samplerCoordinateScalePipelineConstants("fragment");
+            const fragmentBooleanConstants = this.commonState.currentProgram.booleanUniformPipelineConstants("fragment");
             const fragmentConstants = {
                 ...fragmentIntegerConstants.constants,
                 ...fragmentCoordinateScaleConstants.constants,
+                ...fragmentBooleanConstants.constants,
             };
             if (Object.keys(fragmentConstants).length > 0) {
                 pipelineDescriptor.fragment.constants = fragmentConstants;
             }
             cacheKey += `:integer-fragment=${fragmentIntegerConstants.key}`;
             cacheKey += `:coordinate-scale-fragment=${fragmentCoordinateScaleConstants.key}`;
+            cacheKey += `:boolean-fragment=${fragmentBooleanConstants.key}`;
         }
         const depthStencilAttachment = this.getDepthStencilAttachment();
         if (depthStencilAttachment) {
