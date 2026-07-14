@@ -69,6 +69,10 @@ const optimizeTintWgsl = argv.get("optimize-tint-wgsl") !== "false";
 const specializeBooleanUniforms = argv.get("specialize-boolean-uniforms") !== "false";
 const enforceTextureLoadBounds = argv.get("enforce-texture-load-bounds") !== "false";
 const quadStripFastPath = argv.get("quad-strip-fast-path") || "false";
+const gpuSplatFrustumFilter = argv.get("gpu-splat-frustum-filter") === "true";
+const gpuSplatVertexPrecompute = argv.get("gpu-splat-vertex-precompute") === "true";
+const splatAlphaCutoff = Number(argv.get("splat-alpha-cutoff") || 0);
+const splatMaxStdDev = Number(argv.get("splat-max-stddev") || 0);
 const preflightOnly = argv.get("preflight-only") === "true";
 const skipPreflight = argv.get("skip-preflight") === "true";
 const allowInstallDeps = argv.get("install-deps") !== "false";
@@ -289,6 +293,10 @@ function benchmarkHtml(scene, mode, transform, frames, warmup, measurement = {})
     specializeBooleanUniforms,
     enforceTextureLoadBounds,
     quadStripFastPath,
+    gpuSplatFrustumFilter,
+    gpuSplatVertexPrecompute,
+    splatAlphaCutoff,
+    splatMaxStdDev,
   };
   return `<!doctype html>
 <html>
@@ -351,6 +359,8 @@ function benchmarkHtml(scene, mode, transform, frames, warmup, measurement = {})
       adapterInfo: null,
       numSplats: null,
       activeSplats: null,
+      gpuSplatFrustumFilter: null,
+      gpuSplatVertexPrecompute: null,
       sortIntervals: [],
       finalDataUrl: null,
     };
@@ -907,6 +917,7 @@ function benchmarkHtml(scene, mode, transform, frames, warmup, measurement = {})
       }
       if (!window.GL2GPU) throw new Error("GL2GPU script did not load");
       window.__HYD_STATIC_SAMPLER_ORIGIN_VARIANTS = true;
+      window.__HYD_EXPOSE_INTERNALS = config.gpuSplatFrustumFilter || config.gpuSplatVertexPrecompute;
       window.__HYD_STATIC_BOOLEAN_UNIFORM_VARIANTS = config.specializeBooleanUniforms;
       window.__HYD_QUAD_STRIP_FAST_PATH = config.quadStripFastPath === "force"
         ? "force"
@@ -981,6 +992,7 @@ function benchmarkHtml(scene, mode, transform, frames, warmup, measurement = {})
       let previousSorting = false;
       let activeSortStartMs = null;
       let throughputStarted = false;
+      let gpuFilterStarted = false;
 
       function updateSortTiming(now) {
         const sorting = Boolean(spark.sorting);
@@ -1025,6 +1037,228 @@ function benchmarkHtml(scene, mode, transform, frames, warmup, measurement = {})
           }
         } finally {
           gl.deleteSync(sync);
+        }
+      }
+
+      async function applyGpuSplatFrustumFilter() {
+        const report = {
+          requested: Boolean(config.gpuSplatFrustumFilter),
+          applied: false,
+          totalSplats: spark.activeSplats,
+          visibleSplats: null,
+          visibleRatio: null,
+          elapsedMs: null,
+          alphaCutoff: config.splatAlphaCutoff,
+          maxStdDev: config.splatMaxStdDev,
+          error: null,
+        };
+        bench.gpuSplatFrustumFilter = report;
+        if (!report.requested || config.mode !== "gl2gpu-tint") return;
+        const started = performance.now();
+        let outputTexture = null;
+        let paramsBuffer = null;
+        let counterBuffer = null;
+        let readbackBuffer = null;
+        try {
+          await waitForGpuComplete();
+          const internal = gl.__hydInternal;
+          const device = internal && internal.hydDevice;
+          if (!device) throw new Error("GL2GPU GPUDevice is unavailable");
+          const orderingTexture = spark.orderingTexture;
+          const packedTexture = spark.display.getTextures()[0];
+          if (!orderingTexture || !packedTexture) {
+            throw new Error("Spark ordering or packed splat texture is unavailable");
+          }
+          const orderingHyd = renderer.properties.get(orderingTexture).__webglTexture;
+          const packedHyd = renderer.properties.get(packedTexture).__webglTexture;
+          if (!orderingHyd || !packedHyd) throw new Error("GL2GPU HydTexture handles are unavailable");
+          if (orderingHyd.gpuFormat !== "rgba32uint" || packedHyd.gpuFormat !== "rgba32uint") {
+            throw new Error("Unexpected Spark texture formats: " + orderingHyd.gpuFormat + ", " + packedHyd.gpuFormat);
+          }
+          const width = orderingHyd.width;
+          const height = orderingHyd.height;
+          const totalTexels = width * height;
+          const totalSplats = spark.activeSplats >>> 0;
+          if (!width || !height || !totalSplats) throw new Error("Spark filter dimensions are empty");
+
+          const shaderSource = [
+            "struct CullParams {",
+            "  projection: mat4x4f,",
+            "  rotation: vec4f,",
+            "  translationClip: vec4f,",
+            "  limits: vec4u,",
+            "};",
+            "struct Counters { visible: atomic<u32> };",
+            "@group(0) @binding(0) var ordering: texture_2d<u32>;",
+            "@group(0) @binding(1) var splats: texture_2d_array<u32>;",
+            "@group(0) @binding(2) var filtered: texture_storage_2d<rgba32uint, write>;",
+            "@group(0) @binding(3) var<uniform> params: CullParams;",
+            "@group(0) @binding(4) var<storage, read_write> counters: Counters;",
+            "fn rotateByQuaternion(q: vec4f, value: vec3f) -> vec3f {",
+            "  let t = 2.0f * cross(q.xyz, value);",
+            "  return value + q.w * t + cross(q.xyz, t);",
+            "}",
+            "fn filterSplat(index: u32) -> u32 {",
+            "  if (index == 0xffffffffu) { return index; }",
+            "  let size = textureDimensions(splats);",
+            "  let x = index & 2047u;",
+            "  let y = (index >> 11u) & 2047u;",
+            "  let layer = index >> 22u;",
+            "  if (x >= size.x || y >= size.y || layer >= textureNumLayers(splats)) { return 0xffffffffu; }",
+            "  let physicalY = size.y - 1u - y;",
+            "  let packed = textureLoad(splats, vec2i(i32(x), i32(physicalY)), i32(layer), 0);",
+            "  let centerXY = unpack2x16float(packed.y);",
+            "  let centerZ = unpack2x16float(packed.z & 0xffffu).x;",
+            "  let center = vec3f(centerXY, centerZ);",
+            "  let viewCenter = rotateByQuaternion(params.rotation, center) + params.translationClip.xyz;",
+            "  if (viewCenter.z >= 0.0f) { return 0xffffffffu; }",
+            "  let clipCenter = params.projection * vec4f(viewCenter, 1.0f);",
+            "  if (abs(clipCenter.z) >= clipCenter.w) { return 0xffffffffu; }",
+            "  let clip = params.translationClip.w * clipCenter.w;",
+            "  if (abs(clipCenter.x) > clip || abs(clipCenter.y) > clip) { return 0xffffffffu; }",
+            "  atomicAdd(&counters.visible, 1u);",
+            "  return index;",
+            "}",
+            "@compute @workgroup_size(256)",
+            "fn main(@builtin(global_invocation_id) gid: vec3u) {",
+            "  let linear = gid.x;",
+            "  let dims = textureDimensions(ordering);",
+            "  let texelCount = dims.x * dims.y;",
+            "  if (linear >= texelCount) { return; }",
+            "  let coord = vec2u(linear % dims.x, linear / dims.x);",
+            "  let base = linear * 4u;",
+            "  let source = textureLoad(ordering, vec2i(coord), 0);",
+            "  var value = vec4u(0xffffffffu);",
+            "  if (base < params.limits.x) { value.x = filterSplat(source.x); }",
+            "  if (base + 1u < params.limits.x) { value.y = filterSplat(source.y); }",
+            "  if (base + 2u < params.limits.x) { value.z = filterSplat(source.z); }",
+            "  if (base + 3u < params.limits.x) { value.w = filterSplat(source.w); }",
+            "  textureStore(filtered, vec2i(coord), value);",
+            "}",
+          ].join("\\n");
+          device.pushErrorScope("validation");
+          const module = device.createShaderModule({ label: "Spark stable frustum filter", code: shaderSource });
+          const compilation = await module.getCompilationInfo();
+          const compilationErrors = compilation.messages.filter((message) => message.type === "error");
+          if (compilationErrors.length > 0) {
+            throw new Error("Spark culling shader failed: " + compilationErrors.map((message) => message.message).join("; "));
+          }
+          const pipeline = await device.createComputePipelineAsync({
+            label: "Spark stable frustum filter pipeline",
+            layout: "auto",
+            compute: { module, entryPoint: "main" },
+          });
+          const validationError = await device.popErrorScope();
+          if (validationError) throw validationError;
+
+          outputTexture = device.createTexture({
+            label: "Spark filtered ordering",
+            size: { width, height, depthOrArrayLayers: 1 },
+            format: "rgba32uint",
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC,
+          });
+          paramsBuffer = device.createBuffer({
+            label: "Spark frustum filter params",
+            size: 112,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+          });
+          counterBuffer = device.createBuffer({
+            label: "Spark frustum filter counter",
+            size: 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+          });
+          readbackBuffer = device.createBuffer({
+            label: "Spark frustum filter readback",
+            size: 4,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+          });
+
+          const paramBytes = new ArrayBuffer(112);
+          const paramFloats = new Float32Array(paramBytes);
+          const paramUints = new Uint32Array(paramBytes);
+          paramFloats.set(camera.projectionMatrix.elements, 0);
+          const rotation = spark.uniforms.renderToViewQuat.value;
+          paramFloats.set([rotation.x, rotation.y, rotation.z, rotation.w], 16);
+          const translation = spark.uniforms.renderToViewPos.value;
+          paramFloats.set([translation.x, translation.y, translation.z, spark.uniforms.clipXY.value], 20);
+          paramUints[24] = totalSplats;
+          device.queue.writeBuffer(paramsBuffer, 0, paramBytes);
+
+          const bindGroup = device.createBindGroup({
+            label: "Spark stable frustum filter bind group",
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: orderingHyd.texture.createView({ dimension: "2d" }) },
+              { binding: 1, resource: packedHyd.texture.createView({ dimension: "2d-array" }) },
+              { binding: 2, resource: outputTexture.createView({ dimension: "2d" }) },
+              { binding: 3, resource: { buffer: paramsBuffer } },
+              { binding: 4, resource: { buffer: counterBuffer } },
+            ],
+          });
+          const encoder = device.createCommandEncoder({ label: "Spark stable frustum filter encoder" });
+          encoder.clearBuffer(counterBuffer);
+          const pass = encoder.beginComputePass({ label: "Spark stable frustum filter pass" });
+          pass.setPipeline(pipeline);
+          pass.setBindGroup(0, bindGroup);
+          pass.dispatchWorkgroups(Math.ceil(totalTexels / 256));
+          pass.end();
+          encoder.copyTextureToTexture(
+            { texture: outputTexture },
+            { texture: orderingHyd.texture },
+            { width, height, depthOrArrayLayers: 1 },
+          );
+          encoder.copyBufferToBuffer(counterBuffer, 0, readbackBuffer, 0, 4);
+          device.queue.submit([encoder.finish()]);
+          await device.queue.onSubmittedWorkDone();
+          await readbackBuffer.mapAsync(GPUMapMode.READ);
+          const visibleSplats = new Uint32Array(readbackBuffer.getMappedRange())[0];
+          readbackBuffer.unmap();
+          report.applied = true;
+          report.visibleSplats = visibleSplats;
+          report.visibleRatio = visibleSplats / totalSplats;
+          report.elapsedMs = performance.now() - started;
+        } catch (error) {
+          report.error = String(error && (error.stack || error.message) || error);
+          throw error;
+        } finally {
+          outputTexture?.destroy();
+          paramsBuffer?.destroy();
+          counterBuffer?.destroy();
+          readbackBuffer?.destroy();
+        }
+      }
+
+      async function applyGpuSplatVertexPrecompute() {
+        const report = {
+          requested: Boolean(config.gpuSplatVertexPrecompute),
+          applied: false,
+          instanceCount: spark.activeSplats,
+          visibleInstanceCount: null,
+          outputBytes: 0,
+          elapsedMs: null,
+          reason: null,
+          error: null,
+        };
+        bench.gpuSplatVertexPrecompute = report;
+        if (!report.requested || config.mode !== "gl2gpu-tint") return;
+        try {
+          const internal = gl.__hydInternal;
+          if (!internal || typeof internal.__prepareSplatVertexPrecompute !== "function") {
+            throw new Error("GL2GPU splat vertex precompute hook is unavailable");
+          }
+          const result = await internal.__prepareSplatVertexPrecompute(spark.activeSplats, {
+            alphaCutoff: config.splatAlphaCutoff,
+            maxStdDev: config.splatMaxStdDev,
+          });
+          Object.assign(report, result);
+          if (!report.applied) throw new Error("Splat vertex precompute skipped: " + report.reason);
+          if (Number.isInteger(report.visibleInstanceCount) && report.visibleInstanceCount > 0) {
+            spark.activeSplats = report.visibleInstanceCount;
+            bench.activeSplats = report.visibleInstanceCount;
+          }
+        } catch (error) {
+          report.error = String(error && (error.stack || error.message) || error);
+          throw error;
         }
       }
 
@@ -1231,9 +1465,33 @@ function benchmarkHtml(scene, mode, transform, frames, warmup, measurement = {})
               spark.activeSplats,
             );
             bench.settleEndMs = performance.now();
-            bench.status = "running";
             bench.seenFrames = 0;
             lastRafTimestamp = null;
+            if ((config.gpuSplatFrustumFilter || config.gpuSplatVertexPrecompute) &&
+                config.mode === "gl2gpu-tint" && !gpuFilterStarted) {
+              gpuFilterStarted = true;
+              bench.status = "filtering";
+              renderer.setAnimationLoop(null);
+              setTimeout(async () => {
+                try {
+                  await applyGpuSplatFrustumFilter();
+                  await applyGpuSplatVertexPrecompute();
+                  bench.status = "running";
+                  if (config.measurementMode === "gpu-throughput" && !throughputStarted) {
+                    throughputStarted = true;
+                    await runThroughput();
+                  } else {
+                    renderer.setAnimationLoop(animate);
+                  }
+                } catch (error) {
+                  bench.errors.push(String(error && (error.stack || error.message) || error));
+                  bench.status = "error";
+                  bench.doneMs = performance.now();
+                }
+              }, 0);
+              return;
+            }
+            bench.status = "running";
             if (config.measurementMode === "gpu-throughput" && !throughputStarted) {
               throughputStarted = true;
               renderer.setAnimationLoop(null);

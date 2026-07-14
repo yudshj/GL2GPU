@@ -1575,6 +1575,22 @@ export class HydGlobalState {
             layoutKey += vertexBufferLayoutCacheKey(layouts[layouts.length - 1]) + '|';
             vbKeys.push(bufferHash + '|' + offset);
         }
+        for (const precomputed of this.commonState.currentProgram.precomputedVertexBuffers) {
+            const layout: GPUVertexBufferLayout = {
+                arrayStride: precomputed.arrayStride,
+                stepMode: "instance",
+                attributes: [{
+                    shaderLocation: precomputed.shaderLocation,
+                    offset: 0,
+                    format: precomputed.format,
+                }],
+            };
+            buffers.push(precomputed.buffer);
+            offsets.push(0);
+            layouts.push(layout);
+            layoutKey += vertexBufferLayoutCacheKey(layout) + '|';
+            vbKeys.push(`precomputed:${precomputed.key}`);
+        }
         const limits = this.device.limits;
         const maxVertexBuffers = Number(limits?.maxVertexBuffers ?? 8);
         const maxArrayStride = Number(limits?.maxVertexBufferArrayStride ?? 2048);

@@ -17,6 +17,7 @@ import {
     normalizeWebGlTextureDimensionQueries,
 } from "../../src/components/shaderWgslRobustness";
 import { preserveFlatFloatVaryingBits } from "../../src/components/shaderWgslFlatVaryings";
+import { buildSplatVertexPrecomputeSources } from "../../src/components/shaderSplatVertexPrecompute";
 import {
     lowerBooleanUniformSpecializations,
     selectBooleanUniformSpecializations,
@@ -2105,6 +2106,63 @@ fn main() -> @location(0) vec4<f32> {
 `);
 if (shapeStats.varPrivate !== 1 || shapeStats.tempLets !== 1 || shapeStats.textureSampleLevel !== 1 || shapeStats.textureSample !== 1 || shapeStats.selects !== 1) {
     throw new Error(`unexpected WGSL shape stats: ${JSON.stringify(shapeStats)}`);
+}
+
+const splatPrecomputeSource = `
+struct HydUniforms {
+  renderSize : vec2<f32>,
+  focalAdjustment : vec2<f32>,
+  minAlpha : f32,
+  falloff : f32,
+}
+struct VertexOutput {
+  @builtin(position) position : vec4<f32>,
+}
+@group(0) @binding(0) var<uniform> _hyd_uniforms_ : HydUniforms;
+var<private> gl_Position : vec4<f32>;
+var<private> adjustedStdDev : f32;
+var<private> vRgba : vec4<f32>;
+var<private> vSplatUv : vec2<f32>;
+var<private> vSplatIndex : u32;
+var<private> vNdc : vec3<f32>;
+var<private> vFragDepth : f32;
+var<private> vIsPerspective : f32;
+fn v_2(gl_InstanceIndex : i32, position : vec3<f32>) {
+  let orderingCoord : vec2<i32> = vec2i(gl_InstanceIndex, 0);
+  let splatIndex : u32 = u32(orderingCoord.x);
+  let clipCenter : vec4<f32> = vec4f(position, 1.0f);
+  let eigenVec1 : vec2<f32> = vec2f(1.0f, 0.0f);
+  let eigenVec2 : vec2<f32> = vec2f(0.0f, 1.0f);
+  let scale1 : f32 = 1.0f;
+  let scale2 : f32 = 1.0f;
+  adjustedStdDev = 1.0f;
+  vRgba = vec4f(1.0f);
+  let scaledRenderSize = _hyd_uniforms_.renderSize * _hyd_uniforms_.focalAdjustment;
+  let pixelOffset : vec2<f32> = (eigenVec1 * scale1 + eigenVec2 * scale2) / scaledRenderSize;
+  gl_Position = clipCenter + vec4f(pixelOffset, 0.0f, 0.0f);
+  vSplatIndex = splatIndex;
+}
+@vertex fn main(
+  @builtin(instance_index) instance : u32,
+  @location(0u) position : vec3<f32>,
+) -> VertexOutput {
+  v_2(i32(instance), position);
+  gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5f;
+  return VertexOutput(gl_Position);
+}
+`;
+const splatPrecompute = buildSplatVertexPrecomputeSources(splatPrecomputeSource);
+if (!splatPrecompute ||
+    !splatPrecompute.computeWgsl.includes("@compute @workgroup_size(256)") ||
+    !splatPrecompute.computeWgsl.includes("v_2(i32(index), vec3f(0.0f))") ||
+    !splatPrecompute.computeWgsl.includes("_hyd_pre_adjusted[hyd_pre_index]") ||
+    !splatPrecompute.renderWgsl.includes("@location(8u) hyd_pre_clip_input") ||
+    !splatPrecompute.renderWgsl.includes("@location(11u) hyd_pre_adjusted_input") ||
+    splatPrecompute.renderWgsl.includes("var<storage")) {
+    throw new Error("expected Spark splat WGSL to split into compute and lightweight vertex stages");
+}
+if (buildSplatVertexPrecomputeSources("@vertex fn main() {}") !== null) {
+    throw new Error("expected unrelated WGSL to skip splat vertex precomputation");
 }
 
 console.log("shader metadata tests passed");

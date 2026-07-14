@@ -478,6 +478,14 @@ export interface ProgramAttribute {
     locationSpan: number;
 }
 
+export interface ProgramPrecomputedVertexBuffer {
+    shaderLocation: number;
+    format: GPUVertexFormat;
+    arrayStride: number;
+    buffer: GPUBuffer;
+    key: string;
+}
+
 export class HydProgram implements HydHashable {
     static linkedPrograms: number = 0;
 
@@ -490,7 +498,9 @@ export class HydProgram implements HydHashable {
                 `${this.vertexModule?.label || ""}:${this.fragmentModule?.label || ""}|`;
         }
         const booleanKey = this.booleanUniformVariantKey();
-        return booleanKey ? `${hash}bool:${booleanKey}|` : hash;
+        if (booleanKey) hash += `bool:${booleanKey}|`;
+        if (this.vertexPrecomputeVariantKey) hash += `precompute:${this.vertexPrecomputeVariantKey}|`;
+        return hash;
     }
     private vertexShader: HydShader;
     private fragmentShader: HydShader;
@@ -511,6 +521,8 @@ export class HydProgram implements HydHashable {
     private readonly vertexBooleanUniformOverrides = new Map<string, string>();
     private readonly fragmentBooleanUniformOverrides = new Map<string, string>();
     private readonly booleanUniformLocations = new Map<string, ProgramUniformBuffer>();
+    private vertexPrecomputeVariantKey: string = "";
+    public readonly precomputedVertexBuffers: ProgramPrecomputedVertexBuffer[] = [];
     private readonly device: GPUDevice;
 
     public deleted: boolean = false;
@@ -550,6 +562,26 @@ export class HydProgram implements HydHashable {
 
     public get attachedVertexShader(): HydShader | undefined {
         return this.vertexShader;
+    }
+
+    public get currentVertexWgsl(): string {
+        if (this.samplerOriginVariantKey) {
+            const variant = this.samplerOriginVariants.get(this.samplerOriginVariantKey);
+            if (variant) return variant.vertexWgsl;
+        }
+        return this.vertexWgsl;
+    }
+
+    public installVertexPrecomputeVariant(
+        module: GPUShaderModule,
+        wgsl: string,
+        bindings: ProgramPrecomputedVertexBuffer[],
+        key: string,
+    ) {
+        this.vertexModule = module;
+        this.vertexWgsl = wgsl;
+        this.precomputedVertexBuffers.splice(0, this.precomputedVertexBuffers.length, ...bindings);
+        this.vertexPrecomputeVariantKey = key;
     }
 
     public setUniformBlockReflection(

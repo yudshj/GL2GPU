@@ -5763,6 +5763,22 @@ class HydGlobalState {
             layoutKey += vertexBufferLayoutCacheKey(layouts[layouts.length - 1]) + '|';
             vbKeys.push(bufferHash + '|' + offset);
         }
+        for (const precomputed of this.commonState.currentProgram.precomputedVertexBuffers) {
+            const layout = {
+                arrayStride: precomputed.arrayStride,
+                stepMode: "instance",
+                attributes: [{
+                        shaderLocation: precomputed.shaderLocation,
+                        offset: 0,
+                        format: precomputed.format,
+                    }],
+            };
+            buffers.push(precomputed.buffer);
+            offsets.push(0);
+            layouts.push(layout);
+            layoutKey += vertexBufferLayoutCacheKey(layout) + '|';
+            vbKeys.push(`precomputed:${precomputed.key}`);
+        }
         const limits = this.device.limits;
         const maxVertexBuffers = Number(limits?.maxVertexBuffers ?? 8);
         const maxArrayStride = Number(limits?.maxVertexBufferArrayStride ?? 2048);
@@ -7412,7 +7428,11 @@ class HydProgram {
                 `${this.vertexModule?.label || ""}:${this.fragmentModule?.label || ""}|`;
         }
         const booleanKey = this.booleanUniformVariantKey();
-        return booleanKey ? `${hash}bool:${booleanKey}|` : hash;
+        if (booleanKey)
+            hash += `bool:${booleanKey}|`;
+        if (this.vertexPrecomputeVariantKey)
+            hash += `precompute:${this.vertexPrecomputeVariantKey}|`;
+        return hash;
     }
     vertexShader;
     fragmentShader;
@@ -7431,6 +7451,8 @@ class HydProgram {
     vertexBooleanUniformOverrides = new Map();
     fragmentBooleanUniformOverrides = new Map();
     booleanUniformLocations = new Map();
+    vertexPrecomputeVariantKey = "";
+    precomputedVertexBuffers = [];
     device;
     deleted = false;
     destroyed = false;
@@ -7467,6 +7489,20 @@ class HydProgram {
     usesFlatInterpolation = false;
     get attachedVertexShader() {
         return this.vertexShader;
+    }
+    get currentVertexWgsl() {
+        if (this.samplerOriginVariantKey) {
+            const variant = this.samplerOriginVariants.get(this.samplerOriginVariantKey);
+            if (variant)
+                return variant.vertexWgsl;
+        }
+        return this.vertexWgsl;
+    }
+    installVertexPrecomputeVariant(module, wgsl, bindings, key) {
+        this.vertexModule = module;
+        this.vertexWgsl = wgsl;
+        this.precomputedVertexBuffers.splice(0, this.precomputedVertexBuffers.length, ...bindings);
+        this.vertexPrecomputeVariantKey = key;
     }
     setUniformBlockReflection(uniforms, blocks) {
         this.uniformReflection = uniforms;
@@ -11796,7 +11832,181 @@ function makeShaderMetadata(source, type, wgsl = "") {
     };
 }
 
+;// ./src/components/shaderSplatVertexPrecompute.ts
+function matchingBrace(source, open) {
+    let depth = 0;
+    for (let index = open; index < source.length; index++) {
+        if (source[index] === "{")
+            depth++;
+        if (source[index] === "}") {
+            depth--;
+            if (depth === 0)
+                return index;
+        }
+    }
+    return -1;
+}
+function vertexMainRange(source) {
+    const match = /@vertex\s+fn\s+main\s*\(/m.exec(source);
+    if (!match)
+        return null;
+    const bodyStart = source.indexOf("{", match.index);
+    if (bodyStart < 0)
+        return null;
+    const bodyEnd = matchingBrace(source, bodyStart);
+    if (bodyEnd < 0)
+        return null;
+    return { start: match.index, bodyStart, end: bodyEnd + 1 };
+}
+function insertModuleDeclarations(source, declarations) {
+    const diagnostic = /^diagnostic\([^\n]*\);\s*/.exec(source);
+    const offset = diagnostic ? diagnostic[0].length : 0;
+    return source.slice(0, offset) + declarations + "\n" + source.slice(offset);
+}
+function buildSplatVertexPrecomputeSources(source, options = {}) {
+    const requiredMarkers = [
+        "fn v_2(gl_InstanceIndex : i32, position : vec3<f32>)",
+        "let orderingCoord : vec2<i32>",
+        "let splatIndex : u32",
+        "let clipCenter : vec4<f32>",
+        "let eigenVec1 : vec2<f32>",
+        "let eigenVec2 : vec2<f32>",
+        "let scale1 : f32",
+        "let scale2 : f32",
+        "let pixelOffset : vec2<f32>",
+        "_hyd_uniforms_.renderSize",
+        "_hyd_uniforms_.focalAdjustment",
+    ];
+    if (requiredMarkers.some((marker) => !source.includes(marker)))
+        return null;
+    const mainRange = vertexMainRange(source);
+    if (!mainRange)
+        return null;
+    const signature = source.slice(mainRange.start, mainRange.bodyStart + 1);
+    const instance = /@builtin\(instance_index\)\s+([A-Za-z_]\w*)\s*:\s*u32/.exec(signature)?.[1];
+    const position = /@location\(0u?\)\s+([A-Za-z_]\w*)\s*:\s*vec3<f32>/.exec(signature)?.[1];
+    if (!instance || !position)
+        return null;
+    const originalBody = source.slice(mainRange.bodyStart + 1, mainRange.end - 1);
+    const returnStart = originalBody.lastIndexOf("return ");
+    const returnEnd = returnStart < 0 ? -1 : originalBody.indexOf(";", returnStart);
+    if (returnStart < 0 || returnEnd < 0)
+        return null;
+    const returnStatement = originalBody.slice(returnStart, returnEnd + 1).trim();
+    const bindings = { clip: 7, axes: 8, rgba: 9, adjustedStdDev: 10 };
+    const locations = { clip: 8, axes: 9, rgba: 10, adjustedStdDev: 11 };
+    const readDeclarations = [
+        `@group(0) @binding(${bindings.clip}) var<storage, read> _hyd_pre_clip: array<vec4f>;`,
+        `@group(0) @binding(${bindings.axes}) var<storage, read> _hyd_pre_axes: array<vec4f>;`,
+        `@group(0) @binding(${bindings.rgba}) var<storage, read> _hyd_pre_rgba: array<vec4f>;`,
+        `@group(0) @binding(${bindings.adjustedStdDev}) var<storage, read> _hyd_pre_adjusted: array<f32>;`,
+    ].join("\n");
+    const writeDeclarations = readDeclarations.replace(/var<storage, read>/g, "var<storage, read_write>");
+    const parameterEnd = signature.lastIndexOf(")");
+    if (parameterEnd < 0)
+        return null;
+    const renderSignature = signature.slice(0, parameterEnd) +
+        `, @location(${locations.clip}u) hyd_pre_clip_input: vec4f` +
+        `, @location(${locations.axes}u) hyd_pre_axes_input: vec4f` +
+        `, @location(${locations.rgba}u) hyd_pre_rgba_input: vec4f` +
+        `, @location(${locations.adjustedStdDev}u) hyd_pre_adjusted_input: f32` +
+        signature.slice(parameterEnd);
+    const renderBody = `
+  let hyd_pre_index = ${instance};
+  gl_Position = vec4f(0.0f, 0.0f, 2.0f, 1.0f);
+  adjustedStdDev = hyd_pre_adjusted_input;
+  vRgba = vec4f(0.0f);
+  vSplatUv = vec2f(0.0f);
+  vSplatIndex = 0u;
+  vNdc = vec3f(0.0f);
+  vFragDepth = 0.0f;
+  vIsPerspective = 0.0f;
+  if (adjustedStdDev > 0.0f) {
+    let hyd_clip_center = hyd_pre_clip_input;
+    let hyd_axes = hyd_pre_axes_input;
+    vRgba = hyd_pre_rgba_input;
+    vSplatUv = ${position}.xy * adjustedStdDev;
+    let hyd_pixel_offset = hyd_axes.xy * ${position}.x + hyd_axes.zw * ${position}.y;
+    let hyd_scaled_render_size = _hyd_uniforms_.renderSize * _hyd_uniforms_.focalAdjustment;
+    let hyd_ndc_offset = (vec2f(2.0f) / hyd_scaled_render_size) * hyd_pixel_offset;
+    let hyd_ndc_center = hyd_clip_center.xyz / hyd_clip_center.w;
+    vNdc = vec3f(hyd_ndc_center.xy + hyd_ndc_offset, hyd_ndc_center.z);
+    gl_Position = vec4f(vNdc.xy * hyd_clip_center.w, hyd_clip_center.z, hyd_clip_center.w);
+  }
+  gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5f;
+  ${returnStatement}
+`;
+    const renderMain = renderSignature + renderBody + "}";
+    let renderWgsl = source.slice(0, mainRange.start) + renderMain + source.slice(mainRange.end);
+    const pixelOffset = /\n\s*let pixelOffset\s*:\s*vec2<f32>\s*=/m.exec(source);
+    if (!pixelOffset)
+        return null;
+    const storeOutputs = `
+  let hyd_pre_index = u32(gl_InstanceIndex);
+  var hyd_effective_stddev = min(adjustedStdDev, ${Number.isFinite(options.maxStdDev) && options.maxStdDev > 0
+        ? `${options.maxStdDev.toFixed(9)}f`
+        : "adjustedStdDev"});
+  let hyd_peak_alpha = vRgba.w;
+  let hyd_min_alpha = max(_hyd_uniforms_.minAlpha, ${Number.isFinite(options.alphaCutoff) && options.alphaCutoff > 0
+        ? `${options.alphaCutoff.toFixed(9)}f`
+        : "0.0f"});
+  let hyd_falloff = clamp(_hyd_uniforms_.falloff, 0.0f, 1.0f);
+  var hyd_required_gaussian = 0.0f;
+  if (hyd_falloff > 0.0f && hyd_min_alpha > 0.0f && hyd_peak_alpha > 0.0f) {
+    if (hyd_peak_alpha <= 1.0f) {
+      let hyd_floor_alpha = hyd_peak_alpha * (1.0f - hyd_falloff);
+      if (hyd_floor_alpha < hyd_min_alpha) {
+        hyd_required_gaussian = clamp(
+          ((hyd_min_alpha / hyd_peak_alpha) - (1.0f - hyd_falloff)) / hyd_falloff,
+          0.0f,
+          1.0f);
+      }
+    } else {
+      let hyd_target_alpha = (hyd_min_alpha - (1.0f - hyd_falloff)) / hyd_falloff;
+      if (hyd_target_alpha > 0.0f) {
+        let hyd_alpha_power = exp(((hyd_peak_alpha * hyd_peak_alpha) - 1.0f) / 2.71828174591064453125f);
+        hyd_required_gaussian = clamp(
+          1.0f - pow(max(0.0f, 1.0f - hyd_target_alpha), 1.0f / hyd_alpha_power),
+          0.0f,
+          1.0f);
+      }
+    }
+  }
+  if (hyd_required_gaussian > 0.0f) {
+    hyd_effective_stddev = min(
+      hyd_effective_stddev,
+      sqrt(max(0.0f, -2.0f * log(hyd_required_gaussian))));
+  }
+  if (hyd_effective_stddev <= 0.0f) { return; }
+  let hyd_stddev_ratio = hyd_effective_stddev / adjustedStdDev;
+  _hyd_pre_clip[hyd_pre_index] = clipCenter;
+  _hyd_pre_axes[hyd_pre_index] = vec4f(
+    eigenVec1 * scale1 * hyd_stddev_ratio,
+    eigenVec2 * scale2 * hyd_stddev_ratio);
+  _hyd_pre_rgba[hyd_pre_index] = vRgba;
+  _hyd_pre_adjusted[hyd_pre_index] = hyd_effective_stddev;
+  return;
+`;
+    let computeWgsl = source.slice(0, pixelOffset.index) + storeOutputs + source.slice(pixelOffset.index);
+    const computeMainRange = vertexMainRange(computeWgsl);
+    if (!computeMainRange)
+        return null;
+    computeWgsl = computeWgsl.slice(0, computeMainRange.start) + computeWgsl.slice(computeMainRange.end);
+    computeWgsl = insertModuleDeclarations(computeWgsl, writeDeclarations);
+    computeWgsl += `
+@compute @workgroup_size(256)
+fn hyd_precompute_main(@builtin(global_invocation_id) global_id: vec3u) {
+  let index = global_id.x;
+  if (index >= arrayLength(&_hyd_pre_adjusted)) { return; }
+  _hyd_pre_adjusted[index] = 0.0f;
+  v_2(i32(index), vec3f(0.0f));
+}
+`;
+    return { renderWgsl, computeWgsl, bindings, locations };
+}
+
 ;// ./src/components/hydWebGLStatic.ts
+
 
 
 
@@ -12181,6 +12391,8 @@ class HydWebGLStatic {
     triangleFanIndexBuffers = new Map();
     lineLoopIndexBuffers = new Map();
     lastProvokingVertexIndexBuffers = new Map();
+    experimentalVertexPrecomputeBuffers = [];
+    experimentalVertexPrecomputeGeneration = 0;
     hydTextureObjects = new WeakMap();
     hydBufferObjects = new WeakMap();
     contextToken = {};
@@ -13056,6 +13268,316 @@ fn fragmentMain(@builtin(position) position : vec4f) -> @location(0) vec4f {
         this.materializePendingClear();
         this.flushUniforms();
         this.hydRpCache.CeSubmitAndReset();
+    }
+    async __prepareSplatVertexPrecompute(instanceCount, options = {}) {
+        const started = performance.now();
+        const program = this.hydGlobalState.commonState.currentProgram;
+        if (!program || !program.linked || instanceCount <= 0) {
+            return { applied: false, instanceCount, outputBytes: 0, elapsedMs: 0, reason: "no linked program" };
+        }
+        if (program.precomputedVertexBuffers.length > 0) {
+            return { applied: true, instanceCount, outputBytes: instanceCount * 52, elapsedMs: 0 };
+        }
+        const sources = buildSplatVertexPrecomputeSources(program.currentVertexWgsl, options);
+        if (!sources) {
+            return { applied: false, instanceCount, outputBytes: 0, elapsedMs: 0, reason: "vertex shape did not match" };
+        }
+        if (/\boverride\s+[A-Za-z_]/.test(sources.computeWgsl)) {
+            return { applied: false, instanceCount, outputBytes: 0, elapsedMs: 0, reason: "pipeline overrides are unsupported" };
+        }
+        const orderingSampler = program.hydSamplers.find((sampler) => sampler.name === "ordering");
+        const splatsSampler = program.hydSamplers.find((sampler) => sampler.name === "extSplats");
+        const splats2Sampler = program.hydSamplers.find((sampler) => sampler.name === "extSplats2");
+        if (!orderingSampler || !splatsSampler || !splats2Sampler) {
+            return { applied: false, instanceCount, outputBytes: 0, elapsedMs: 0, reason: "required samplers are unavailable" };
+        }
+        const samplerBindings = [orderingSampler, splatsSampler, splats2Sampler].map((sampler) => ({
+            sampler,
+            texture: this.hydGlobalState.getTextureUnitBinding(sampler.textureUnit, sampler.bindingViewDimension),
+        }));
+        if (samplerBindings.some(({ texture }) => !texture?.texture)) {
+            return { applied: false, instanceCount, outputBytes: 0, elapsedMs: 0, reason: "required textures are unavailable" };
+        }
+        const vectorBytes = instanceCount * 4 * Float32Array.BYTES_PER_ELEMENT;
+        const scalarBytes = instanceCount * Float32Array.BYTES_PER_ELEMENT;
+        const maxStorageBytes = Number(this.hydDevice.limits.maxStorageBufferBindingSize);
+        if (vectorBytes > maxStorageBytes || scalarBytes > maxStorageBytes) {
+            return {
+                applied: false,
+                instanceCount,
+                outputBytes: 0,
+                elapsedMs: 0,
+                reason: `precompute buffer exceeds maxStorageBufferBindingSize (${vectorBytes} > ${maxStorageBytes})`,
+            };
+        }
+        this._der_flush();
+        await this.hydDevice.queue.onSubmittedWorkDone();
+        const renderModule = this.hydDevice.createShaderModule({
+            label: "Hyd precomputed splat vertex module",
+            code: sources.renderWgsl,
+        });
+        const computeModule = this.hydDevice.createShaderModule({
+            label: "Hyd splat vertex precompute module",
+            code: sources.computeWgsl,
+        });
+        const [renderInfo, computeInfo] = await Promise.all([
+            renderModule.getCompilationInfo(),
+            computeModule.getCompilationInfo(),
+        ]);
+        const compilationErrors = [...renderInfo.messages, ...computeInfo.messages]
+            .filter((message) => message.type === "error");
+        if (compilationErrors.length > 0) {
+            throw new Error(`Splat vertex precompute shader failed: ${compilationErrors
+                .map((message) => `${message.lineNum}:${message.linePos} ${message.message}`).join("; ")}`);
+        }
+        const generation = ++this.experimentalVertexPrecomputeGeneration;
+        const makeStorageBuffer = (label, size) => this.hydDevice.createBuffer({
+            label: `${label}-${generation}`,
+            size,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_SRC,
+        });
+        const clipBuffer = makeStorageBuffer("HydPrecomputeClip", vectorBytes);
+        const axesBuffer = makeStorageBuffer("HydPrecomputeAxes", vectorBytes);
+        const rgbaBuffer = makeStorageBuffer("HydPrecomputeRgba", vectorBytes);
+        const adjustedBuffer = makeStorageBuffer("HydPrecomputeAdjusted", scalarBytes);
+        let outputBuffers = [clipBuffer, axesBuffer, rgbaBuffer, adjustedBuffer];
+        const uniformBuffer = this.hydDevice.createBuffer({
+            label: `HydPrecomputeUniform-${generation}`,
+            size: program.alignedUniformSize,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this.hydDevice.queue.writeBuffer(uniformBuffer, 0, program.activeUniform);
+        const textureBindingEntries = samplerBindings.map(({ sampler, texture }) => {
+            const samplerIndex = program.hydSamplers.indexOf(sampler);
+            const binding = (program.alignedUniformSize > 0 ? 1 : 0) + samplerIndex * 2 + 1;
+            return {
+                sampler,
+                texture: texture,
+                binding,
+            };
+        });
+        const layoutEntries = [{
+                binding: 0,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "uniform", minBindingSize: program.alignedUniformSize },
+            }];
+        const bindGroupEntries = [{
+                binding: 0,
+                resource: { buffer: uniformBuffer, size: program.alignedUniformSize },
+            }];
+        for (const entry of textureBindingEntries) {
+            layoutEntries.push({
+                binding: entry.binding,
+                visibility: GPUShaderStage.COMPUTE,
+                texture: {
+                    sampleType: "uint",
+                    viewDimension: entry.sampler.viewDimension,
+                    multisampled: false,
+                },
+            });
+            bindGroupEntries.push({
+                binding: entry.binding,
+                resource: entry.texture.texture.createView({ dimension: entry.sampler.viewDimension }),
+            });
+        }
+        const outputBindings = [
+            sources.bindings.clip,
+            sources.bindings.axes,
+            sources.bindings.rgba,
+            sources.bindings.adjustedStdDev,
+        ];
+        outputBindings.forEach((binding, index) => {
+            layoutEntries.push({
+                binding,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "storage", minBindingSize: index === 3 ? scalarBytes : vectorBytes },
+            });
+            bindGroupEntries.push({
+                binding,
+                resource: {
+                    buffer: outputBuffers[index],
+                    size: index === 3 ? scalarBytes : vectorBytes,
+                },
+            });
+        });
+        const computeBindGroupLayout = this.hydDevice.createBindGroupLayout({ entries: layoutEntries });
+        const computePipeline = await this.hydDevice.createComputePipelineAsync({
+            label: "Hyd splat vertex precompute pipeline",
+            layout: this.hydDevice.createPipelineLayout({ bindGroupLayouts: [computeBindGroupLayout] }),
+            compute: { module: computeModule, entryPoint: "hyd_precompute_main" },
+        });
+        const computeBindGroup = this.hydDevice.createBindGroup({
+            label: "Hyd splat vertex precompute bind group",
+            layout: computeBindGroupLayout,
+            entries: bindGroupEntries,
+        });
+        const encoder = this.hydDevice.createCommandEncoder({ label: "Hyd splat vertex precompute encoder" });
+        const pass = encoder.beginComputePass({ label: "Hyd splat vertex precompute pass" });
+        pass.setPipeline(computePipeline);
+        pass.setBindGroup(0, computeBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(instanceCount / 256));
+        pass.end();
+        this.hydDevice.queue.submit([encoder.finish()]);
+        await this.hydDevice.queue.onSubmittedWorkDone();
+        uniformBuffer.destroy();
+        const adjustedReadback = this.hydDevice.createBuffer({
+            label: `HydPrecomputeAdjustedReadback-${generation}`,
+            size: scalarBytes,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        });
+        const readbackEncoder = this.hydDevice.createCommandEncoder({
+            label: "Hyd splat visibility readback encoder",
+        });
+        readbackEncoder.copyBufferToBuffer(adjustedBuffer, 0, adjustedReadback, 0, scalarBytes);
+        this.hydDevice.queue.submit([readbackEncoder.finish()]);
+        await adjustedReadback.mapAsync(GPUMapMode.READ);
+        const adjustedValues = new Float32Array(adjustedReadback.getMappedRange());
+        const visibleIndices = new Uint32Array(instanceCount);
+        let visibleInstanceCount = 0;
+        for (let index = 0; index < instanceCount; index++) {
+            if (adjustedValues[index] > 0)
+                visibleIndices[visibleInstanceCount++] = index;
+        }
+        adjustedReadback.unmap();
+        adjustedReadback.destroy();
+        if (visibleInstanceCount === 0) {
+            outputBuffers.forEach((buffer) => buffer.destroy());
+            throw new Error("Splat vertex precompute culled every instance");
+        }
+        if (visibleInstanceCount < instanceCount) {
+            const compactVectorBytes = visibleInstanceCount * 16;
+            const compactScalarBytes = visibleInstanceCount * 4;
+            const compactClip = makeStorageBuffer("HydCompactClip", compactVectorBytes);
+            const compactAxes = makeStorageBuffer("HydCompactAxes", compactVectorBytes);
+            const compactRgba = makeStorageBuffer("HydCompactRgba", compactVectorBytes);
+            const compactAdjusted = makeStorageBuffer("HydCompactAdjusted", compactScalarBytes);
+            const indexBuffer = this.hydDevice.createBuffer({
+                label: `HydVisibleSplatIndices-${generation}`,
+                size: visibleInstanceCount * Uint32Array.BYTES_PER_ELEMENT,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+            this.hydDevice.queue.writeBuffer(indexBuffer, 0, visibleIndices.buffer, 0, visibleInstanceCount * Uint32Array.BYTES_PER_ELEMENT);
+            const vectorGatherModule = this.hydDevice.createShaderModule({
+                label: "Hyd compact splat vectors",
+                code: `
+@group(0) @binding(0) var<storage, read> indices: array<u32>;
+@group(0) @binding(1) var<storage, read> sourceClip: array<vec4f>;
+@group(0) @binding(2) var<storage, read> sourceAxes: array<vec4f>;
+@group(0) @binding(3) var<storage, read> sourceRgba: array<vec4f>;
+@group(0) @binding(4) var<storage, read_write> compactClip: array<vec4f>;
+@group(0) @binding(5) var<storage, read_write> compactAxes: array<vec4f>;
+@group(0) @binding(6) var<storage, read_write> compactRgba: array<vec4f>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= arrayLength(&indices)) { return; }
+  let source = indices[id.x];
+  compactClip[id.x] = sourceClip[source];
+  compactAxes[id.x] = sourceAxes[source];
+  compactRgba[id.x] = sourceRgba[source];
+}`,
+            });
+            const scalarGatherModule = this.hydDevice.createShaderModule({
+                label: "Hyd compact splat scalars",
+                code: `
+@group(0) @binding(0) var<storage, read> indices: array<u32>;
+@group(0) @binding(1) var<storage, read> sourceAdjusted: array<f32>;
+@group(0) @binding(2) var<storage, read_write> compactAdjusted: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= arrayLength(&indices)) { return; }
+  compactAdjusted[id.x] = sourceAdjusted[indices[id.x]];
+}`,
+            });
+            const vectorGatherPipeline = await this.hydDevice.createComputePipelineAsync({
+                label: "Hyd compact splat vector pipeline",
+                layout: "auto",
+                compute: { module: vectorGatherModule, entryPoint: "main" },
+            });
+            const scalarGatherPipeline = await this.hydDevice.createComputePipelineAsync({
+                label: "Hyd compact splat scalar pipeline",
+                layout: "auto",
+                compute: { module: scalarGatherModule, entryPoint: "main" },
+            });
+            const vectorGatherBindGroup = this.hydDevice.createBindGroup({
+                layout: vectorGatherPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: indexBuffer } },
+                    { binding: 1, resource: { buffer: clipBuffer } },
+                    { binding: 2, resource: { buffer: axesBuffer } },
+                    { binding: 3, resource: { buffer: rgbaBuffer } },
+                    { binding: 4, resource: { buffer: compactClip } },
+                    { binding: 5, resource: { buffer: compactAxes } },
+                    { binding: 6, resource: { buffer: compactRgba } },
+                ],
+            });
+            const scalarGatherBindGroup = this.hydDevice.createBindGroup({
+                layout: scalarGatherPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: indexBuffer } },
+                    { binding: 1, resource: { buffer: adjustedBuffer } },
+                    { binding: 2, resource: { buffer: compactAdjusted } },
+                ],
+            });
+            const gatherEncoder = this.hydDevice.createCommandEncoder({
+                label: "Hyd compact splat precompute encoder",
+            });
+            const vectorPass = gatherEncoder.beginComputePass({ label: "Hyd compact splat vector pass" });
+            vectorPass.setPipeline(vectorGatherPipeline);
+            vectorPass.setBindGroup(0, vectorGatherBindGroup);
+            vectorPass.dispatchWorkgroups(Math.ceil(visibleInstanceCount / 256));
+            vectorPass.end();
+            const scalarPass = gatherEncoder.beginComputePass({ label: "Hyd compact splat scalar pass" });
+            scalarPass.setPipeline(scalarGatherPipeline);
+            scalarPass.setBindGroup(0, scalarGatherBindGroup);
+            scalarPass.dispatchWorkgroups(Math.ceil(visibleInstanceCount / 256));
+            scalarPass.end();
+            this.hydDevice.queue.submit([gatherEncoder.finish()]);
+            await this.hydDevice.queue.onSubmittedWorkDone();
+            indexBuffer.destroy();
+            outputBuffers.forEach((buffer) => buffer.destroy());
+            outputBuffers = [compactClip, compactAxes, compactRgba, compactAdjusted];
+        }
+        const [finalClip, finalAxes, finalRgba, finalAdjusted] = outputBuffers;
+        program.installVertexPrecomputeVariant(renderModule, sources.renderWgsl, [
+            {
+                shaderLocation: sources.locations.clip,
+                format: "float32x4",
+                arrayStride: 16,
+                buffer: finalClip,
+                key: `${generation}:clip`,
+            },
+            {
+                shaderLocation: sources.locations.axes,
+                format: "float32x4",
+                arrayStride: 16,
+                buffer: finalAxes,
+                key: `${generation}:axes`,
+            },
+            {
+                shaderLocation: sources.locations.rgba,
+                format: "float32x4",
+                arrayStride: 16,
+                buffer: finalRgba,
+                key: `${generation}:rgba`,
+            },
+            {
+                shaderLocation: sources.locations.adjustedStdDev,
+                format: "float32",
+                arrayStride: 4,
+                buffer: finalAdjusted,
+                key: `${generation}:adjusted`,
+            },
+        ], `${generation}:${instanceCount}:${visibleInstanceCount}`);
+        this.experimentalVertexPrecomputeBuffers.push(...outputBuffers);
+        this.hydGlobalState.invalidateDerivedVertexState();
+        this.lastDrawPbv = null;
+        return {
+            applied: true,
+            instanceCount,
+            outputBytes: visibleInstanceCount * 52,
+            elapsedMs: performance.now() - started,
+            visibleInstanceCount,
+        };
     }
     _frameEnd() {
         if (this.canvasSizeDirty) {
@@ -29114,6 +29636,14 @@ function createHydContextFacade(context, contextType) {
             value: webgl2 ? "WebGL2RenderingContext" : "WebGLRenderingContext",
         },
     });
+    if (globalThis.__HYD_EXPOSE_INTERNALS === true) {
+        Object.defineProperty(facade, "__hydInternal", {
+            configurable: false,
+            enumerable: false,
+            writable: false,
+            value: context,
+        });
+    }
     return facade;
 }
 function createHydContext(runtime, element, _shader_info_url, arg0, arg1, existingGpuContext) {

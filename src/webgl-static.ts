@@ -459,6 +459,14 @@ function createHydContextFacade(context: HydWebGLStatic, contextType: string): H
             value: webgl2 ? "WebGL2RenderingContext" : "WebGLRenderingContext",
         },
     });
+    if ((globalThis as any).__HYD_EXPOSE_INTERNALS === true) {
+        Object.defineProperty(facade, "__hydInternal", {
+            configurable: false,
+            enumerable: false,
+            writable: false,
+            value: context,
+        });
+    }
     return facade;
 }
 
