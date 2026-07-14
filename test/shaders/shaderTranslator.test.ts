@@ -255,8 +255,12 @@ const robustTextureLoad = enforceWebGlTextureLoadBounds(
     }],
 );
 if (robustTextureLoad.rewrittenLoads !== 1 || robustTextureLoad.helperCount !== 1 ||
-    !robustTextureLoad.wgsl.includes("_hyd_webgl_robust_load_2d_f32(colorT, nextCoord(), nextLevel())") ||
+    !robustTextureLoad.wgsl.includes(
+        "_hyd_webgl_robust_load_2d_f32(colorT, nextCoord(), nextLevel(), " +
+        "_hyd_uniforms_._hyd_samplerFlipY_color)") ||
     !robustTextureLoad.wgsl.includes("level >= i32(textureNumLevels(tex))") ||
+    !robustTextureLoad.wgsl.includes(
+        "select(coord.y, size.y - 1i - coord.y, flipY > 0.5f)") ||
     !robustTextureLoad.wgsl.includes("return vec4f(0.0f);")) {
     throw new Error(`unexpected robust textureLoad lowering:\n${robustTextureLoad.wgsl}`);
 }
@@ -267,6 +271,9 @@ const robustArrayLoad = enforceWebGlTextureLoadBounds(
 );
 if (robustArrayLoad.rewrittenLoads !== 1 ||
     !robustArrayLoad.wgsl.includes("layer >= i32(textureNumLayers(tex))") ||
+    !robustArrayLoad.wgsl.includes("coord, layer, level, 0.0f)") ||
+    !robustArrayLoad.wgsl.includes(
+        "select(coord.y, size.y - 1i - coord.y, flipY > 0.5f)") ||
     !robustArrayLoad.wgsl.includes("return vec4i(0i);")) {
     throw new Error(`unexpected robust array textureLoad lowering:\n${robustArrayLoad.wgsl}`);
 }

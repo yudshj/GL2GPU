@@ -6,6 +6,7 @@ import { hydTrim } from "./shaderSource";
 import { wgslUniformMemberDeclaration } from "./shaderWgslTypes";
 
 export { hydTrim };
+export { samplerFlipYUniformName } from "./shaderInternalUniforms";
 
 export interface NameAndType {
     name: string;
@@ -52,10 +53,6 @@ export interface InitShaderInfoType {
     debug_info: string;
     shader_capture?: ShaderCaptureRecord;
     uniform_blocks?: GlslUniformBlockDeclaration[];
-}
-
-export function samplerFlipYUniformName(samplerName: string): string {
-    return `_hyd_samplerFlipY_${samplerName}`;
 }
 
 export type SamplerOriginCoordinateKind = 2 | 3 | "cube";

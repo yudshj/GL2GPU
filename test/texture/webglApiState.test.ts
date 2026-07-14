@@ -209,6 +209,33 @@ if (!sampler3dStatic.includes("fn _hyd_samplerOriginCoordFlip3") ||
     sampler3dStatic.includes("_hyd_samplerFlipY_volume")) {
     throw new Error(`expected static sampler3D Y-only origin specialization:\n${sampler3dStatic}`);
 }
+const texelLoadDynamic = `
+fn load(coord: vec2i, level: i32) -> vec4u {
+  return _hyd_webgl_robust_load_2d_u32(
+    pixelsT, coord, level, _hyd_uniforms_._hyd_samplerFlipY_pixels);
+}`;
+const texelLoadFlipped = specializeSamplerOriginWgsl(texelLoadDynamic, new Map([["pixels", true]]));
+const texelLoadUnflipped = specializeSamplerOriginWgsl(texelLoadDynamic, new Map([["pixels", false]]));
+if (!texelLoadFlipped.includes("pixelsT, coord, level, 1.0f") ||
+    !texelLoadUnflipped.includes("pixelsT, coord, level, 0.0f") ||
+    texelLoadFlipped.includes("_hyd_samplerFlipY_pixels") ||
+    texelLoadUnflipped.includes("_hyd_samplerFlipY_pixels")) {
+    throw new Error(
+        `expected static texel-load origin specialization:\n${texelLoadFlipped}\n${texelLoadUnflipped}`,
+    );
+}
+const prefixedTexelLoads = specializeSamplerOriginWgsl(`
+fn loadBoth(coord: vec2i, level: i32) -> vec4u {
+  return _hyd_webgl_robust_load_2d_u32(
+    pixelsT, coord, level, _hyd_uniforms_._hyd_samplerFlipY_pixels) +
+    _hyd_webgl_robust_load_2d_u32(
+      pixels2T, coord, level, _hyd_uniforms_._hyd_samplerFlipY_pixels2);
+}`, new Map([["pixels", false], ["pixels2", true]]));
+if (!prefixedTexelLoads.includes("pixelsT, coord, level, 0.0f") ||
+    !prefixedTexelLoads.includes("pixels2T, coord, level, 1.0f") ||
+    /(?:_hyd_samplerFlipY_|[01]\.0f2)/.test(prefixedTexelLoads)) {
+    throw new Error(`sampler-origin specialization must respect identifier boundaries:\n${prefixedTexelLoads}`);
+}
 const samplerCubeDynamic = `
 fn _hyd_samplerCubeCoordScale(direction: vec3<f32>, scale: vec2<f32>) -> vec3<f32> {
   return direction;

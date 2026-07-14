@@ -6,10 +6,9 @@ import {
     NameAndType,
     SamplerOriginCoordinateKind,
     samplerOriginCoordinateKind,
-    samplerFlipYUniformName,
     TextureNameAndType,
 } from "./shaderDB";
-import { FRAG_COORD_HEIGHT_UNIFORM_NAME } from "./shaderInternalUniforms";
+import { FRAG_COORD_HEIGHT_UNIFORM_NAME, samplerFlipYUniformName } from "./shaderInternalUniforms";
 import { bridgeGlslEs100Identifiers, renameUserDefinedFunctions } from "./shaderGlslIdentifiers";
 import {
     lowerEs100GlobalInitializers,

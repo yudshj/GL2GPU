@@ -4,7 +4,6 @@ import {HydShader} from "./hydShader";
 import {
     MergeShaderInfo,
     SamplerOriginCoordinateKind,
-    samplerFlipYUniformName,
     samplerOriginCoordinateKind,
     ShaderInfo2HydAus,
     ShaderInfo2String,
@@ -15,6 +14,7 @@ import {
     DEPTH_RANGE_FAR_UNIFORM_NAME,
     DEPTH_RANGE_NEAR_UNIFORM_NAME,
     FRAG_COORD_HEIGHT_UNIFORM_NAME,
+    samplerFlipYUniformName,
 } from "./shaderInternalUniforms";
 import { HydHashable } from './base/hydHashable';
 import { ShaderTranslator } from './shaderTranslator';
@@ -378,6 +378,14 @@ function replaceSamplerOriginCalls(
         }
         rewritten += out.slice(last);
         out = rewritten;
+    }
+    const dynamicUniform = `_hyd_uniforms_.${uniformName}`;
+    const escapedDynamicUniform = dynamicUniform.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const dynamicUniformPattern = new RegExp(`${escapedDynamicUniform}\\b`, "g");
+    const dynamicUniformMatches = out.match(dynamicUniformPattern);
+    if (dynamicUniformMatches) {
+        replacements += dynamicUniformMatches.length;
+        out = out.replace(dynamicUniformPattern, flip ? "1.0f" : "0.0f");
     }
     return { wgsl: out, replacements, flipDimensions };
 }

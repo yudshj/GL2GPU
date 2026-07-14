@@ -1,4 +1,5 @@
 import type { TextureNameAndType } from "./shaderDB";
+import { samplerFlipYUniformName } from "./shaderInternalUniforms";
 
 type SampleComponent = "f32" | "i32" | "u32";
 type TextureDimension = "2d" | "2d_array" | "3d";
@@ -208,7 +209,7 @@ function helperSource(name: string, type: TextureLoadType): string {
     const result = returnType(type.component);
     const zero = zeroValue(type.component);
     if (type.dimension === "2d_array") {
-        return `fn ${name}(tex: ${type.textureType}, coord: vec2i, layer: i32, level: i32) -> ${result} {
+        return `fn ${name}(tex: ${type.textureType}, coord: vec2i, layer: i32, level: i32, flipY: f32) -> ${result} {
   if (level < 0i || level >= i32(textureNumLevels(tex)) || layer < 0i || layer >= i32(textureNumLayers(tex))) {
     return ${zero};
   }
@@ -216,11 +217,15 @@ function helperSource(name: string, type: TextureLoadType): string {
   if (any(coord < vec2i(0i)) || any(coord >= size)) {
     return ${zero};
   }
-  return textureLoad(tex, coord, layer, level);
+  let loadCoord = vec2i(coord.x, select(coord.y, size.y - 1i - coord.y, flipY > 0.5f));
+  return textureLoad(tex, loadCoord, layer, level);
 }`;
     }
     const coordinateType = type.dimension === "3d" ? "vec3i" : "vec2i";
-    return `fn ${name}(tex: ${type.textureType}, coord: ${coordinateType}, level: i32) -> ${result} {
+    const loadCoordinate = type.dimension === "3d"
+        ? "vec3i(coord.x, select(coord.y, size.y - 1i - coord.y, flipY > 0.5f), coord.z)"
+        : "vec2i(coord.x, select(coord.y, size.y - 1i - coord.y, flipY > 0.5f))";
+    return `fn ${name}(tex: ${type.textureType}, coord: ${coordinateType}, level: i32, flipY: f32) -> ${result} {
   if (level < 0i || level >= i32(textureNumLevels(tex))) {
     return ${zero};
   }
@@ -228,7 +233,8 @@ function helperSource(name: string, type: TextureLoadType): string {
   if (any(coord < ${coordinateType}(0i)) || any(coord >= size)) {
     return ${zero};
   }
-  return textureLoad(tex, coord, level);
+  let loadCoord = ${loadCoordinate};
+  return textureLoad(tex, loadCoord, level);
 }`;
 }
 
@@ -246,9 +252,17 @@ export function enforceWebGlTextureLoadBounds(
     samplers: TextureNameAndType[],
 ): WgslRobustnessResult {
     const textureTypes = new Map<string, TextureLoadType>();
+    const samplerFlipUniforms = new Map<string, string>();
     for (const sampler of samplers) {
         const type = parseTextureType(sampler.wgsl_texture_type);
-        if (type) textureTypes.set(`${sampler.name}T`, type);
+        if (type) {
+            const textureName = `${sampler.name}T`;
+            textureTypes.set(textureName, type);
+            samplerFlipUniforms.set(
+                textureName,
+                `_hyd_uniforms_.${samplerFlipYUniformName(sampler.name)}`,
+            );
+        }
     }
     const typedIdentifier = /\b([A-Za-z_]\w*)\s*:\s*(texture_(?:2d|2d_array|3d)\s*<\s*(?:f32|i32|u32)\s*>)/g;
     for (let match = typedIdentifier.exec(wgsl); match !== null; match = typedIdentifier.exec(wgsl)) {
@@ -306,7 +320,7 @@ export function enforceWebGlTextureLoadBounds(
         replacements.push({
             start: index,
             end: close + 1,
-            text: `${helper.name}(${args.join(", ")})`,
+            text: `${helper.name}(${args.join(", ")}, ${samplerFlipUniforms.get(textureName) || "0.0f"})`,
         });
         index = close + 1;
     }
