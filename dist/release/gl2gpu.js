@@ -7736,7 +7736,7 @@ class HydProgram {
         this.vertexBooleanUniformOverrides.clear();
         this.fragmentBooleanUniformOverrides.clear();
         this.booleanUniformLocations.clear();
-        if (globalThis.__HYD_STATIC_BOOLEAN_UNIFORM_VARIANTS !== false) {
+        if (globalThis.__HYD_STATIC_BOOLEAN_UNIFORM_VARIANTS === true) {
             const specializations = selectBooleanUniformSpecializations(runtimeShaderInfo.uniforms, [this.vertexWgsl, this.fragmentWgsl]);
             const vertexSpecialization = lowerBooleanUniformSpecializations(this.vertexWgsl, specializations);
             const fragmentSpecialization = lowerBooleanUniformSpecializations(this.fragmentWgsl, specializations);

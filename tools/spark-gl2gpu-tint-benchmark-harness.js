@@ -51,7 +51,7 @@ for (let i = 2; i < process.argv.length; i++) {
   }
 }
 
-const selectedSceneNames = parseList(argv.get("scenes") || "van_gogh_room,bicycle_30000_cleaned,garden_30000");
+const selectedSceneNames = parseList(argv.get("scenes") || "van_gogh_room,bicycle_30000_cleaned,bicycle_30000");
 const selectedModes = parseList(argv.get("modes") || "webgl,gl2gpu-tint");
 const trials = Number(argv.get("trials") || 3);
 const maxTrials = Number(argv.get("max-trials") || 5);
@@ -66,7 +66,7 @@ const rmseThreshold = Number(argv.get("rmse-threshold") || 0.02);
 const captureShaders = argv.get("capture-shaders") === "true";
 const debugState = argv.get("debug-state") === "true";
 const optimizeTintWgsl = argv.get("optimize-tint-wgsl") !== "false";
-const specializeBooleanUniforms = argv.get("specialize-boolean-uniforms") !== "false";
+const specializeBooleanUniforms = argv.get("specialize-boolean-uniforms") === "true";
 const enforceTextureLoadBounds = argv.get("enforce-texture-load-bounds") !== "false";
 const quadStripFastPath = argv.get("quad-strip-fast-path") || "false";
 const gpuSplatFrustumFilter = argv.get("gpu-splat-frustum-filter") === "true";
@@ -2348,6 +2348,7 @@ async function main() {
     modes: selectedModes,
     trials,
     maxTrials,
+    varianceThreshold,
     warmupFrames,
     measureFrames,
     specializeBooleanUniforms,

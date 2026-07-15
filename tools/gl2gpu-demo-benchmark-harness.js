@@ -65,6 +65,9 @@ const captureRuntimeState = argv.get("capture-runtime-state") === "true";
 const staticSamplerOriginVariants = argv.has("static-sampler-origin-variants")
   ? argv.get("static-sampler-origin-variants") !== "false"
   : null;
+const specializeBooleanUniforms = argv.has("specialize-boolean-uniforms")
+  ? argv.get("specialize-boolean-uniforms") !== "false"
+  : null;
 const optimizeTintWgsl = argv.has("optimize-tint-wgsl")
   ? argv.get("optimize-tint-wgsl") !== "false"
   : null;
@@ -601,6 +604,11 @@ async function runTrial(browser, benchmark, mode, trial) {
       window.__HYD_STATIC_SAMPLER_ORIGIN_VARIANTS = enabled;
     }, staticSamplerOriginVariants);
   }
+  if (isTintMode(mode) && specializeBooleanUniforms !== null) {
+    await page.addInitScript((enabled) => {
+      window.__HYD_STATIC_BOOLEAN_UNIFORM_VARIANTS = enabled;
+    }, specializeBooleanUniforms);
+  }
   if (isTintMode(mode) && optimizeTintWgsl !== null) {
     await page.addInitScript((enabled) => {
       window.__HYD_TRANSLATOR_OPTIONS = {
@@ -865,11 +873,11 @@ async function launchBrowser() {
   const headless = argv.get("headless") === "true" && argv.get("headed") !== "true";
   const attempts = (headless ? [
     { executablePath: headlessShell, headless: true },
-    { executablePath: chromeForTesting, headless: true },
     { executablePath: process.env.CHROME_PATH || systemChrome, headless: true },
+    { executablePath: chromeForTesting, headless: true },
   ] : [
-    { executablePath: chromeForTesting, headless: false },
     { executablePath: process.env.CHROME_PATH || systemChrome, headless: false },
+    { executablePath: chromeForTesting, headless: false },
   ]).filter((candidate, index, all) => fs.existsSync(candidate.executablePath) &&
     all.findIndex((other) => other.executablePath === candidate.executablePath && other.headless === candidate.headless) === index);
   let lastError = null;
@@ -970,6 +978,7 @@ async function main() {
     captureCpuProfile,
     captureRuntimeState,
     staticSamplerOriginVariants,
+    specializeBooleanUniforms,
     optimizeTintWgsl,
     contextAntialias,
     fpsThreshold,

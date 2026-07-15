@@ -3,13 +3,15 @@
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+const { createHash } = require("crypto");
 const { execFileSync } = require("child_process");
 
 const EXPECTED_CTS_COMMIT = "064aaf18207438d4f6dd10c98b02b25778257b7f";
+const EXPECTED_CTS_UPSTREAM_FIXES_SHA256 = "846c6bea3331eb426d4c706e07734a16f560d07adf837369ddcb111f8002ca56";
 const repoRoot = path.resolve(__dirname, "..");
 const distRoot = path.join(repoRoot, "dist", "release");
 const defaultTestsFile = path.join(__dirname, "webgl-cts-smoke-tests.txt");
-const outputRoot = path.join(repoRoot, "output", "webgl-cts-smoke");
+const defaultOutputRoot = path.join(repoRoot, "output", "webgl-cts-smoke");
 
 const argv = new Map();
 for (let i = 2; i < process.argv.length; i++) {
@@ -27,6 +29,7 @@ for (let i = 2; i < process.argv.length; i++) {
 const captureConsole = argv.get("capture-console") === "true";
 const suiteName = argv.get("suite") || "manifest";
 const officialVersion = argv.get("version") || "2.0.1";
+const outputRoot = path.resolve(argv.get("output") || process.env.WEBGL_CTS_OUTPUT || defaultOutputRoot);
 
 if (argv.get("headless") === "true") {
   throw new Error("The WebGL CTS harness only runs in headed Chrome.");
@@ -120,6 +123,7 @@ window.__HYD_DEBUG_READBACK = ${argv.get("debug-readback") === "true"};
 window.__HYD_DEBUG_TEXTURE_UPLOAD = ${argv.get("debug-texture-upload") === "true"};
 window.__HYD_DEBUG_GL_ERRORS = ${argv.get("debug-errors") === "true"};
 window.__HYD_STATIC_SAMPLER_ORIGIN_VARIANTS = ${argv.get("static-origin-variants") !== "false"};
+window.__HYD_STATIC_BOOLEAN_UNIFORM_VARIANTS = ${argv.get("specialize-boolean-uniforms") === "true"};
 window.__HYD_DISABLE_STATE_CACHE = ${argv.get("state-cache") === "false"};
 window.__HYD_DISABLE_BUNDLE_CACHE = ${argv.get("bundle-cache") === "false"};
 if (${argv.get("capture-shaders") === "true"}) {
@@ -762,6 +766,7 @@ function buildReport({
   restartEvery,
   ctsRoot,
   ctsCommit,
+  ctsWorktree,
   gl2gpuCommit,
 }) {
   return {
@@ -775,6 +780,7 @@ function buildReport({
     browserRestartEvery: restartEvery,
     ctsRoot,
     ctsCommit,
+    ctsWorktree,
     expectedCtsCommit: EXPECTED_CTS_COMMIT,
     gl2gpuCommit,
     summary: {
@@ -796,6 +802,20 @@ async function main() {
   const ctsCommit = execFileSync("git", ["-C", ctsRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   if (ctsCommit !== EXPECTED_CTS_COMMIT && argv.get("allow-cts-commit") !== ctsCommit) {
     throw new Error(`Expected WebGL CTS ${EXPECTED_CTS_COMMIT}, found ${ctsCommit}. Pass --allow-cts-commit ${ctsCommit} to run intentionally.`);
+  }
+  const ctsStatus = execFileSync("git", ["-C", ctsRoot, "status", "--short"], { encoding: "utf8" }).trim();
+  const ctsDiff = execFileSync("git", ["-C", ctsRoot, "diff", "--no-ext-diff", "--binary"], { encoding: "utf8" });
+  const ctsWorktree = {
+    clean: ctsStatus.length === 0,
+    status: ctsStatus ? ctsStatus.split(/\r?\n/) : [],
+    diffSha256: createHash("sha256").update(ctsDiff).digest("hex"),
+    upstreamFixesApplied: false,
+  };
+  ctsWorktree.upstreamFixesApplied = ctsWorktree.diffSha256 === EXPECTED_CTS_UPSTREAM_FIXES_SHA256;
+  const allowsUpstreamFixes = argv.get("allow-cts-upstream-fixes") === "true" && ctsWorktree.upstreamFixesApplied;
+  if (!ctsWorktree.clean && !allowsUpstreamFixes && argv.get("allow-cts-dirty") !== "true") {
+    throw new Error(`WebGL CTS worktree is dirty:\n${ctsStatus}\ndiff sha256: ${ctsWorktree.diffSha256}\n` +
+      "Pass --allow-cts-upstream-fixes true for the audited patch, or --allow-cts-dirty true only for debugging.");
   }
   fs.mkdirSync(outputRoot, { recursive: true });
   const tests = loadTests(ctsTestsRoot);
@@ -907,6 +927,7 @@ async function main() {
         restartEvery,
         ctsRoot,
         ctsCommit,
+        ctsWorktree,
         gl2gpuCommit,
       }));
       await page.close();
@@ -923,6 +944,7 @@ async function main() {
     restartEvery,
     ctsRoot,
     ctsCommit,
+    ctsWorktree,
     gl2gpuCommit,
   });
   writeJsonAtomic(path.join(outputRoot, "results.json"), report);

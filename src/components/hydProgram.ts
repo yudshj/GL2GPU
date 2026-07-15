@@ -857,7 +857,7 @@ export class HydProgram implements HydHashable {
         this.vertexBooleanUniformOverrides.clear();
         this.fragmentBooleanUniformOverrides.clear();
         this.booleanUniformLocations.clear();
-        if ((globalThis as any).__HYD_STATIC_BOOLEAN_UNIFORM_VARIANTS !== false) {
+        if ((globalThis as any).__HYD_STATIC_BOOLEAN_UNIFORM_VARIANTS === true) {
             const specializations = selectBooleanUniformSpecializations(
                 runtimeShaderInfo.uniforms,
                 [this.vertexWgsl, this.fragmentWgsl],

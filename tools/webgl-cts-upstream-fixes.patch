@@ -1,0 +1,36 @@
+diff --git a/sdk/tests/conformance/glsl/misc/shader-with-double-underscore.html b/sdk/tests/conformance/glsl/misc/shader-with-double-underscore.html
+--- a/sdk/tests/conformance/glsl/misc/shader-with-double-underscore.html
++++ b/sdk/tests/conformance/glsl/misc/shader-with-double-underscore.html
+@@ -20,15 +20,18 @@
+ <div id="console"></div>
+ <script id="vertexShader" type="text/something-not-javascript">
+ // vertex shader that uses double-underscore in identifier should succeed
+-attribute vec4 foo__bar;
++attribute vec4 position;
++varying vec4 foo__bar;
+ void main()
+ {
+-    gl_Position = foo__bar;
++    foo__bar = position;
++    gl_Position = position;
+ }
+ </script>
+ <script id="fragmentShader" type="text/something-not-javascript">
+ // fragment shader that uses double-underscore in identifier should succeed
+-attribute vec4 foo__bar;
++precision mediump float;
++varying vec4 foo__bar;
+ void main()
+ {
+     gl_FragColor = foo__bar;
+diff --git a/sdk/tests/conformance/glsl/misc/shader-with-reserved-words.html b/sdk/tests/conformance/glsl/misc/shader-with-reserved-words.html
+--- a/sdk/tests/conformance/glsl/misc/shader-with-reserved-words.html
++++ b/sdk/tests/conformance/glsl/misc/shader-with-reserved-words.html
+@@ -188,7 +188,5 @@ var GLSL_1_0_17_FutureWords = [
+   "namespace",
+   "using",
+-  "__foo",      // something that has 2 underscores
+-  "foo__bar",   // something that has 2 underscores
+   "gl_foo",     // something that starts with gl_
+   "webgl_foo"   // something that starts with webgl_
+ ];

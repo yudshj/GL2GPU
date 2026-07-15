@@ -323,6 +323,7 @@ errorState.commonState.currentProgram = {
     fragmentOutputLocations: new Map(),
     vertexModule: {} as GPUShaderModule,
     fragmentModule: {} as GPUShaderModule,
+    booleanUniformPipelineConstants: () => ({ constants: {}, key: "" }),
 } as any;
 errorState.depthState.enabled = true;
 errorState.topology = "triangle-list";
