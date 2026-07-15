@@ -26,6 +26,8 @@
     "test:webgl-cts": "node tools/webgl-cts-harness.js",
     "prepare:webgl-cts": "node tools/prepare-webgl-cts.js",
     "summarize:webgl-cts": "node tools/summarize-webgl-cts-results.js",
+    "report:three-device": "node tools/generate-three-device-report-data.js && python3 tools/generate-three-device-report-assets.py",
+    "report:three-device:pdf": "node tools/generate-three-device-report-pdf.js",
     "benchmark:paper": "node tools/paper-benchmark-harness.js",
     "quality:render": "node tools/render-quality-harness.js",
     "benchmark:gl2gpu-demo": "node tools/gl2gpu-demo-benchmark-harness.js",

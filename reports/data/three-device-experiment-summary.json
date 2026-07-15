@@ -1,0 +1,410 @@
+{
+  "schemaVersion": 1,
+  "experimentWindow": "2026-07-14/2026-07-15",
+  "sceneArtifacts": {
+    "van_gogh_room": {
+      "file": "van_gogh_room/van_gogh_room.ply",
+      "sha256": "3c52f6f5fbc4d7ccd59e2dca8f50d25ce4297b53efa68421d7ab6f3ffba1e7f5"
+    },
+    "bicycle_30000_cleaned": {
+      "file": "bicycle/bicycle_30000.cleaned.ply",
+      "sha256": "b62d95023ae1c4107d7d66bcb37864656a7842057c9c8e60353dc0e5c5378641"
+    },
+    "bicycle_30000": {
+      "file": "bicycle/bicycle_30000.ply",
+      "sha256": "64d357cb25bd85f710f8551a18d830f8497277fbd8c5805adfd72ffe9ca78227"
+    }
+  },
+  "devices": [
+    {
+      "id": "echo-m4",
+      "label": "Echo M4",
+      "soc": "Apple M4 (10-core GPU)",
+      "memoryGiB": 32,
+      "macOS": "26.3.1 (25D771280a)",
+      "cts": {
+        "chromeVersion": "150.0.7871.115",
+        "reportCount": 15,
+        "uniqueTests": 2864,
+        "passed": 2864,
+        "failed": 0,
+        "timedOut": 0,
+        "duplicates": 0,
+        "complete": true,
+        "ctsCommit": "064aaf18207438d4f6dd10c98b02b25778257b7f",
+        "ctsFixtureDiffSha256": "846c6bea3331eb426d4c706e07734a16f560d07adf837369ddcb111f8002ca56",
+        "gl2gpuBundleSha256": "8977f67c2856c1f2f4925dc5dd2f77548ed6b4d5cf0e92703a993eabcd58b498",
+        "ctsHarnessSha256": "407a4994bcd3514acec8b9febcb4b1543ee1da42bfa049d93052baeb08838e1b"
+      },
+      "spark": {
+        "chromeVersion": "150.0.7871.115",
+        "headed": true,
+        "measurementMode": "gpu-throughput",
+        "initialTrialsPerMode": 3,
+        "maxTrialsPerMode": 5,
+        "varianceThreshold": 0.05,
+        "throughputWarmupBatches": 2,
+        "throughputBatches": 9,
+        "framesPerBatch": 2,
+        "gpuSplatVertexPrecompute": true,
+        "specializeBooleanUniforms": false,
+        "scenes": [
+          {
+            "scene": "van_gogh_room",
+            "fileSizeBytes": 23208408,
+            "cameraFile": "cameras_test.json",
+            "trialsPerMode": 5,
+            "varianceExtended": true,
+            "initialCvByMode": {
+              "webgl": 0.0035384779001444823,
+              "gl2gpu-tint": 0.19333477195009613
+            },
+            "webgl": {
+              "medianFps": 106.95187164070902,
+              "medianFrameMs": 9.350000001490116,
+              "p99FrameMs": 11.02250000089407,
+              "medianLoadMs": 136.3449999988079
+            },
+            "gl2gpuTint": {
+              "medianFps": 136.00816050616808,
+              "medianFrameMs": 7.35249999910593,
+              "p99FrameMs": 9.242499999701977,
+              "medianLoadMs": 512.1700000017881,
+              "shaderDbRequests": 0
+            },
+            "tintVsWebglFpsRatio": 1.2716763009353396,
+            "tintFrameTimeReduction": 0.21363636385730939,
+            "tintVsWebglLoadTimeRatio": 3.7564267116965504,
+            "rmseNormalized": 0.0005671292209692806,
+            "psnrDb": 64.9263595078588,
+            "ssim": 0.9999966656746188
+          },
+          {
+            "scene": "bicycle_30000_cleaned",
+            "fileSizeBytes": 263648100,
+            "cameraFile": "cameras_test.json",
+            "trialsPerMode": 5,
+            "varianceExtended": true,
+            "initialCvByMode": {
+              "webgl": 0.08921766553494526,
+              "gl2gpu-tint": 0.007640213546198348
+            },
+            "webgl": {
+              "medianFps": 103.95010389857872,
+              "medianFrameMs": 9.620000004768372,
+              "p99FrameMs": 11.402500003576279,
+              "medianLoadMs": 461.96000000834465
+            },
+            "gl2gpuTint": {
+              "medianFps": 218.10250813631433,
+              "medianFrameMs": 4.58500000089407,
+              "p99FrameMs": 5.1875,
+              "medianLoadMs": 849.1050000041723,
+              "shaderDbRequests": 0
+            },
+            "tintVsWebglFpsRatio": 2.0981461293113375,
+            "tintFrameTimeReduction": 0.5233887735320779,
+            "tintVsWebglLoadTimeRatio": 1.8380487487852508,
+            "rmseNormalized": 0.0010225258094578883,
+            "psnrDb": 59.806514424091056,
+            "ssim": 0.999960686608282
+          },
+          {
+            "scene": "bicycle_30000",
+            "fileSizeBytes": 1520726124,
+            "cameraFile": "cameras_test.json",
+            "trialsPerMode": 3,
+            "varianceExtended": false,
+            "initialCvByMode": {
+              "webgl": 0.004664942640374987,
+              "gl2gpu-tint": 0.014300090970363307
+            },
+            "webgl": {
+              "medianFps": 32.94621530448748,
+              "medianFrameMs": 30.35249999910593,
+              "p99FrameMs": 30.80000000447035,
+              "medianLoadMs": 2282.185000002384
+            },
+            "gl2gpuTint": {
+              "medianFps": 103.8961038961039,
+              "medianFrameMs": 9.625,
+              "p99FrameMs": 11.594999998807907,
+              "medianLoadMs": 2662.594999998808,
+              "shaderDbRequests": 0
+            },
+            "tintVsWebglFpsRatio": 3.153506493413603,
+            "tintFrameTimeReduction": 0.6828926776943081,
+            "tintVsWebglLoadTimeRatio": 1.1666867497578095,
+            "rmseNormalized": 0.0028558866876071697,
+            "psnrDb": 50.88518055922812,
+            "ssim": 0.9999132848535047
+          }
+        ]
+      },
+      "sources": {
+        "cts": "output/webgl-cts-20260715-local-serial/summary.json",
+        "spark": "output/multidevice-20260715/local/spark-requested-scenes/results.json"
+      }
+    },
+    {
+      "id": "mac-mini-m4",
+      "label": "Mac mini M4",
+      "soc": "Apple M4 (10-core GPU)",
+      "memoryGiB": 16,
+      "macOS": "26.2 (25C56)",
+      "cts": {
+        "chromeVersion": "150.0.7871.124",
+        "reportCount": 15,
+        "uniqueTests": 2864,
+        "passed": 2864,
+        "failed": 0,
+        "timedOut": 0,
+        "duplicates": 0,
+        "complete": true,
+        "ctsCommit": "064aaf18207438d4f6dd10c98b02b25778257b7f",
+        "ctsFixtureDiffSha256": "846c6bea3331eb426d4c706e07734a16f560d07adf837369ddcb111f8002ca56",
+        "gl2gpuBundleSha256": "8977f67c2856c1f2f4925dc5dd2f77548ed6b4d5cf0e92703a993eabcd58b498",
+        "ctsHarnessSha256": "407a4994bcd3514acec8b9febcb4b1543ee1da42bfa049d93052baeb08838e1b"
+      },
+      "spark": {
+        "chromeVersion": "150.0.7871.124",
+        "headed": true,
+        "measurementMode": "gpu-throughput",
+        "initialTrialsPerMode": 3,
+        "maxTrialsPerMode": 5,
+        "varianceThreshold": 0.05,
+        "throughputWarmupBatches": 2,
+        "throughputBatches": 9,
+        "framesPerBatch": 2,
+        "gpuSplatVertexPrecompute": true,
+        "specializeBooleanUniforms": false,
+        "scenes": [
+          {
+            "scene": "van_gogh_room",
+            "fileSizeBytes": 23208408,
+            "cameraFile": "cameras_test.json",
+            "trialsPerMode": 5,
+            "varianceExtended": true,
+            "initialCvByMode": {
+              "webgl": 0.13371878643558135,
+              "gl2gpu-tint": 0.1853579620561505
+            },
+            "webgl": {
+              "medianFps": 119.86814545153793,
+              "medianFrameMs": 8.34249997138977,
+              "p99FrameMs": 8.827500104904175,
+              "medianLoadMs": 133.13500022888184
+            },
+            "gl2gpuTint": {
+              "medianFps": 131.5356797129481,
+              "medianFrameMs": 7.602499961853027,
+              "p99FrameMs": 8.085000038146973,
+              "medianLoadMs": 543.2999997138977,
+              "shaderDbRequests": 0
+            },
+            "tintVsWebglFpsRatio": 1.0973364042420035,
+            "tintFrameTimeReduction": 0.08870242877728979,
+            "tintVsWebglLoadTimeRatio": 4.080820210912774,
+            "rmseNormalized": 0.0005671292209692806,
+            "psnrDb": 64.9263595078588,
+            "ssim": 0.9999966656746188
+          },
+          {
+            "scene": "bicycle_30000_cleaned",
+            "fileSizeBytes": 263648100,
+            "cameraFile": "cameras_test.json",
+            "trialsPerMode": 5,
+            "varianceExtended": true,
+            "initialCvByMode": {
+              "webgl": 0.11772377918521704,
+              "gl2gpu-tint": 0.01708144812925222
+            },
+            "webgl": {
+              "medianFps": 105.59662058910838,
+              "medianFrameMs": 9.47000002861023,
+              "p99FrameMs": 10.537499904632568,
+              "medianLoadMs": 446.6100001335144
+            },
+            "gl2gpuTint": {
+              "medianFps": 196.36720777969776,
+              "medianFrameMs": 5.0924999713897705,
+              "p99FrameMs": 5.427500009536743,
+              "medianLoadMs": 858.3550000190735,
+              "shaderDbRequests": 0
+            },
+            "tintVsWebglFpsRatio": 1.8595974632918488,
+            "tintFrameTimeReduction": 0.4622492126711091,
+            "tintVsWebglLoadTimeRatio": 1.921934125439349,
+            "rmseNormalized": 0.0010225258094578883,
+            "psnrDb": 59.806514424091056,
+            "ssim": 0.999960686608282
+          },
+          {
+            "scene": "bicycle_30000",
+            "fileSizeBytes": 1520726124,
+            "cameraFile": "cameras_test.json",
+            "trialsPerMode": 3,
+            "varianceExtended": false,
+            "initialCvByMode": {
+              "webgl": 0.01831369948995861,
+              "gl2gpu-tint": 0.01248884149432432
+            },
+            "webgl": {
+              "medianFps": 33.239155683298215,
+              "medianFrameMs": 30.085000038146973,
+              "p99FrameMs": 30.692500114440918,
+              "medianLoadMs": 2430.954999923706
+            },
+            "gl2gpuTint": {
+              "medianFps": 92.01748477532534,
+              "medianFrameMs": 10.867499828338623,
+              "p99FrameMs": 11.504999876022339,
+              "medianLoadMs": 2712.960000038147,
+              "shaderDbRequests": 0
+            },
+            "tintVsWebglFpsRatio": 2.7683460329758516,
+            "tintFrameTimeReduction": 0.6387734813176359,
+            "tintVsWebglLoadTimeRatio": 1.1160058496036707,
+            "rmseNormalized": 0.0028558866876071697,
+            "psnrDb": 50.88518055922812,
+            "ssim": 0.9999132848535047
+          }
+        ]
+      },
+      "sources": {
+        "cts": "output/multidevice-20260715/mac-mini-m4/cts-summary.json",
+        "spark": "output/multidevice-20260715/mac-mini-m4/spark-requested-scenes/results.json"
+      }
+    },
+    {
+      "id": "genesis-m1",
+      "label": "Genesis M1",
+      "soc": "Apple M1 (8-core GPU)",
+      "memoryGiB": 16,
+      "macOS": "26.2 (25C56)",
+      "cts": {
+        "chromeVersion": "150.0.7871.102",
+        "reportCount": 15,
+        "uniqueTests": 2864,
+        "passed": 2864,
+        "failed": 0,
+        "timedOut": 0,
+        "duplicates": 0,
+        "complete": true,
+        "ctsCommit": "064aaf18207438d4f6dd10c98b02b25778257b7f",
+        "ctsFixtureDiffSha256": "846c6bea3331eb426d4c706e07734a16f560d07adf837369ddcb111f8002ca56",
+        "gl2gpuBundleSha256": "8977f67c2856c1f2f4925dc5dd2f77548ed6b4d5cf0e92703a993eabcd58b498",
+        "ctsHarnessSha256": "407a4994bcd3514acec8b9febcb4b1543ee1da42bfa049d93052baeb08838e1b"
+      },
+      "spark": {
+        "chromeVersion": "150.0.7871.102",
+        "headed": true,
+        "measurementMode": "gpu-throughput",
+        "initialTrialsPerMode": 3,
+        "maxTrialsPerMode": 5,
+        "varianceThreshold": 0.05,
+        "throughputWarmupBatches": 2,
+        "throughputBatches": 9,
+        "framesPerBatch": 2,
+        "gpuSplatVertexPrecompute": true,
+        "specializeBooleanUniforms": false,
+        "scenes": [
+          {
+            "scene": "van_gogh_room",
+            "fileSizeBytes": 23208408,
+            "cameraFile": "cameras_test.json",
+            "trialsPerMode": 5,
+            "varianceExtended": true,
+            "initialCvByMode": {
+              "webgl": 0.12284217781578438,
+              "gl2gpu-tint": 0.00389247404558071
+            },
+            "webgl": {
+              "medianFps": 120.01200126021351,
+              "medianFrameMs": 8.332499995827675,
+              "p99FrameMs": 8.71000000089407,
+              "medianLoadMs": 208.44499999284744
+            },
+            "gl2gpuTint": {
+              "medianFps": 129.07389476505503,
+              "medianFrameMs": 7.747500002384186,
+              "p99FrameMs": 8.582499995827675,
+              "medianLoadMs": 759.3949999958277,
+              "shaderDbRequests": 0
+            },
+            "tintVsWebglFpsRatio": 1.0755082275912828,
+            "tintFrameTimeReduction": 0.07020701995036491,
+            "tintVsWebglLoadTimeRatio": 3.6431432753094843,
+            "rmseNormalized": 0.0005659510549832158,
+            "psnrDb": 64.94442252357882,
+            "ssim": 0.9999967012451653
+          },
+          {
+            "scene": "bicycle_30000_cleaned",
+            "fileSizeBytes": 263648100,
+            "cameraFile": "cameras_test.json",
+            "trialsPerMode": 5,
+            "varianceExtended": true,
+            "initialCvByMode": {
+              "webgl": 0.006624799140864208,
+              "gl2gpu-tint": 0.15134859435269415
+            },
+            "webgl": {
+              "medianFps": 88.79023305086655,
+              "medianFrameMs": 11.262500002980232,
+              "p99FrameMs": 11.807499997317791,
+              "medianLoadMs": 707.9000000059605
+            },
+            "gl2gpuTint": {
+              "medianFps": 159.93602565075045,
+              "medianFrameMs": 6.252499997615814,
+              "p99FrameMs": 8.340000003576279,
+              "medianLoadMs": 1285.0250000059605,
+              "shaderDbRequests": 0
+            },
+            "tintVsWebglFpsRatio": 1.8012794893682234,
+            "tintFrameTimeReduction": 0.4448390680611493,
+            "tintVsWebglLoadTimeRatio": 1.8152634552834308,
+            "rmseNormalized": 0.0010226840829375852,
+            "psnrDb": 59.805170067225646,
+            "ssim": 0.9999606663660674
+          },
+          {
+            "scene": "bicycle_30000",
+            "fileSizeBytes": 1520726124,
+            "cameraFile": "cameras_test.json",
+            "trialsPerMode": 3,
+            "varianceExtended": false,
+            "initialCvByMode": {
+              "webgl": 0.019247084980865994,
+              "gl2gpu-tint": 0.0036152847432238773
+            },
+            "webgl": {
+              "medianFps": 25.947067981920043,
+              "medianFrameMs": 38.53999999910593,
+              "p99FrameMs": 40.07750000059605,
+              "medianLoadMs": 3503.589999988675
+            },
+            "gl2gpuTint": {
+              "medianFps": 73.84160972434253,
+              "medianFrameMs": 13.542500004172325,
+              "p99FrameMs": 14.51749999821186,
+              "medianLoadMs": 4057.6949999928474,
+              "shaderDbRequests": 0
+            },
+            "tintVsWebglFpsRatio": 2.845855638710142,
+            "tintFrameTimeReduction": 0.6486118317465882,
+            "tintVsWebglLoadTimeRatio": 1.1581534939892977,
+            "rmseNormalized": 0.002856184204582286,
+            "psnrDb": 50.884275738660435,
+            "ssim": 0.9999132665830228
+          }
+        ]
+      },
+      "sources": {
+        "cts": "output/multidevice-20260715/genesis-m1/cts-summary.json",
+        "spark": "output/multidevice-20260715/genesis-m1/spark-requested-scenes/results.json"
+      }
+    }
+  ]
+}

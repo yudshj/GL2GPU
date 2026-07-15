@@ -87,7 +87,7 @@ npm run benchmark:paper -- \
   --samples aquarium,motionmark,sprites,sprites-100k \
   --trials 3 \
   --frames 100 \
-  --headless true
+  --headed true
 ```
 
 The harness serves the current `dist/webgpu` demos, uses current
@@ -96,6 +96,61 @@ The harness serves the current `dist/webgpu` demos, uses current
 `--manual-root /path/to/baseline` is supplied. Results, screenshots, RMSE, FPS
 ratios, shader DB request counts, and optimizer stats are written to
 `output/paper-benchmark/results.json`.
+
+Browser performance and conformance runs use headed Chrome so WebGPU executes
+through the same visible GPU path as an interactive page.
+
+### WebGL conformance suite
+
+The harness pins Khronos WebGL CTS commit
+`064aaf18207438d4f6dd10c98b02b25778257b7f`. Its bundled WebGL 1.0.4
+specification permits double underscores, but the snapshot contains two
+inconsistent fixtures: the positive fragment shader uses the vertex-only
+`attribute` qualifier, while the old reserved-word list still rejects `__`.
+Apply the tracked fixture-only correction and run the suite with its audited
+diff hash:
+
+```sh
+WEBGL_CTS_ROOT=/tmp/gl2gpu-webgl-cts npm run prepare:webgl-cts
+node tools/webgl-cts-harness.js \
+  --suite official \
+  --version 2.0.1 \
+  --allow-cts-upstream-fixes true \
+  --timeout-ms 300000 \
+  --restart-every 20
+```
+
+The patch does not alter GL2GPU runtime code. Every result records the CTS
+commit, worktree status, patch SHA-256, GL2GPU commit, and Chrome executable.
+Use `npm run summarize:webgl-cts -- --input <result-root>` to require exactly
+2864 unique test pages with no failure, timeout, duplicate, or gap.
+
+### Spark v2.1.0
+
+The Spark harness defaults to the three evaluation scenes used by the report:
+Van Gogh Room, cleaned Bicycle, and full Bicycle. It always launches headed
+Chrome and compares native WebGL with runtime Tint translation:
+
+```sh
+SPARK_ROOT=/Volumes/Code/spark-worktrees/v2.1.0 \
+WEBSPLATTER_SCENE_ROOT=/Volumes/Code/WebSplatter-Evaluation/WebSplatter/public/scenes \
+npm run benchmark:spark -- \
+  --measurement-mode gpu-throughput \
+  --trials 3 \
+  --max-trials 5 \
+  --gpu-splat-vertex-precompute true \
+  --specialize-boolean-uniforms false
+```
+
+Results include median/P99 frame time, load time, FPS, RMSE, PSNR, SSIM,
+shader DB requests, and screenshots. The vertex-precompute flag is part of the
+measured GL2GPU configuration, so its speedup must not be attributed to Tint
+shader compilation alone.
+
+The final three-device reproduction report is available as
+[Chinese Markdown](reports/three-device-gl2gpu-tint-experiment-2026-07-15.md),
+[PDF](reports/three-device-gl2gpu-tint-experiment-2026-07-15.pdf), and a
+[machine-readable summary](reports/data/three-device-experiment-summary.json).
 
 | Benchmark   | Avg. Frame Time Reduction |
 | ----------- | ------------------------- |
