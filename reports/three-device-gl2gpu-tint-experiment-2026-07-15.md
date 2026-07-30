@@ -276,7 +276,108 @@ MotionMark harness 未记录两个浏览器进程之间共同的动画/随机状
 - **通用 Tint shader 性能：** 通过图像 gate 的 Aquarium/Sprites 尚未追平 manual
   reference；仍需继续做通用 WGSL/IR、pipeline/state 与 API submit 成本分析。
 
-## 8. 限制与后续工作
+## 8. TOSEM 期刊扩展：相对 WWW’25 新增了什么
+
+比较基线是 WWW’25 **实际提交**的论文内容：会议稿 `main.tex` 没有纳入单独的
+`sections/5-discussion.tex`，但纳入了 `appendix-discussion.tex` 中的 generalizability
+与 limitations。因此，TOSEM 的 Discussion 包含新的失效分析、性能决策模型和
+API-migration 启示，但不能把所有泛化与局限讨论都描述成从无到有。
+
+按当前源文件运行 `texcount -sum -inc -brief`，WWW’25 实际提交内容为 7,544 词，
+TOSEM 稿为 11,969 词，增加 4,425 词（约 58.66%）。篇幅只是扩展规模的旁证；核心
+研究增量是系统边界、语义兼容层、研究问题和证据方法的变化。
+
+### 8.1 保留内容与实质新增
+
+| 维度 | WWW’25 实际提交版 | TOSEM 期刊扩展 |
+|---|---|---|
+| 核心 API 架构 | JavaScript prototype interception、WebGL 状态模拟、两级缓存、uniform batching 和 render-bundle Trie | 保留并精炼这些机制；新增 `Program-Aware Shader Handoff`，把原架构连接到运行时编译器 |
+| Shader 系统边界 | 有限 shader 集合；提前准备 WGSL，运行时按 GLSL 源码查表 | 数据库无关的运行时链路：WebGL validation → glslang → SPIR-V → vendored Tint/WASM → WGSL normalization → WebGPU module |
+| Program 与语义兼容 | 合并预制 WGSL 的共享变量，主要覆盖三个 benchmark 所需路径 | 新增 program-wide layout，以及 stage interface、uniform/block、sampler/texture、integer sampling、row-major、纹理坐标 provenance、framebuffer/copy/pass、robustness、错误传播与 shader capture |
+| 正确性证据 | 三个 benchmark 的像素差异检查 | 新增固定 CTS 的三机完整运行、定向修复验证、WebGL 1/2 scope 分析，并把本地修改输入的满分运行明确排除在 conformance claim 之外 |
+| 通用路径性能 | 没有测 runtime compiler 相对 manual WGSL 的代价 | 新增 runtime Tint 与 manual-WGSL reference 的对照；只有通过 RMSE 0.02 gate 的 workload 进入确认性结论 |
+| 真实应用案例 | MotionMark、JSGameBench、Aquarium | 新增 World Labs Spark v2.1.0 三场景、三设备案例，分别报告 throughput、load time 和图像质量 |
+| 研究解释 | 重点是性能改善与 cache/uniform/bundle ablation | 新增 RQ 式组织、有效性威胁、break-even 模型和证据边界；Spark 两臂结果不归因于 Tint 或 precompute 单项 |
+| 可复现性 | 会议实现与 benchmark 信息 | 新增 implementation、bundle、Tint、glslang、CTS、diagnostic diff、harness 和 Spark 的 revision/SHA-256，以及机器可读 summary |
+
+会议版在十台 macOS、Windows 和 Android 设备上报告的 45.05% mean frame-time
+reduction，以及 cache、uniform batching 和 render-bundle ablation，仍属于原
+manual-shader path 的历史证据。TOSEM 附录将其单独保留，不与 Chrome 150 的
+runtime-compiler 实验合并。
+
+### 8.2 新增证据回答的三个问题
+
+1. **RQ1，语义兼容：** 初始未修改 CTS 的三机完整运行均为 2,858/2,864；
+   Boolean-uniform 修复后，Echo M4 对原六页定向复测为 4/6。1,976 个 WebGL 2 /
+   GLSL ES 3.00 页面由完整初始运行和定向证据共同支持为全部通过，但尚未进行修复后
+   三机完整未修改重跑。剩余 legacy WebGL 1 项属于工程跟进，不作为期刊研究贡献。
+2. **RQ2，生成路径成本：** 通过图像 gate 的 Aquarium 与 Sprites 中，runtime Tint
+   达到 manual reference 的 0.666x-0.729x（100k）和 0.667x-0.800x（300k）。
+   MotionMark 因图像 gate 失败，只保留为探索性 timing。
+3. **RQ3，应用价值：** Spark 完整 GL2GPU arm 同时包含 runtime Tint 和显式静态相机
+   precompute/compaction；九个设备/场景单元为 native WebGL throughput 的
+   1.076x-3.154x，load-time ratio 为 1.12x-4.08x，九组图像均通过 RMSE 0.02 gate。
+   该设计测量完整配置，不能估计 Tint 或 precompute 的独立因果贡献。
+
+## 9. TOSEM 稿件阅读与审阅指南
+
+主稿位于
+`/Volumes/Code/gl2gpu-tint-transaction/TOSEM-GL2GPU/main.tex`，是单一扁平文件。
+下面的行号基于本报告更新时的版本；建议分四轮阅读。
+
+### 9.1 第一轮：先确认论文承诺什么
+
+- **Abstract（约第 77-93 行）与 Introduction（第 97-144 行）：** 先抓住从
+  prepared-shader 性能原型到 runtime compilation + conformance 的研究边界变化。
+- **Contributions 与 Relationship to the Conference Paper（第 121-143 行）：**
+  核对每项 novelty 是否在后文有实现和实验对应。
+- **Conclusion（第 1,039-1,054 行）：** 反向检查结论是否严格回收到三个 RQ，
+  是否保留了 CTS、MotionMark、Spark 因果归因和平台范围的限定。
+
+### 9.2 第二轮：只读期刊新增的技术核心
+
+1. 先用 **Program-Aware Shader Handoff**（第 208-213 行）理解会议 API 架构和新编译器
+   的连接点；`API Translation Architecture` 其余内容（第 184-308 行）主要继承并精炼
+   WWW’25，不宜重复申报为全新机制。
+2. 精读 **Runtime Shader Translation**（第 309-424 行）。沿 pipeline 与 algorithm
+   检查 validation、program layout、glslang、SPIR-V、Tint/WASM、WGSL normalization、
+   cache identity、diagnostics 和 database elimination 是否闭环。
+3. 精读 **Semantic Compatibility Layer**（第 425-495 行）。先看 compatibility table，
+   再检查 stage IO、uniform、sampler/texture、coordinate provenance、framebuffer/pass、
+   robustness 与 observability 是否分别有实现依据。
+
+### 9.3 第三轮：按证据类型审阅 Evaluation
+
+`Evaluation` 位于第 496-956 行。不要把三类结果汇总成一个“GL2GPU 平均提升”：
+
+- **RQ1 / CTS（第 572-718 行）：** 区分初始完整运行、修复后 targeted rerun 和
+  local-patch diagnostic full run；重点检查每个数字是否对应正确的 evidence stage。
+- **RQ2 / Runtime Tint vs manual reference（第 719-783 行）：** 先看图像 gate，再看
+  throughput；MotionMark 不进入等价输出的确认性结论。
+- **RQ3 / Spark（第 784-911 行）：** 把完整 GL2GPU arm 理解为 runtime Tint 加显式
+  precompute/compaction；同时阅读 throughput、load-time 与 fidelity，避免单因素归因。
+- **Threats to Validity（第 912-956 行）：** 重点核对缺少同环境 Spark 第三臂、
+  Apple Silicon + Chrome 150 范围、静态相机和试验次数限制。
+
+### 9.4 第四轮：判断论文是否达到期刊扩展标准
+
+- **Discussion（第 957-1,009 行）：** `Correctness Before Optimization`、
+  `A Performance Decision Model`、`Why Spark Is Both Useful and Limited` 与
+  `Implications for API-Migration Research` 是新增分析；`Generalizability` 和
+  `Open Limitations` 是对 WWW’25 已提交附录讨论的扩写。
+- **Related Work（第 1,010-1,038 行）：** 检查是否已经从单纯 WebGPU/API mapping
+  扩展到 API virtualization、shader translation、WebGPU systems/security 与
+  conformance engineering，并清楚声明 conference-to-journal 关系。
+- **Artifact appendix（第 1,055-1,085 行）：** 用 revision/SHA-256 与
+  `TOSEM-GL2GPU/evidence-audit/2026-07-30/` 交叉核对新实验。
+- **Historical-evidence appendix（第 1,086-1,092 行）：** 确认旧会议结果只是历史
+  对照，没有与新实验混算。
+
+最终审阅时建议逐项回答：继承机制与新增机制是否分清；每项贡献是否有代码或数据支撑；
+每个结果是否标明完整、定向、诊断或探索性证据；Spark 是否始终写成完整配置结果；
+结论是否超出 Apple Silicon、Chrome 150、静态相机和当前 workload 的有效范围。
+
+## 10. 限制与后续工作
 
 1. 三机 Chrome 150 的 patch version 不同，小幅跨机差异不具备严格的硬件归因能力。
 2. Spark 使用固定相机。相机、sorting textures 或 splat 数据变化后需要重新 precompute；
@@ -298,7 +399,7 @@ MotionMark harness 未记录两个浏览器进程之间共同的动画/随机状
 9. 远端 Spark checkout 和逐机 PLY 哈希日志没有形成完整的密码学证据链；这些缺口不
    改变已保留 JSON 的数值复算结果，但限制第三方对远端环境身份的逐字节复现。
 
-## 9. 结果索引
+## 11. 结果索引
 
 本报告包内可移植、经过校验的精简数据：
 
