@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "experimentDate": "2026-07-14",
+  "protocol": {
+    "headedBrowser": true,
+    "modes": ["tint", "manual"],
+    "runOrder": "ABBA",
+    "trialsPerMode": 3,
+    "warmupFrames": 30,
+    "measuredFramesPerTrial": 120,
+    "fpsRatioDefinition": "tint/manual",
+    "fpsGate": 0.9,
+    "normalizedRmseGate": 0.02
+  },
+  "interpretation": {
+    "confirmatoryWorkloads": ["aquarium", "sprites"],
+    "exploratoryWorkloads": ["motionmark"],
+    "motionmarkReason": "All paired captures exceeded the normalized-RMSE gate; the harness did not record a common animation/random-state checkpoint."
+  },
+  "sourceFiles": {
+    "echoM4_100000": {"path": "output/multidevice-20260714/local/demo-n100000/results.json", "sha256": "c1f57993e0df64ad1d218ef74c325a0e9cb77181a54ff3cd40c5aef785984825"},
+    "echoM4_300000": {"path": "output/multidevice-20260714/local/demo-n300000/results.json", "sha256": "982a759ecb4664e17446729e5857308130b20c36da014aef57014a86a9bac663"},
+    "macMiniM4_100000": {"path": "output/multidevice-20260714/mac-mini-m4/demo-n100000/results.json", "sha256": "5651dc7438ae0a94860ccf8ee8f268f94b970f427c8a053cdba0b6c821822a32"},
+    "macMiniM4_300000": {"path": "output/multidevice-20260714/mac-mini-m4/demo-n300000/results.json", "sha256": "d50c49c89b46bb73f42ea20b03180a2efe05c0cf8fda1bea617d703b3cc1c703"},
+    "genesisM1_100000_aquarium": {"path": "output/multidevice-20260714/genesis-m1/demo-n100000-chrome150-aquarium/results.json", "sha256": "05ac696e9a9986fc3b880d13b8fb44a0f2d47a8c8c8592653481aad385a0f750"},
+    "genesisM1_100000_motionmark": {"path": "output/multidevice-20260714/genesis-m1/demo-n100000-chrome150-motionmark/results.json", "sha256": "d16358edc43e656652b0bb39ed4a313e79e2e39568376ed88bc8966c2a901793"},
+    "genesisM1_100000_sprites": {"path": "output/multidevice-20260714/genesis-m1/demo-n100000-chrome150-sprites/results.json", "sha256": "caefb239560ccb4fa9a2e936c0cddc2389a41b985bdf5b9bea19e417308a4f93"},
+    "genesisM1_300000_aquarium": {"path": "output/multidevice-20260714/genesis-m1/demo-n300000-chrome150-aquarium/results.json", "sha256": "03be0d5f799d35e0785a70f82c0720572cd1947caeec45a2e4be97d03c334229"},
+    "genesisM1_300000_motionmark": {"path": "output/multidevice-20260714/genesis-m1/demo-n300000-chrome150-motionmark/results.json", "sha256": "97b9bae752c6bdefbbb4cfcf9450b4fe9989b6583ae0ba9f0c1f6ef4486823f1"},
+    "genesisM1_300000_sprites": {"path": "output/multidevice-20260714/genesis-m1/demo-n300000-chrome150-sprites/results.json", "sha256": "bc55678dd63f992cfc4e684b7b9c5c25c81171831b27afa40ec220b797d074df"}
+  },
+  "results": [
+    {"device": "echo-m4", "objectCount": 100000, "workload": "aquarium", "tintMedianFps": 27.79579356991122, "manualMedianFps": 39.875058151121536, "tintVsManualFpsRatio": 0.6970721764108431, "normalizedRmse": 0.0012317710936921853, "psnrDb": 58.18939983666196, "imageGatePass": true},
+    {"device": "echo-m4", "objectCount": 100000, "workload": "motionmark", "tintMedianFps": 49.468216670811806, "manualMedianFps": 60.00900135022489, "tintVsManualFpsRatio": 0.8243466073048792, "normalizedRmse": 0.0457853580350686, "psnrDb": 26.785467706841494, "imageGatePass": false},
+    {"device": "echo-m4", "objectCount": 100000, "workload": "sprites", "tintMedianFps": 13.159770581331252, "manualMedianFps": 17.668104654072263, "tintVsManualFpsRatio": 0.7192253281717316, "normalizedRmse": 0.0012260143354446303, "psnrDb": 58.230089034066594, "imageGatePass": true},
+    {"device": "echo-m4", "objectCount": 300000, "workload": "aquarium", "tintMedianFps": 9.423368383027961, "manualMedianFps": 13.29978831170106, "tintVsManualFpsRatio": 0.6973999356069711, "normalizedRmse": 0.0016490797721462418, "psnrDb": 55.65516670803183, "imageGatePass": true},
+    {"device": "echo-m4", "objectCount": 300000, "workload": "motionmark", "tintMedianFps": 17.05417543061703, "manualMedianFps": 23.511893099264526, "tintVsManualFpsRatio": 0.7281079162228264, "normalizedRmse": 0.04683894289818674, "psnrDb": 26.58785830045843, "imageGatePass": false},
+    {"device": "echo-m4", "objectCount": 300000, "workload": "sprites", "tintMedianFps": 4.259034476884316, "manualMedianFps": 5.05936319481953, "tintVsManualFpsRatio": 0.7998253795865033, "normalizedRmse": 0.0012652848388033005, "psnrDb": 57.95623391671266, "imageGatePass": true},
+    {"device": "mac-mini-m4", "objectCount": 100000, "workload": "aquarium", "tintMedianFps": 27.698912819501125, "manualMedianFps": 39.761431411530815, "tintVsManualFpsRatio": 0.6966276574104533, "normalizedRmse": 0.0012317710936921853, "psnrDb": 58.18939983666196, "imageGatePass": true},
+    {"device": "mac-mini-m4", "objectCount": 100000, "workload": "motionmark", "tintMedianFps": 51.652892566224175, "manualMedianFps": 59.99999999999999, "tintVsManualFpsRatio": 0.8610106748786684, "normalizedRmse": 0.056593590585676694, "psnrDb": 24.944655026726235, "imageGatePass": false},
+    {"device": "mac-mini-m4", "objectCount": 100000, "workload": "sprites", "tintMedianFps": 13.672564859526682, "manualMedianFps": 18.74736365310371, "tintVsManualFpsRatio": 0.729306003367739, "normalizedRmse": 0.0012260143354446303, "psnrDb": 58.230089034066594, "imageGatePass": true},
+    {"device": "mac-mini-m4", "objectCount": 300000, "workload": "aquarium", "tintMedianFps": 9.295984135059772, "manualMedianFps": 13.744602380407251, "tintVsManualFpsRatio": 0.6714179474468082, "normalizedRmse": 0.0016490797721462418, "psnrDb": 55.65516670803183, "imageGatePass": true},
+    {"device": "mac-mini-m4", "objectCount": 300000, "workload": "motionmark", "tintMedianFps": 17.767775177916295, "manualMedianFps": 24.609326935870936, "tintVsManualFpsRatio": 0.7236628018006743, "normalizedRmse": 0.057939682707295215, "psnrDb": 24.740477748695582, "imageGatePass": false},
+    {"device": "mac-mini-m4", "objectCount": 300000, "workload": "sprites", "tintMedianFps": 4.087416208020847, "manualMedianFps": 6.1295479968550755, "tintVsManualFpsRatio": 0.6668381110838846, "normalizedRmse": 0.0012652848388033005, "psnrDb": 57.95623391671266, "imageGatePass": true},
+    {"device": "genesis-m1", "objectCount": 100000, "workload": "aquarium", "tintMedianFps": 18.787281010753528, "manualMedianFps": 27.104555824086873, "tintVsManualFpsRatio": 0.6930759717589811, "normalizedRmse": 0.0011400805506335554, "psnrDb": 58.86128926344925, "imageGatePass": true},
+    {"device": "genesis-m1", "objectCount": 100000, "workload": "motionmark", "tintMedianFps": 35.687732342007436, "manualMedianFps": 45.55462759093233, "tintVsManualFpsRatio": 0.7884937739459612, "normalizedRmse": 0.056593576289191615, "psnrDb": 24.94465722092713, "imageGatePass": false},
+    {"device": "genesis-m1", "objectCount": 100000, "workload": "sprites", "tintMedianFps": 9.39908515571206, "manualMedianFps": 14.23994304022784, "tintVsManualFpsRatio": 0.6658546901433565, "normalizedRmse": 0.00122596822017252, "psnrDb": 58.23041575104369, "imageGatePass": true},
+    {"device": "genesis-m1", "objectCount": 300000, "workload": "aquarium", "tintMedianFps": 6.384201230023277, "manualMedianFps": 9.201466100263731, "tintVsManualFpsRatio": 0.6971300794697167, "normalizedRmse": 0.0015817873698519478, "psnrDb": 56.017037930121305, "imageGatePass": true},
+    {"device": "genesis-m1", "objectCount": 300000, "workload": "motionmark", "tintMedianFps": 11.55056742162293, "manualMedianFps": 16.046427664047688, "tintVsManualFpsRatio": 0.6933805623201678, "normalizedRmse": 0.05793911552457339, "psnrDb": 24.740562776959628, "imageGatePass": false},
+    {"device": "genesis-m1", "objectCount": 300000, "workload": "sprites", "tintMedianFps": 3.469862795841948, "manualMedianFps": 4.52618397429153, "tintVsManualFpsRatio": 0.7665204216812049, "normalizedRmse": 0.001265201562906222, "psnrDb": 57.95680560542145, "imageGatePass": true}
+  ]
+}

@@ -89,7 +89,7 @@ function expectedSparkTrials(report, sceneName) {
 function compactCts(device, report) {
   assert(report.complete === true, `${device.label}: CTS summary is incomplete`);
   assert(report.expectedTotal === 2864, `${device.label}: unexpected CTS denominator`);
-  assert(report.reportCount === 15, `${device.label}: expected 15 CTS chunks`);
+  assert(report.reportCount === 15, `${device.label}: expected 15 diagnostic CTS reports`);
   assert(report.uniqueTests === 2864, `${device.label}: expected 2864 unique CTS pages`);
   assert(report.passed === 2864 && report.failed === 0, `${device.label}: CTS failures remain`);
   assert(report.timedOut === 0, `${device.label}: CTS timeouts remain`);
@@ -104,6 +104,10 @@ function compactCts(device, report) {
     timedOut: report.timedOut,
     duplicates: report.duplicates.length,
     complete: report.complete,
+    conformanceEligible: false,
+    evidenceRole: "diagnostic local-patch run",
+    conformanceExclusionReason:
+      "The run used a locally modified CTS input. The 2864/2864 count is retained for diagnostic lineage and is not presented as a WebGL conformance-pass result.",
     ctsCommit: report.ctsCommits[0],
     ctsFixtureDiffSha256: report.ctsDiffSha256[0],
     gl2gpuBundleSha256: report.artifacts.gl2gpuBundleSha256,

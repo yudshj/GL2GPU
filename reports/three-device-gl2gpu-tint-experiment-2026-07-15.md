@@ -1,6 +1,7 @@
 # GL2GPU Tint 三设备正确性与 Spark 性能复现实验
 
 > 实验日期：2026-07-14 至 2026-07-15<br>
+> 报告更新：2026-07-30（与 TOSEM 稿件及证据审计口径同步）<br>
 > 最终实现提交：`8ebfd051751f23a8fa79e43434e8444c9cdd9b0b`<br>
 > Spark 基线标签：`sparkjs-0`（`26e17df5488f4c46af6a86211f615034134f2971`）<br>
 > 浏览器模式：三台设备均为 headed Chrome，`deviceScaleFactor=1`
@@ -9,29 +10,37 @@
 
 本轮在一台 Apple M4 MacBook Air、一台 Apple M4 Mac mini 和一台 Apple M1
 MacBook 上重新运行完整 WebGL CTS，并用同一份 Spark v2.1.0、三份相同哈希的
-PLY 场景比较原生 WebGL 与 GL2GPU Tint。核心结论如下。
+PLY 场景比较原生 WebGL 与完整 GL2GPU（runtime Tint translation 加显式
+precompute/compaction）路径。核心结论如下。
 
-1. **三台设备的严格 CTS 汇总均为 `2864/2864`。** 每台都是 15 份互不重叠的
-   headed Chrome 分块，唯一 test page 数为 2864，失败、timeout、重复和缺口均为 0。
-   三机使用相同 CTS commit、相同 GL2GPU bundle、相同 harness 和相同审计补丁。
-2. **runtime 修复与 CTS fixture 修正必须分开理解。** GL2GPU 将不安全的 boolean
-   uniform specialization 从默认开启改为显式 opt-in，修复了 4 个 uniform/bool
-   语义回归。Pinned CTS snapshot 另有两个彼此矛盾的 identifier fixture；最终
-   2864/2864 使用了只修改测试输入的审计补丁，补丁 SHA-256 已固定并写入每个结果。
-3. **Spark steady-state GPU throughput 在三机全部快于原生 WebGL。** Van Gogh
-   Room 为 `1.076x–1.272x`，cleaned bicycle 为 `1.801x–2.098x`，full bicycle 为
+1. **三台设备的初始未修改 CTS 完整运行均为 `2858/2864`。** 六个失败页在三机上
+   完全相同。boolean runtime 修复后，只在 Echo M4 对这六页做了 targeted rerun，结果
+   为 `4/6`；由此组合得到的 `2862/2864` 不是一次完整实测。
+2. **WebGL 2 范围的结果已由完整初始运行和 targeted rerun 共同支持。** 固定 CTS
+   中有 1,976 个 WebGL 2 / GLSL ES 3.00 页面（69%）；初始完整运行通过
+   `1975/1976`，唯一失败页在 boolean 修复后通过。修复后未重新进行三机完整未修改
+   suite 运行，因此该结论必须保留 targeted-rerun 限定。另两页均位于 WebGL 1 范围，
+   作为 runtime/fixture 工程跟进项保留，不影响本文的 WebGL 2 范围结论。
+3. **本地修改 CTS 后的三机 `2864/2864` 只作为诊断数据。** 这些运行使用 15 份
+   report，并验证了修改后输入的完整覆盖；由于测试输入经过本地修改，结果不写成官方
+   WebGL conformance pass。初始未修改运行并不是 15-shard 协议。
+4. **包含 runtime Tint translation 与静态 precompute/compaction 的完整 GL2GPU 路径，
+   steady-state GPU throughput 在三机上都高于原生 WebGL 路径。** Van Gogh Room 为
+   `1.076x–1.272x`，cleaned bicycle 为 `1.801x–2.098x`，full bicycle 为
    `2.768x–3.154x`。方向在 M1 与两台 M4 上一致。
-4. **加速没有以错误画面换取。** 九组 Tint/WebGL 对比的最差 RMSE 为 `0.0028562`，
-   最低 PSNR 为 `50.884 dB`，最低 SSIM 为 `0.9999133`。两台远程机器的代表图已
-   复制回本机逐张目检，没有黑屏、Y 翻转、裁切、丢几何或透明混合异常。
-5. **Spark 加速不能归因于 Tint 编译器本身。** 实验显式启用了 GL2GPU 的静态相机
-   splat vertex precompute/compaction：一次 compute pass 预计算每个 splat 的 clip
-   center、屏幕轴、颜色与有效标准差，剔除不可见实例，再把结果作为 instance vertex
-   buffer 输入简化后的 render shader。它减少了每帧顶点工作量，但增加了加载阶段成本。
-6. **通用 Tint/manual 性能仍有缺口。** 2026-07-14 的 GL2GPU Demo 对照中，Tint 在
-   Aquarium、MotionMark、Sprites 上只有 manual 的 `0.666x–0.861x`（100k）和
-   `0.667x–0.800x`（300k）。因此准确结论是“当前 Spark 静态场景路径显著加速”，
-   不是“所有 Tint shader 都比手写 shader 快”。
+5. **上述完整路径的较高 throughput 未伴随本实验画质 gate 失败。** 九组对比的最差
+   RMSE 为 `0.0028562`，最低 PSNR 为 `50.884 dB`，最低 SSIM 为 `0.9999133`。两台远程
+   机器的代表图已复制回本机逐张目检，没有黑屏、Y 翻转、裁切、丢几何或透明混合异常。
+6. **两臂实验不能隔离 Tint 或 precompute/compaction 的增量因果贡献。** GL2GPU arm
+   同时包含 runtime translation、pipeline 建立与 benchmark 显式启用的静态相机 splat
+   vertex precompute/compaction；没有同一环境下的 generic GL2GPU（无 precompute）arm。
+   实现结构表明该路径旨在把部分每帧顶点计算移到加载阶段，但本实验只能报告完整路径
+   的端到端差异，不能把观察到的比例归因于 Tint 编译器或单一优化。
+7. **通用 Tint/manual 性能仍有缺口，且 MotionMark 只能作探索性结果。** Aquarium
+   与 Sprites 通过 RMSE 0.02 gate，Tint 为 manual reference 的 `0.666x–0.729x`
+   （100k）和 `0.667x–0.800x`（300k）。MotionMark 的吞吐量也更低，但六组捕获的
+   RMSE 为 `0.0458–0.0579`，全部未过 gate；在固定动画/随机状态前不能作为等价工作量
+   的正式比较。
 
 ## 2. 版本与可复现性
 
@@ -42,16 +51,22 @@ PLY 场景比较原生 WebGL 与 GL2GPU Tint。核心结论如下。
 | GL2GPU 最终实现 | `8ebfd051751f23a8fa79e43434e8444c9cdd9b0b` |
 | Spark precompute 基线 tag | `sparkjs-0` / `26e17df5488f4c46af6a86211f615034134f2971` |
 | GL2GPU release bundle SHA-256 | `8977f67c2856c1f2f4925dc5dd2f77548ed6b4d5cf0e92703a993eabcd58b498` |
+| Dawn/Tint source revision | `ab35d6efd17f1b2ba2a6a8f6e89428b26a9c71e6` |
+| Tint WASM SHA-256 | `920ce9b2171571556e60afc759bb65e0e6fde55c2946112621ac0b670e4dc4a6` |
+| glslang | `@webgpu/glslang@0.0.15` |
+| glslang WASM SHA-256 | `dbc5123e1dfef69e4ff360b39a5af1f0b4ebcb59468eb92de9d8ba00635a37a7` |
 | WebGL CTS harness SHA-256 | `407a4994bcd3514acec8b9febcb4b1543ee1da42bfa049d93052baeb08838e1b` |
 | Spark harness SHA-256 | `24929f9087593322107c1dc3f193bfac89a7c4abffcba09880ab9021618587cf` |
 | Khronos WebGL CTS | `064aaf18207438d4f6dd10c98b02b25778257b7f` |
-| CTS fixture patch SHA-256 | `846c6bea3331eb426d4c706e07734a16f560d07adf837369ddcb111f8002ca56` |
+| CTS diagnostic local patch SHA-256 | `846c6bea3331eb426d4c706e07734a16f560d07adf837369ddcb111f8002ca56` |
 | Spark | v2.1.0 / `f22236f95fdd8078f0c12e3aab479523d401daf6` |
 
 实验在实现 commit 创建前运行，因此原始 JSON 的 `gl2gpuCommit` 字段记录的是当时的
 基线 `26e17df`。实验后没有再修改受测 runtime 与 harness，而是将同一棵实现树提交为
-`8ebfd05`。上表的 bundle 和 harness SHA-256 与三机原始结果逐字节一致，是比 dirty
-worktree 的 commit 字段更强的实验身份凭据。
+`8ebfd05`。后期 diagnostic CTS 与 Spark 输出记录了上表的 bundle/harness 哈希；初始
+未修改 CTS 输出没有自包含后来补齐的全部身份字段。因此实验身份以已保留文件的 SHA-256、
+实现 commit 和后期 harness 记录共同界定，不把旧 JSON 中的单一 commit 字段泛化为完整
+远端工作树证明。
 
 ### 2.2 设备
 
@@ -84,37 +99,48 @@ lower 成 WGSL pipeline override。这个优化默认开启时，把 WebGL 的�
 `__HYD_STATIC_BOOLEAN_UNIFORM_VARIANTS === true` 时才启用。生产默认路径保留普通
 uniform 读取；上述四个定向用例随即恢复通过。
 
-### 3.2 两个 CTS snapshot fixture 问题
+Echo M4 随后只对最初的六个失败页运行未修改的 CTS，实测为 `4/6`。因此该阶段仍有
+两个 WebGL 1 identifier 相关页面需要后续工程处理；它既不是完整 suite rerun，也不能
+表述为实测 `2862/2864`。报告只保留这两页对证据阶段的影响。
 
-剩余两个失败不是应由 GL2GPU 迎合的 WebGL 行为：
+### 3.2 三阶段证据与 WebGL 1/2 范围
 
-| Fixture | snapshot 中的问题 | 审计补丁 |
-|---|---|---|
-| `shader-with-double-underscore.html` | 用来验证双下划线 identifier 可编译，但 fragment shader 写了 vertex-only 的 `attribute` | 改成合法的 vertex attribute + vertex/fragment varying，保留双下划线测试目标 |
-| `shader-with-reserved-words.html` | 同一 snapshot 的规范已允许 identifier 中出现 `__`，旧 future-word 列表仍要求 `__foo`、`foo__bar` 编译失败 | 从旧列表移除这两个条目；`gl_`、`webgl_` 规则保持不变 |
+初始未修改运行的分块方式与后期 diagnostic 不同：Echo M4 和 Mac mini M4 各由一个
+prefix block 加三个 range block 合并，Genesis M1 使用三个 shards。逐页汇总仍在三机
+上分别得到 2,864 个唯一页面、零 timeout，且失败集合完全相同。只有后期本地修改输入
+的完整 diagnostic 使用每机 15 份 report。
 
-补丁只作用于 `/tmp` 或远程 CTS checkout，不修改 GL2GPU runtime。Harness 默认拒绝
-dirty CTS worktree；只有 diff SHA-256 精确等于审计值并显式传入
-`--allow-cts-upstream-fixes true` 才允许运行。因此最终结果应准确表述为：
+| 阶段 | 范围 | 结果 | 证据含义 |
+|---|---|---:|---|
+| 原始 runtime，未修改 CTS | 三机完整运行 | 每机 2,858/2,864 | 正式初始证据；六页失败集合相同 |
+| Boolean 修复，未修改 CTS | Echo M4 原六页 targeted rerun | 4/6 | 验证四项 runtime 修复；不是完整 suite |
+| Boolean 修复，本地修改 CTS | 三机完整 diagnostic | 每机 2,864/2,864 | 仅验证修改后输入与 harness；不作为 conformance pass |
 
-> GL2GPU runtime 修复了四个真实语义回归；在 pinned CTS commit 加两处
-> fixture-only 一致性修正后，三机严格汇总均为 2864/2864。
+固定 CTS 的 2,864 个页面中，1,976 个（69%）属于 WebGL 2 / GLSL ES 3.00 范围。
+唯一的 WebGL 2 初始失败页属于四个已修复的 boolean 用例，并在 Echo targeted rerun
+中通过。因而“1,976 个 WebGL 2 页面全部通过”由三机初始完整运行加 targeted evidence
+共同支持，而不是一次 post-fix 三机完整重跑。
 
-### 3.3 最终汇总
+| Suite 范围 | 页面数 | 初始失败 | Boolean 修复后剩余 |
+|---|---:|---:|---:|
+| WebGL 1：`conformance/` | 888 | 5 | 2（targeted；完整未修改重跑待做） |
+| WebGL 2：`conformance2/` + `deqp/gles3/` | 1,976 | 1 | 0（targeted；完整未修改重跑待做） |
 
-| 设备 | 分块 | 唯一页面 | 通过 | 失败 | Timeout | 重复 | 完整 |
-|---|---:|---:|---:|---:|---:|---:|---|
-| Echo M4 | 15 | 2864 | 2864 | 0 | 0 | 0 | 是 |
-| Mac mini M4 | 15 | 2864 | 2864 | 0 | 0 | 0 | 是 |
-| Genesis M1 | 15 | 2864 | 2864 | 0 | 0 | 0 | 是 |
+### 3.3 本地补丁诊断汇总（非 conformance result）
 
-三机最终汇总还验证 CTS commit、fixture diff SHA、bundle SHA 和 harness SHA 全部
-一致。下图是三台远程/本地 headed Chrome 对 `rendering/triangle.html` 的实际截图；
-每张都显示红色三角形和 `4 PASS, 0 FAIL`。
+| 设备 | 分块 | 唯一页面 | 通过 | 失败 | Timeout | 重复 | 完整 | Conformance eligible |
+|---|---:|---:|---:|---:|---:|---:|---|---|
+| Echo M4 | 15 | 2864 | 2864 | 0 | 0 | 0 | 是 | **否** |
+| Mac mini M4 | 15 | 2864 | 2864 | 0 | 0 | 0 | 是 | **否** |
+| Genesis M1 | 15 | 2864 | 2864 | 0 | 0 | 0 | 是 | **否** |
+
+三机本地补丁汇总仍验证 CTS commit、fixture diff SHA、bundle SHA 和 harness SHA 全部
+一致，因而可用于复现与诊断；由于运行输入经过本地修改，其中的 `2864/2864` 不用于
+官方 conformance-pass 声明。
+下图是三台远程/本地 headed Chrome 对 `rendering/triangle.html` 的实际截图；每张都显示
+红色三角形和 `4 PASS, 0 FAIL`，仅证明该页面的运行与截图链路。
 
 ![三机 WebGL CTS triangle 渲染](assets/cts-triangle-three-device.png)
-
-<div class="page-break"></div>
 
 ## 4. Spark v2.1.0 实验方法
 
@@ -126,14 +152,17 @@ dirty CTS worktree；只有 diff SHA-256 精确等于审计值并显式传入
 | Bicycle cleaned | 263,648,100 B | `cameras_test.json[0]` | `b62d9502…8641` |
 | Bicycle full | 1,520,726,124 B | `cameras_test.json[0]` | `64d357cb…227` |
 
-三台机器都验证了完整 SHA-256。相机按 WebSplatter 的 OpenCV column convention
-解释；canvas backing resolution 使用 camera 原始尺寸的 1/4。相机选择、viewport、
-场景文件和 Spark module 在 WebGL/Tint 两边完全相同。
+实验记录声明三台机器使用相同的场景 SHA-256；本次证据审计重新核对了当前本地 PLY
+文件的大小与哈希，但没有保留可独立复核的逐机远端验证日志。相机按 WebSplatter 的
+OpenCV column convention 解释；canvas backing resolution 使用 camera 原始尺寸的
+1/4。相机选择、viewport、场景文件和 Spark module 在两个实验臂中完全相同。
 
 ### 4.2 测量协议
 
-- 两种模式仅改变 context 路径：原生 Spark WebGL 与 GL2GPU Tint runtime translation。
-- Tint 路径必须满足 `shaderDbRequests=0`、无 page error、无 WebGPU validation error、
+- 两个实验臂分别是原生 Spark WebGL，以及包含 GL2GPU runtime Tint translation 和
+  benchmark 显式 vertex precompute/compaction 的完整 GL2GPU 路径；两者不是只改变
+  shader translator 的编译器 A/B。
+- GL2GPU 路径必须满足 `shaderDbRequests=0`、无 page error、无 WebGPU validation error、
   无 shader translation failure，并确认 vertex precompute hook 实际 applied。
 - 每个 trial 先做 2 个 warmup batch，再做 9 个 measurement batch，每 batch 2 帧；
   指标等待 GPU 完成，不受显示器 60 Hz RAF 上限限制。
@@ -153,7 +182,7 @@ invalid 并全部丢弃；补齐 PATH 后从头重跑，以下只使用第二轮
 
 ### 5.1 Steady-state throughput
 
-| 设备 | Scene | Trials/模式 | WebGL FPS | Tint FPS | Tint/WebGL | Frame time 降低 | Tint/WebGL load |
+| 设备 | Scene | Trials/模式 | WebGL FPS | GL2GPU 完整路径 FPS | 完整路径/WebGL | Frame time 差异 | 完整路径/WebGL load |
 |---|---|---:|---:|---:|---:|---:|---:|
 | Echo M4 | Van Gogh Room | 5 | 106.952 | 136.008 | 1.272x | 21.4% | 3.76x |
 | Echo M4 | Bicycle cleaned | 5 | 103.950 | 218.103 | 2.098x | 52.3% | 1.84x |
@@ -165,19 +194,21 @@ invalid 并全部丢弃；补齐 PATH 后从头重跑，以下只使用第二轮
 | Genesis M1 | Bicycle cleaned | 5 | 88.790 | 159.936 | 1.801x | 44.5% | 1.82x |
 | Genesis M1 | Bicycle full | 3 | 25.947 | 73.842 | 2.846x | 64.9% | 1.16x |
 
-![三机 Spark Tint/WebGL FPS 比例](assets/spark-tint-webgl-ratios.png)
+![三机 Spark 完整 GL2GPU 路径与 WebGL FPS 比例](assets/spark-tint-webgl-ratios.png)
 
-场景越大，加速越稳定且越明显。Full bicycle 的原生 WebGL median frame time 为
-`30.1–38.5 ms`，Tint/precompute 为 `9.6–13.5 ms`。Van Gogh Room 的 GPU 工作量
-较小，固定提交、同步与 vertex-buffer 成本占比更高，所以收益缩小到 `1.076x–1.272x`。
+在本次三个场景的两臂数据中，场景越大，完整 GL2GPU 路径与原生 WebGL 的 throughput
+比值越高。Full bicycle 的原生 WebGL median frame time 为 `30.1–38.5 ms`，完整路径为
+`9.6–13.5 ms`；Van Gogh Room 的比值为 `1.076x–1.272x`。这是有限场景上的描述性趋势，
+并未通过 generic GL2GPU（无 precompute）arm 隔离其原因。
 
-代价主要出现在加载阶段。Tint/WebGL median load-time ratio 为 room 的
+完整 GL2GPU 路径的加载时间也更长。其相对原生 WebGL 的 median load-time ratio 为 room 的
 `3.64x–4.08x`、cleaned bicycle 的 `1.82x–1.92x`、full bicycle 的 `1.12x–1.17x`。
-这符合一次性 WGSL translation、pipeline creation、compute precompute、readback
-visible index 和 compact buffer 建立的成本模型。静态观看时间越长，steady-state
-收益越可能摊薄这部分开销；频繁变化的相机/数据则不能直接套用本表。
+完整路径在这一阶段包含 WGSL translation、pipeline creation、compute precompute、
+visible-index readback 和 compact buffer 建立；当前数据没有逐项拆分这些成本。静态
+观看时间越长，steady-state 差异越有机会摊薄额外加载时间；频繁变化的相机或数据不能
+直接套用本表。
 
-### 5.2 为什么会快
+### 5.2 路径差异与候选机制
 
 原生 Spark vertex shader 每帧、每个实例都要从 ordering/splat textures 读取数据，
 计算 clip center、2D covariance eigenvectors、屏幕空间 axes、alpha/标准差和最终 quad
@@ -188,10 +219,11 @@ offset。GL2GPU 的显式 precompute 路径做了三件事：
 3. render pipeline 只消费 compact 后的 clip/axes/RGBA/stddev instance attributes，
    每个 quad vertex 仅完成少量插值与位置重建。
 
-因此 full bicycle 同时减少了“参与 draw 的 instance 数”和“每个可见 instance 的
-重复顶点计算”。该优化是由 Spark shader 结构触发并由 benchmark 显式调用的 GL2GPU
-能力，不是 Tint WASM 对任意 GLSL 自动执行的通用 pass，也不应作为 Dawn/Tint
-compiler speedup 的证据。
+从代码结构看，这条路径旨在同时减少“参与 draw 的 instance 数”和“每个可见 instance
+的重复顶点计算”。但本次两臂实验没有在同一环境测量 generic GL2GPU（无 precompute）
+arm，因而不能把完整路径的 throughput 比值定量归因于上述任一环节。该优化由 Spark
+shader 结构触发并由 benchmark 显式调用，不是 Tint WASM 对任意 GLSL 自动执行的通用
+pass，也不能作为 Dawn/Tint compiler speedup 的证据。
 
 ## 6. 画质与视觉检查
 
@@ -201,20 +233,19 @@ compiler speedup 的证据。
 | Bicycle cleaned | 0.0010225–0.0010227 | 59.805–59.807 | 0.9999607–0.9999607 |
 | Bicycle full | 0.0028559–0.0028562 | 50.884–50.885 | 0.9999133–0.9999133 |
 
-所有 RMSE 都远低于 0.02 gate。指标之外，两台远程机器的 Tint 代表图和对应 WebGL
+所有 RMSE 都远低于 0.02 gate。指标之外，两台远程机器的完整 GL2GPU 路径代表图和对应 WebGL
 图均以 original resolution 逐张查看：房间的床、墙面、窗户和地板完整；cleaned
 bicycle 保留暗背景与局部地面；full bicycle 的真实背景、车架、长椅和前景草地一致。
 没有出现此前 texture-coordinate bug 所造成的 Y 翻转。
 
-![两台远程机器的 Spark Tint 实际渲染](assets/spark-remote-rendering-montage.png)
-
-<div class="page-break"></div>
+![两台远程机器的 Spark GL2GPU 完整路径实际渲染](assets/spark-remote-rendering-montage.png)
 
 ## 7. 与 manual GL2GPU 的关系
 
-本轮 Spark 没有 manual shader oracle，因此不能从 Spark 表直接回答“TINT WGSL 是否
+本轮 Spark 没有 manual shader reference，因此不能从 Spark 表直接回答“TINT WGSL 是否
 已经追平手写 WGSL”。同一批机器在 2026-07-14 对 GL2GPU Demo 的 headed Chrome 150
-结果提供了独立背景：
+结果提供了独立背景。每个 mode 运行 3 个 ABBA 交错 trial，预热 30 帧后汇总 120 帧，
+预设 normalized RMSE gate 为 0.02：
 
 | Workload | Aquarium Tint/manual | MotionMark Tint/manual | Sprites Tint/manual |
 |---|---:|---:|---:|
@@ -223,15 +254,27 @@ bicycle 保留暗背景与局部地面；full bicycle 的真实背景、车架�
 
 ![GL2GPU Demo Tint/manual 比例](assets/demo-tint-manual-ratios.png)
 
-所以最终判断分两层：
+| Workload | 三机、两规模 RMSE 范围 | 图像 gate |
+|---|---:|---:|
+| Aquarium | 0.001140–0.001649 | Pass |
+| MotionMark | 0.045785–0.057940 | **Fail / exploratory** |
+| Sprites | 0.001226–0.001265 | Pass |
 
-- **WebGL 语义正确性：** 本轮 runtime 修复已通过三机完整 CTS gate；Tint runtime
-  translation 不依赖手写 shader JSON。
-- **Spark 特定静态 workload：** precompute/compaction 后正确且明显快于原生 WebGL。
-- **通用 Tint shader 性能：** 尚未追平 manual oracle；仍需继续做通用 WGSL/IR、
-  pipeline/state 与 API submit 成本分析，不能用 Spark 专用数据替代。
+MotionMark harness 未记录两个浏览器进程之间共同的动画/随机状态 checkpoint，因此当前
+捕获不能区分 phase variation 与真正渲染差异。其 timing 为透明起见保留，但不进入正式的
+等价输出结论。
 
-<div class="page-break"></div>
+所以最终判断分三层：
+
+- **WebGL 语义证据：** 初始未修改 CTS 完整运行是 2,858/2,864；boolean runtime
+  修复后，Echo M4 对六页 targeted 复测为 4/6。固定 CTS 中 1,976 个 WebGL 2 页面由
+  初始完整运行和 targeted rerun 共同支持为全部通过，但尚未进行 post-fix 三机完整
+  未修改重跑。本地修改输入后的三机 2,864/2,864 只作为诊断记录。
+- **Spark 特定静态 workload：** 包含 runtime Tint translation 与显式
+  precompute/compaction 的完整 GL2GPU 路径在所测三机、三场景上通过画质 gate，且
+  throughput 高于原生 WebGL；两臂设计不能隔离 Tint 或 precompute 的增量因果贡献。
+- **通用 Tint shader 性能：** 通过图像 gate 的 Aquarium/Sprites 尚未追平 manual
+  reference；仍需继续做通用 WGSL/IR、pipeline/state 与 API submit 成本分析。
 
 ## 8. 限制与后续工作
 
@@ -242,30 +285,45 @@ bicycle 保留暗背景与局部地面；full bicycle 的真实背景、车架�
    当前只报告端到端 load ratio，没有把它们逐项拆分。
 4. Full bicycle 的性能稳定到只需 3 次，轻场景扩展到 5 次；这足以支持当前 7%–215%
    的差异方向，但不适合声明 1%–3% 的微优化。
-5. CTS 的两处 fixture patch 应单独向 Khronos CTS 上游报告；GL2GPU 不应实现与当前
-   WebGL 规范相反的 identifier 限制来迎合旧 fixture。
-6. 下一轮通用性能工作应以 Aquarium、MotionMark、Sprites 的 manual shader 为
+5. 下一轮通用性能工作应以 Aquarium、MotionMark、Sprites 的 manual shader 为
    teacher，分解 Tint WGSL 的每像素 ALU、texture LOD、local store/load、pipeline
    variant 和 CPU submit 开销，并继续用三机画质 gate 做 A/B。
+6. MotionMark 需要固定动画/随机状态后重跑；Spark 需要同一 Chrome 150 环境下成功的
+   generic GL2GPU（无 precompute）arm。早期 Genesis M1/Chrome 148 preflight 在 120 秒
+   timeout 后 renderer crash，不能作为正式 ablation。
+7. 当前结果限于 Apple Silicon、Chrome 150 和静态相机；需要在其他 GPU/后端以及动态
+   相机或数据更新频率下复现，才能判断收益的可迁移性与摊销边界。
+8. Tint build script 固定了 CMake/Emscripten flags，但当时的 Emscripten 版本未记录；
+   当前以 vendored WASM hash 作为实验身份，bit-for-bit source rebuild 仍待验证。
+9. 远端 Spark checkout 和逐机 PLY 哈希日志没有形成完整的密码学证据链；这些缺口不
+   改变已保留 JSON 的数值复算结果，但限制第三方对远端环境身份的逐字节复现。
 
 ## 9. 结果索引
 
-仓库内可移植、经过校验的精简数据：
+本报告包内可移植、经过校验的精简数据：
 
-- `reports/data/three-device-experiment-summary.json`
-- `reports/assets/cts-triangle-three-device.png`
-- `reports/assets/spark-tint-webgl-ratios.{png,svg}`
-- `reports/assets/spark-remote-rendering-montage.png`
-- `reports/assets/demo-tint-manual-ratios.{png,svg}`
+- `data/three-device-experiment-summary.json`
+- `data/demo-tint-manual-summary.json`
+- `data/cts-evidence-stages.json`
+- `data/cts-webgl2-scope.json`
+- `data/compiler-provenance.json`
+- `data/spark-generic-preflight.json`
+- `assets/cts-triangle-three-device.png`
+- `assets/spark-tint-webgl-ratios.{png,svg}`
+- `assets/spark-remote-rendering-montage.png`
+- `assets/demo-tint-manual-ratios.{png,svg}`
 
-本机未跟踪的完整原始结果：
+完整原始结果位于 `/Volumes/Code/gl2gpu-tint/output/`，不在本报告包中重复保存。关键路径：
 
-- `output/webgl-cts-20260715-local-serial/`
-- `output/multidevice-20260715/mac-mini-m4/cts-summary.json`
-- `output/multidevice-20260715/genesis-m1/cts-summary.json`
+- `output/multidevice-20260714/local/cts/results.json`
+- `output/multidevice-20260714/mac-mini-m4/cts/results.json`
+- `output/multidevice-20260714/genesis-m1/cts-chrome150/results.json`
+- `output/webgl-cts-20260715-targeted-post-fix/summary.json`
+- `output/webgl-cts-20260715-local-serial/summary.json`
 - `output/multidevice-20260715/{local,mac-mini-m4,genesis-m1}/spark-requested-scenes/`
 - `output/multidevice-20260714/`（GL2GPU Demo Tint/manual 背景实验）
 
-报告数据生成器会重新验证三机 CTS `2864/2864`、实际 trial 扩展规则、Spark 质量 gate、
-`shaderDbRequests=0` 和 vertex precompute applied 状态；任何条件不满足都会以非零状态
-退出，不生成新的报告数据。
+报告数据生成器会重新验证三机本地修改 CTS 的诊断性 `2864/2864` 计数、实际 trial
+扩展规则、Spark 质量 gate、`shaderDbRequests=0` 和 vertex precompute applied 状态。
+这一检查只验证修改后输入的数据一致性；初始未修改运行和 targeted rerun 的证据阶段
+由单独的 `cts-evidence-stages.json` 保存。任何生成器数据条件不满足都会以非零状态退出。

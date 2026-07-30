@@ -213,7 +213,8 @@ def plot_demo_ratios():
     figure.text(
         0.5,
         -0.01,
-        "Three headed Chrome 150 devices; each value is the median of three ABBA trials.",
+        "Three headed Chrome 150 devices; median of three ABBA trials. "
+        "MotionMark captures fail the RMSE gate and are exploratory.",
         ha="center",
         fontsize=9.5,
         color="#555555",
@@ -241,18 +242,19 @@ def plot_spark_ratios():
         add_labels(axis, bars)
     axis.axhline(1.0, color="#222222", linewidth=1.1, linestyle="-", label="WebGL parity")
     axis.set_xticks(x, scene_names)
-    axis.set_ylim(0, 2.85)
-    axis.set_ylabel("GL2GPU Tint / WebGL median FPS")
-    axis.set_title("Spark v2.1.0 GPU-throughput performance ratio", pad=18, fontweight="semibold")
+    axis.set_ylim(0, 3.45)
+    axis.set_ylabel("Complete GL2GPU / WebGL median FPS")
+    axis.set_title("Spark v2.1.0 complete-path performance ratio", pad=18, fontweight="semibold")
     axis.spines[["top", "right"]].set_visible(False)
     axis.grid(axis="x", visible=False)
     axis.legend(loc="upper left", ncol=2, frameon=False)
     figure.text(
         0.5,
         0.01,
-        "Static cameras; 3 trials, extended to 5 when initial frame-time CV > 5%; vertex precompute enabled.",
+        "Static cameras; complete GL2GPU includes runtime Tint plus explicit vertex precompute/compaction.\n"
+        "3 trials, extended to 5 when initial frame-time CV > 5%.",
         ha="center",
-        fontsize=9.5,
+        fontsize=9,
         color="#555555",
     )
     figure.tight_layout(rect=(0, 0.05, 1, 1))

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "ctsRevision": "064aaf18207438d4f6dd10c98b02b25778257b7f",
+  "derivedFrom": "The 2,864-page list was recomputed from the initial unmodified per-page results at output/multidevice-20260714/local/cts/results.json, output/multidevice-20260714/mac-mini-m4/cts/results.json, and output/multidevice-20260714/genesis-m1/cts-chrome150/results.json, and cross-checked against the Echo and Mac diagnostic per-page summaries. The retained Genesis diagnostic summary is aggregate-only and is not the per-page source.",
+  "method": "Pages were classified by top-level CTS path prefix: conformance/ is the WebGL 1.0 / GLSL ES 1.00 suite; conformance2/ is the WebGL 2.0 / GLSL ES 3.00 suite; deqp/ are dEQP GLES3 shader-language pages folded into the WebGL 2.0 CTS. conformance2/ and deqp/ are jointly treated as the WebGL 2-specific scope.",
+  "suiteComposition": {
+    "conformance_webgl1": 888,
+    "conformance2_webgl2": 1183,
+    "deqp_gles3_webgl2": 793,
+    "webgl2ScopeTotal": 1976,
+    "total": 2864
+  },
+  "initialFullUnmodifiedFailureClassification": {
+    "totalFailures": 6,
+    "webgl1ScopeFailures": [
+      "conformance/glsl/bugs/bool-type-cast-bug-int-float.html",
+      "conformance/uniforms/uniform-default-values.html",
+      "conformance/uniforms/uniform-values-per-program.html",
+      "conformance/glsl/misc/shader-with-reserved-words.html",
+      "conformance/glsl/misc/shader-with-double-underscore.html"
+    ],
+    "webgl2ScopeFailures": [
+      "conformance2/glsl3/bool-type-cast-bug-uint-ivec-uvec.html"
+    ]
+  },
+  "webgl2ScopeResult": {
+    "initialFullRun": {
+      "passed": 1975,
+      "total": 1976,
+      "systems": ["echo-m4", "mac-mini-m4", "genesis-m1"],
+      "note": "The sole WebGL2-scope failure (bool-type-cast-bug-uint-ivec-uvec.html) was one of the six pages that failed identically on all three systems in the initial-full-unmodified stage."
+    },
+    "afterBooleanUniformFix": {
+      "passed": 1976,
+      "total": 1976,
+      "confirmedOn": ["echo-m4"],
+      "caveat": "Confirmed only by the targeted six-page Echo M4 rerun (runtime-fix-targeted-unmodified stage in data/cts-evidence-stages.json), not by a full three-system unmodified rerun of all 1,976 WebGL2-scope pages together."
+    },
+    "remainingDefects": {
+      "webgl2Scope": 0,
+      "webgl1Scope": 2,
+      "note": "Both open items after the Boolean-uniform fix -- the reserved-identifier runtime defect and the contradictory double-underscore fixture -- are confined to the legacy conformance/ (WebGL 1 / GLSL ES 1.00) suite. Neither affects a WebGL 2 / GLSL ES 3.00 page."
+    }
+  }
+}

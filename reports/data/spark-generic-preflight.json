@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "status": "excluded preliminary run",
+  "device": "genesis-m1",
+  "browser": "Chrome 148.0.7778.217",
+  "scene": "van_gogh_room",
+  "configuration": "gl2gpu-tint without vertex precompute",
+  "validTrials": 0,
+  "totalTrials": 1,
+  "timeoutMs": 120000,
+  "failureClass": "rendering_or_timeout",
+  "observedFailures": ["wait timeout", "renderer target crash"],
+  "reasonExcluded": "Different browser and preliminary protocol; cannot serve as a same-environment ablation for the Chrome 150 study.",
+  "sourcePath": "output/multidevice-20260714/genesis-m1/spark-preflight-tint-no-precompute/results.json",
+  "sourceSha256": "958c0fcc64cec02ec6b02cc70ad10ed43772652efc0bac8d94e901f818f69e30"
+}

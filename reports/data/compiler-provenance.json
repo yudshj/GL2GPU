@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "tint": {
+    "sourceRepository": "Dawn",
+    "sourceRevision": "ab35d6efd17f1b2ba2a6a8f6e89428b26a9c71e6",
+    "sourceCheckoutState": "clean detached checkout",
+    "wasmSha256": "920ce9b2171571556e60afc759bb65e0e6fde55c2946112621ac0b670e4dc4a6",
+    "buildFlagsRecordedIn": "tools/tint-wasm/build.sh",
+    "buildTimeEmscriptenVersionCaptured": false
+  },
+  "glslang": {
+    "package": "@webgpu/glslang",
+    "version": "0.0.15",
+    "wasmSha256": "dbc5123e1dfef69e4ff360b39a5af1f0b4ebcb59468eb92de9d8ba00635a37a7"
+  },
+  "releaseBundleSha256": "8977f67c2856c1f2f4925dc5dd2f77548ed6b4d5cf0e92703a993eabcd58b498"
+}

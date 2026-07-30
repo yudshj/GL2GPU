@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "ctsRevision": "064aaf18207438d4f6dd10c98b02b25778257b7f",
+  "fixturePatchSha256": "846c6bea3331eb426d4c706e07734a16f560d07adf837369ddcb111f8002ca56",
+  "normativeBasis": {
+    "glslEs100Url": "https://registry.khronos.org/OpenGL/specs/es/2.0/GLSL_ES_Specification_1.00.pdf",
+    "glslEs100Section": "3.7 Keywords",
+    "webgl10Url": "https://registry.khronos.org/webgl/specs/latest/1.0/index.html",
+    "interpretation": "GLSL ES 1.00 reserves all identifiers containing two consecutive underscores for possible future use, and WebGL 1.0 requires shader language conformance to GLSL ES 1.00. Therefore accepting __foo or foo__bar is a GL2GPU runtime conformance failure, not a behavior that a CTS patch should normalize."
+  },
+  "stages": [
+    {
+      "name": "initial-full-unmodified",
+      "scope": "full suite on three systems",
+      "passed": 2858,
+      "total": 2864,
+      "remainingFailureClasses": {"runtime": 5, "fixture": 1},
+      "classificationNote": "Four failures are Boolean-uniform runtime regressions. shader-with-reserved-words.html is a fifth runtime failure because GL2GPU accepts identifiers containing consecutive underscores. shader-with-double-underscore.html is classified as a contradictory fixture because it expects such an identifier to compile and its fragment shader also uses the vertex-only attribute qualifier.",
+      "sourceSha256": {
+        "echo-m4": "3c046615df241066ea9617ac9f20fb860a7e6fafd0778a160f89304f63a0e9fa",
+        "mac-mini-m4": "19fcf97f48675d3de8d2e13d715acb8a45bb8390303907710c2b88e9618b65ad",
+        "genesis-m1": "14c81208240db61eafc9507a7d4761c27da6ce5db3986e1e81a8b2c487594722"
+      }
+    },
+    {
+      "name": "runtime-fix-targeted-unmodified",
+      "scope": "the six initially failing pages on Echo M4",
+      "passed": 4,
+      "total": 6,
+      "remainingFailureClasses": {"runtime": 1, "fixture": 1},
+      "classificationNote": "The Boolean-uniform fix makes four of the six targeted pages pass. The unmodified reserved-word page still exposes GL2GPU's consecutive-underscore acceptance bug, while the double-underscore page remains a contradictory fixture.",
+      "fullSuite2862IsInferredNotMeasured": true,
+      "sourceSha256": "c687d4d48e951380f7b13f8758791e72ee852eeae64e64ad54796fd85153414c"
+    },
+    {
+      "name": "runtime-fix-full-audited-fixture-patch",
+      "scope": "full locally patched suite on three systems",
+      "passed": 2864,
+      "total": 2864,
+      "conformanceEligible": false,
+      "evidenceRole": "diagnostic local-patch run only",
+      "conformanceExclusionReason": "The local fixture patch removes the valid GLSL ES 1.00 checks that __foo and foo__bar must be rejected and changes the contradictory double-underscore fixture to accept the same reserved identifier class. The resulting 2864/2864 count preserves experiment lineage but cannot support a WebGL conformance-pass claim.",
+      "sourceSha256": {
+        "echo-m4": "9bb5ab2c43d03b4904994fa5eea4d10f2239565a8d359cc75ce9c6862688a969",
+        "mac-mini-m4": "f6262d0f73a0f77fa071c2a9dc261995349732145cf3ff768253de6ca683daea",
+        "genesis-m1": "f4c51c03934d47e2ac8567c0503591d0da85b5572ef4262bad33a30f490b6b7e"
+      }
+    }
+  ]
+}
