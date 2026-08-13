@@ -1,3 +1,5 @@
+
+
 # GL2GPU: Accelerating WebGL Applications via Dynamic API Translation to WebGPU
 
 [![Paper @ WWW'25](https://img.shields.io/badge/WWW%2725-Accepted-blue)](https://doi.org/10.1145/3696410.3714785)
@@ -39,7 +41,7 @@ For architectural details, see our [WWW 2025 paper](https://doi.org/10.1145/3696
 You can integrate GL2GPU into your web application as a standalone JavaScript module:
 
 ```html
-<script src="path/to/gl2gpu.bundle.js"></script>
+<script src="dist/release/gl2gpu.js"></script>
 ```
 
 > Note: WebGPU support requires recent versions of Chrome (v114+) with WebGPU enabled.
@@ -98,4 +100,3 @@ If you use GL2GPU in your research, please cite:
    (Peking University)
 
 ------
-
